@@ -1,0 +1,36 @@
+{
+  "name": "sqlpilot",
+  "version": "0.1.0",
+  "description": "SQLPilot - 数据库 DBA AI 助手 (Oracle / OceanBase / MySQL)",
+  "main": "dist/main/index.js",
+  "author": "echodddb",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "build:main": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --target=node20 --external:electron --external:oracledb --external:mysql2 --outfile=dist/main/index.js",
+    "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --target=node20 --external:electron --outfile=dist/preload/index.js",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:preload && npm run build:renderer",
+    "start": "electron .",
+    "dev": "npm run build && electron .",
+    "pack:exe": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0",
+    "oracledb": "^6.7.0",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ssh2": "^1.15.6",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "codemirror": "^5.65.21",
+    "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vue": "^3.5.13"
+  }
+}

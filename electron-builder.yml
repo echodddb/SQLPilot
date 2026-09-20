@@ -1,0 +1,25 @@
+# electron-builder 打包配置 → Windows NSIS 安装包 (exe)
+appId: com.dba.sqlpilot
+productName: SQLPilot
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+# 生产依赖(oracledb/mysql2)由 builder 自动收进包；vue 已被 vite 打包无需分发
+asar: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: SQLPilot
+  artifactName: SQLPilot-Setup-${version}.exe

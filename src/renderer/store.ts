@@ -1,0 +1,299 @@
+import { reactive, nextTick } from 'vue'
+
+export interface UiTool {
+  name: string
+  args: string
+  status: 'running' | 'ok' | 'error'
+  result?: string
+}
+
+export interface UiMsg {
+  id: number
+  role: 'user' | 'assistant' | 'reasoning' | 'error'
+  text: string
+  tools: UiTool[]
+  /** 已追加过工具卡片，后续文本需另起新消息 */
+  closed?: boolean
+}
+
+export interface SessionMeta {
+  id: string
+  title: string
+  mode: string
+  providerId: string | null
+  projectId: string | null
+  effort: string | null
+}
+
+export interface UiSession {
+  meta: SessionMeta
+  msgs: UiMsg[]
+  running: boolean
+}
+
+let msgSeq = 0
+
+/** Vue reactive Proxy 无法跨 contextBridge/IPC（结构化克隆）——调用桥接 API 前先纯对象化 */
+export function toPlain<T>(v: T): T {
+  if (v === null || v === undefined || typeof v !== 'object') return v
+  return JSON.parse(JSON.stringify(v))
+}
+
+export const store = reactive({
+  ready: false,
+  view: 'chat' as 'chat' | 'settings' | 'objects',
+  cfg: null as any,
+  sessions: {} as Record<string, UiSession>,
+  sessionOrder: [] as string[],
+  currentId: '' as string,
+  /** 确认请求队列：多会话并发时依次处理，互不覆盖 */
+  confirmQueue: [] as { requestId: string; sessionId?: string; tool: string; conn: string; sql: string; kind: string; risk: number }[],
+  secretsAvailable: false,
+  // 侧边栏 schema 树状态: connId -> { expanded, schemas?, loading, tables, opened }
+  tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
+  drafts: {} as Record<string, string>,
+  /** 对象浏览器：跨组件打开对象的请求（Sidebar 双击 → ObjectsView 监听），n 为序号保证重复打开同一对象也能触发 */
+  objOpen: null as { connId: string; schema: string; table: string; n: number } | null
+})
+
+let objSeq = 0
+
+/** 在对象浏览器中打开一张表/视图（自动切换视图） */
+export function openObject(connId: string, schema: string, table: string): void {
+  store.view = 'objects'
+  store.objOpen = { connId, schema, table, n: ++objSeq }
+}
+
+export function curSession(): UiSession {
+  return store.sessions[store.currentId]
+}
+
+export function curDraft(): string {
+  return store.drafts[store.currentId] || ''
+}
+
+function ensureSessionRecord(meta: SessionMeta): UiSession {
+  if (!store.sessions[meta.id]) {
+    store.sessions[meta.id] = { meta, msgs: [], running: false }
+    if (!store.sessionOrder.includes(meta.id)) store.sessionOrder.push(meta.id)
+  } else {
+    store.sessions[meta.id].meta = meta
+  }
+  return store.sessions[meta.id]
+}
+
+function lastMsgOf(s: UiSession): UiMsg | undefined {
+  return s.msgs[s.msgs.length - 1]
+}
+
+/** 把主进程持久化的会话历史（含工具调用与结果）还原为界面消息 */
+function historyToUi(history: any[]): UiMsg[] {
+  const out: UiMsg[] = []
+  const mk = (role: UiMsg['role'], text: string, tools: UiTool[] = []): UiMsg => ({ id: ++msgSeq, role, text, tools })
+  for (const m of history) {
+    if (m.role === 'user') {
+      out.push(mk('user', m.content || ''))
+    } else if (m.role === 'assistant') {
+      if (m.content) out.push(mk('assistant', m.content))
+      if (m.toolCalls?.length) {
+        const tools: UiTool[] = m.toolCalls.map((tc: any) => {
+          const res = history.find((x: any) => x.role === 'tool' && x.toolCallId === tc.id)
+          const result = res?.content ?? ''
+          let ok = true
+          try { ok = !JSON.parse(result)?.error } catch { ok = true }
+          return { name: tc.name, args: tc.args, status: ok ? ('ok' as const) : ('error' as const), result }
+        })
+        const last = out[out.length - 1]
+        if (last && last.role === 'assistant' && last.tools.length === 0 && !last.closed) {
+          last.tools.push(...tools)
+          last.closed = true
+        } else {
+          out.push({ ...mk('assistant', ''), tools, closed: true })
+        }
+      }
+    }
+  }
+  return out
+}
+
+export async function init(): Promise<void> {
+  store.cfg = await window.sqlpilot.getConfig()
+  const info = await window.sqlpilot.appInfo()
+  store.secretsAvailable = info.secretsAvailable
+
+  // 恢复会话列表与各会话历史
+  const list = await window.sqlpilot.listSessions()
+  if (!list.length) {
+    const s = await window.sqlpilot.newSession()
+    list.push(s)
+  }
+  for (const meta of list) {
+    const rec = ensureSessionRecord(meta)
+    try {
+      const hist = await window.sqlpilot.getHistory(meta.id)
+      if (hist.ok && Array.isArray(hist.messages)) rec.msgs = historyToUi(hist.messages)
+    } catch { /* 忽略单会话恢复失败 */ }
+  }
+  store.currentId = list[list.length - 1].id
+
+  window.sqlpilot.onAgentEvent((ev: any) => {
+    const s = store.sessions[ev.sessionId]
+    if (!s) return
+    if (ev.type === 'text') {
+      const last = lastMsgOf(s)
+      if (!last || last.role !== 'assistant' || last.tools.length > 0 || last.closed) {
+        s.msgs.push({ id: ++msgSeq, role: 'assistant', text: '', tools: [] })
+      }
+      lastMsgOf(s)!.text += ev.text
+    } else if (ev.type === 'reasoning') {
+      const last = lastMsgOf(s)
+      if (!last || last.role !== 'reasoning') {
+        s.msgs.push({ id: ++msgSeq, role: 'reasoning', text: '', tools: [] })
+      }
+      lastMsgOf(s)!.text += ev.text
+    } else if (ev.type === 'tool-start') {
+      const last = lastMsgOf(s)
+      const target =
+        last && last.role === 'assistant'
+          ? last
+          : s.msgs[s.msgs.push({ id: ++msgSeq, role: 'assistant', text: '', tools: [] }) - 1]
+      target.tools.push({ name: ev.tool, args: ev.args, status: 'running' })
+      target.closed = true
+    } else if (ev.type === 'tool-end') {
+      for (let i = s.msgs.length - 1; i >= 0; i--) {
+        const m = s.msgs[i]
+        for (let j = m.tools.length - 1; j >= 0; j--) {
+          if (m.tools[j].name === ev.tool && m.tools[j].status === 'running') {
+            m.tools[j].status = ev.ok ? 'ok' : 'error'
+            m.tools[j].result = ev.result
+            i = -1
+            break
+          }
+        }
+      }
+    } else if (ev.type === 'session-updated') {
+      const target = store.sessions[ev.sessionId]
+      if (target) target.meta = ev.meta
+    } else if (ev.type === 'done') {
+      s.running = false
+      if (ev.note) s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.note, tools: [] })
+    } else if (ev.type === 'error') {
+      s.running = false
+      s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.error, tools: [] })
+    }
+  })
+
+  window.sqlpilot.onConfirm((req: any) => {
+    store.confirmQueue.push(req)
+  })
+
+  window.sqlpilot.onConfirmExpired(({ requestId }: any) => {
+    store.confirmQueue = store.confirmQueue.filter((c) => c.requestId !== requestId)
+  })
+
+  store.ready = true
+}
+
+export async function sendMessage(text: string): Promise<void> {
+  const s = curSession()
+  if (!s || s.running || !text.trim()) return
+  s.msgs.push({ id: ++msgSeq, role: 'user', text, tools: [] })
+  s.running = true
+  await window.sqlpilot.sendChat(store.currentId, text)
+  // 刷新标题（首条消息截断）
+  const list = await window.sqlpilot.listSessions()
+  for (const m of list) if (store.sessions[m.id]) store.sessions[m.id].meta = m
+  await nextTick()
+}
+
+export async function newChat(): Promise<void> {
+  await window.sqlpilot.resetChat(store.currentId)
+  curSession().msgs = []
+}
+
+export async function stop(): Promise<void> {
+  await window.sqlpilot.stopChat(store.currentId)
+}
+
+export async function createSession(): Promise<void> {
+  const meta = await window.sqlpilot.newSession()
+  ensureSessionRecord(meta)
+  store.currentId = meta.id
+}
+
+/** 在指定项目下新建会话（会话必须挂项目） */
+export async function createSessionInProject(projectId: string): Promise<void> {
+  const meta = await window.sqlpilot.newSession()
+  const r = await window.sqlpilot.updateSession(meta.id, { projectId })
+  ensureSessionRecord((r as any).session || { ...meta, projectId })
+  store.currentId = meta.id
+}
+
+export async function removeSession(id: string): Promise<void> {
+  if (Object.keys(store.sessions).length <= 1) {
+    // 最后一个会话：只清空不删除
+    await newChat()
+    return
+  }
+  await window.sqlpilot.deleteSession(id)
+  delete store.sessions[id]
+  store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
+  if (store.currentId === id) store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
+}
+
+export async function setSessionMode(mode: string): Promise<void> {
+  const s = curSession()
+  if (!s || s.meta.mode === mode) return
+  if (mode === 'yolo' || mode === 'session') {
+    const label = mode === 'yolo' ? '完全放开（所有操作自动执行，含高危）' : '会话放开（普通写操作本会话自动执行）'
+    if (!window.confirm(`确认将本会话切换到「${label}」？（仅影响当前会话）`)) return
+  }
+  s.meta.mode = mode
+  await window.sqlpilot.updateSession(store.currentId, { mode })
+}
+
+export async function setSessionProvider(providerId: string): Promise<void> {
+  const s = curSession()
+  if (!s) return
+  s.meta.providerId = providerId || null
+  await window.sqlpilot.updateSession(store.currentId, { providerId: providerId || null })
+}
+
+/** 会话级思考级别：'' = 跟随默认，off/low/medium/high 显式覆盖 */
+export async function setSessionEffort(effort: string): Promise<void> {
+  const s = curSession()
+  if (!s) return
+  s.meta.effort = effort || null
+  await window.sqlpilot.updateSession(store.currentId, { effort: effort || null })
+}
+
+export async function bindSessionProject(projectId: string | null): Promise<void> {
+  const s = curSession()
+  if (!s) return
+  s.meta.projectId = projectId
+  await window.sqlpilot.updateSession(store.currentId, { projectId })
+}
+
+/** 计划模式：批准最后一版计划并切到确认执行模式开始执行 */
+export async function approvePlan(): Promise<void> {
+  const s = curSession()
+  if (!s || s.meta.mode !== 'plan') return
+  s.meta.mode = 'confirm'
+  await window.sqlpilot.updateSession(store.currentId, { mode: 'confirm' })
+  await sendMessage('批准以上计划，请严格按计划开始执行。')
+}
+
+export const MODES = [
+  { key: 'plan', label: '计划', tip: '只读探索并输出执行计划，批准后才动手' },
+  { key: 'readonly', label: '只读', tip: '仅允许只读查询' },
+  { key: 'confirm', label: '确认执行', tip: '写操作需逐次确认' },
+  { key: 'session', label: '会话放开', tip: '普通写本会话自动，高危仍确认' },
+  { key: 'yolo', label: '完全放开', tip: '全部自动执行（危险）' }
+]
+
+export const TYPE_LABELS: Record<string, string> = {
+  oracle: 'Oracle',
+  mysql: 'MySQL',
+  'ob-mysql': 'OceanBase·MySQL租户',
+  'ob-oracle': 'OceanBase·Oracle租户'
+}
