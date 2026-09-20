@@ -30,7 +30,8 @@ declare global {
       sftpDownload(serverId: string, remotePath: string, localDir: string): Promise<{ ok: boolean; local?: string; error?: string }>
       sftpUpload(serverId: string, remoteDir: string): Promise<{ ok: boolean; canceled?: boolean; count?: number; error?: string }>
       showInFolder(p: string): Promise<{ ok: boolean }>
-      sqlRun(connId: string, sql: string): Promise<{ ok: boolean; result?: any; error?: string }>
+      sqlRun(connId: string, sql: string, sessionKey?: string): Promise<{ ok: boolean; result?: any; error?: string }>
+      sqlCloseSession(connId: string, sessionKey: string): Promise<{ ok: boolean }>
       connInfo(id: string): Promise<{ ok: boolean; sections?: { title: string; rows: { k: string; v: string }[] }[]; tables?: { title: string; columns: string[]; rows: any[][] }[]; error?: string }>
       activeSessions(id: string, columns?: string[]): Promise<{ ok: boolean; available?: string[]; columns?: string[]; rows?: any[][]; ms?: number; note?: string; error?: string }>
       objData(p: { connId: string; schema: string; table: string; page?: number; pageSize?: number; where?: string; orderBy?: string; orderDir?: string }): Promise<{ ok: boolean; columns?: string[]; rows?: any[][]; total?: number; ms?: number; error?: string }>
@@ -47,6 +48,9 @@ declare global {
       openExternal(url: string): Promise<{ ok: boolean }>
       openFolder(p: string): Promise<{ ok: boolean }>
       replyConfirm(requestId: string, decision: string): Promise<{ ok: boolean }>
+      replyLlmPreview(requestId: string, ok: boolean): Promise<{ ok: boolean }>
+      onLlmPreview(cb: (p: { requestId: string; sessionId?: string; url: string; body: any }) => void): () => void
+      onLlmPreviewExpired(cb: (p: { requestId: string }) => void): () => void
       getAudit(): Promise<any[]>
       appInfo(): Promise<{ secretsAvailable: boolean; version: string }>
       onAgentEvent(cb: (ev: any) => void): () => void

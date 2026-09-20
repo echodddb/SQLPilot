@@ -29,6 +29,8 @@ export interface UiSession {
   meta: SessionMeta
   msgs: UiMsg[]
   running: boolean
+  /** 上下文占用徽标：est=估算 tokens，windowK=模型窗口，usage=最近一次真实计量 */
+  ctx?: { est: number; windowK: number; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }
 }
 
 let msgSeq = 0
@@ -48,12 +50,16 @@ export const store = reactive({
   currentId: '' as string,
   /** 确认请求队列：多会话并发时依次处理，互不覆盖 */
   confirmQueue: [] as { requestId: string; sessionId?: string; tool: string; conn: string; sql: string; kind: string; risk: number }[],
+  /** LLM 发送前预览队列（开启 previewLlm 时每次请求弹出） */
+  previewQueue: [] as { requestId: string; sessionId?: string; url: string; body: any }[],
   secretsAvailable: false,
   // 侧边栏 schema 树状态: connId -> { expanded, schemas?, loading, tables, opened }
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
   drafts: {} as Record<string, string>,
   /** 对象浏览器：跨组件打开对象的请求（Sidebar 双击 → ObjectsView 监听），n 为序号保证重复打开同一对象也能触发 */
-  objOpen: null as { connId: string; schema: string; table: string; n: number } | null
+  objOpen: null as { connId: string; schema: string; table: string; n: number } | null,
+  /** 底部工作台面板：终端 / SQL 控制台（ChatView 快捷按钮控制） */
+  workbench: null as 'terminal' | 'sql' | null
 })
 
 let objSeq = 0
@@ -174,6 +180,12 @@ export async function init(): Promise<void> {
     } else if (ev.type === 'session-updated') {
       const target = store.sessions[ev.sessionId]
       if (target) target.meta = ev.meta
+    } else if (ev.type === 'context') {
+      const target = store.sessions[ev.sessionId]
+      if (target) {
+        // usage 只在响应后的事件携带；估算事件到达时保留上一次的真实计量
+        target.ctx = { est: ev.est, windowK: ev.windowK, usage: ev.usage || target.ctx?.usage }
+      }
     } else if (ev.type === 'done') {
       s.running = false
       if (ev.note) s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.note, tools: [] })
@@ -189,6 +201,14 @@ export async function init(): Promise<void> {
 
   window.sqlpilot.onConfirmExpired(({ requestId }: any) => {
     store.confirmQueue = store.confirmQueue.filter((c) => c.requestId !== requestId)
+  })
+
+  window.sqlpilot.onLlmPreview((p: any) => {
+    store.previewQueue.push(p)
+  })
+
+  window.sqlpilot.onLlmPreviewExpired(({ requestId }: any) => {
+    store.previewQueue = store.previewQueue.filter((c) => c.requestId !== requestId)
   })
 
   store.ready = true
@@ -281,6 +301,12 @@ export async function approvePlan(): Promise<void> {
   s.meta.mode = 'confirm'
   await window.sqlpilot.updateSession(store.currentId, { mode: 'confirm' })
   await sendMessage('批准以上计划，请严格按计划开始执行。')
+}
+
+/** 在当前会话里追加一条系统提示（功能开关提醒等，不进入真实对话历史） */
+export function pushNotice(text: string): void {
+  const s = store.sessions[store.currentId]
+  if (s) s.msgs.push({ id: ++msgSeq, role: 'error', text, tools: [] })
 }
 
 export const MODES = [

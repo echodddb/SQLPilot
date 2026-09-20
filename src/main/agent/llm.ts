@@ -7,10 +7,11 @@ export interface LlmStreamEvents {
   onReasoning?: (t: string) => void
 }
 
-/** 外部中断信号（用户点"停止"时触发）；effort 为会话级思考级别覆盖 */
+/** 外部中断信号（用户点"停止"时触发）；effort 为会话级思考级别覆盖；preview 为发送前预览钩子（false=用户取消） */
 export interface LlmCallOptions {
   signal?: AbortSignal
   effort?: import('../types').ThinkingEffort
+  preview?: (url: string, body: any) => Promise<boolean>
 }
 
 export interface LlmResponse {
@@ -20,6 +21,15 @@ export interface LlmResponse {
   /** Anthropic 思考块原文与签名：带工具调用的轮次回传历史时必须原样携带，否则 API 报错 */
   thinking?: string
   thinkingSig?: string
+  /** 提供商返回的真实计量（部分厂商流式不含 usage 则为 undefined） */
+  usage?: LlmUsage
+}
+
+export interface LlmUsage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
 }
 
 const HTTP_TIMEOUT_MS = 300_000
@@ -91,7 +101,7 @@ function toOpenAiMessages(system: string, history: ChatMsg[]): any[] {
   return out
 }
 
-async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort): Promise<LlmResponse> {
+async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort, preview?: LlmCallOptions['preview']): Promise<LlmResponse> {
   const url = trimSlash(p.baseUrl) + '/chat/completions'
   const body: any = {
     model: p.model,
@@ -102,6 +112,12 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
     body.tools = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }))
   }
   applyOpenAiThinking(body, findVendor(p.vendor).thinkingStyle, effortOverride ?? p.effort)
+  if (preview) {
+    const go = await preview(url, body)
+    if (!go) throw new Error('用户在发送前预览中取消了请求')
+  }
+  // 请求流式 usage（各家兼容性不一：不识别 stream_options 报 400 时去掉重试一次）
+  body.stream_options = { include_usage: true }
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS)
   const onExternalAbort = () => ctrl.abort()
@@ -114,15 +130,39 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
       body: JSON.stringify(body),
       signal: ctrl.signal
     })
-    if (!res.ok) throw await httpError(res)
+    if (!res.ok) {
+      const err = await httpError(res)
+      if (res.status === 400 && /stream_options/i.test(err.message)) {
+        delete body.stream_options
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${p.apiKey}` },
+          body: JSON.stringify(body),
+          signal: ctrl.signal
+        })
+        if (!res.ok) throw await httpError(res)
+      } else {
+        throw err
+      }
+    }
 
     let content = ''
     let reasoning = ''
+    let usage: LlmUsage | undefined
     const tcMap = new Map<number, { id: string; name: string; args: string }>()
     let stopReason: string | undefined
 
     await readSse(res, (j: any) => {
       const ch = j?.choices?.[0]
+      // 流式 usage 一般在最后一个 chunk（需 stream_options.include_usage）
+      if (j?.usage && (j.usage.prompt_tokens != null || j.usage.completion_tokens != null)) {
+        usage = {
+          input: Number(j.usage.prompt_tokens ?? 0),
+          output: Number(j.usage.completion_tokens ?? 0),
+          cacheRead: Number(j.usage.prompt_tokens_details?.cached_tokens ?? j.usage.prompt_cache_hit_tokens ?? 0),
+          cacheWrite: 0
+        }
+      }
       if (!ch) return
       const d = ch.delta || {}
       if (typeof d.content === 'string' && d.content) {
@@ -146,7 +186,7 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
       if (ch.finish_reason) stopReason = ch.finish_reason
     })
 
-    return { content, toolCalls: [...tcMap.values()].filter((t) => t.name), stopReason }
+    return { content, toolCalls: [...tcMap.values()].filter((t) => t.name), stopReason, usage }
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onExternalAbort)
@@ -195,7 +235,7 @@ function toAnthropicMessages(history: ChatMsg[], includeThinking: boolean): any[
   return out
 }
 
-async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort): Promise<LlmResponse> {
+async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort, preview?: LlmCallOptions['preview']): Promise<LlmResponse> {
   const url = trimSlash(p.baseUrl) + '/v1/messages'
   const think = anthropicThinking(findVendor(p.vendor).thinkingStyle, effortOverride ?? p.effort)
   const body: any = {
@@ -211,6 +251,10 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
   if (think) {
     body.thinking = think
     body.max_tokens = 8192 + think.budget_tokens
+  }
+  if (preview) {
+    const go = await preview(url, body)
+    if (!go) throw new Error('用户在发送前预览中取消了请求')
   }
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS)
@@ -233,10 +277,24 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
     let content = ''
     let thinking = ''
     let thinkingSig = ''
+    let usage: LlmUsage | undefined
     const toolBlocks = new Map<number, { id: string; name: string; args: string }>()
     await readSse(res, (j: any) => {
       const t = j?.type
-      if (t === 'content_block_start') {
+      if (t === 'message_start') {
+        // usage 随 message_start 下发（含缓存命中字段）
+        const u = j.message?.usage
+        if (u) {
+          usage = {
+            input: Number(u.input_tokens ?? 0),
+            output: Number(u.output_tokens ?? 0),
+            cacheRead: Number(u.cache_read_input_tokens ?? 0),
+            cacheWrite: Number(u.cache_creation_input_tokens ?? 0)
+          }
+        }
+      } else if (t === 'message_delta' && usage && j.usage?.output_tokens != null) {
+        usage.output = Number(j.usage.output_tokens)
+      } else if (t === 'content_block_start') {
         const b = j.content_block
         if (b?.type === 'tool_use') toolBlocks.set(j.index, { id: b.id, name: b.name, args: '' })
       } else if (t === 'content_block_delta') {
@@ -256,7 +314,7 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
       }
     })
 
-    return { content, toolCalls: [...toolBlocks.values()].filter((x) => x.name), thinking: thinking || undefined, thinkingSig: thinkingSig || undefined }
+    return { content, toolCalls: [...toolBlocks.values()].filter((x) => x.name), thinking: thinking || undefined, thinkingSig: thinkingSig || undefined, usage }
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onExternalAbort)
@@ -274,7 +332,7 @@ export async function callLlm(
   options: LlmCallOptions = {}
 ): Promise<LlmResponse> {
   if (provider.protocol === 'anthropic') {
-    return callAnthropic(provider, system, history, tools, ev, options.signal, options.effort)
+    return callAnthropic(provider, system, history, tools, ev, options.signal, options.effort, options.preview)
   }
-  return callOpenAi(provider, system, history, tools, ev, options.signal, options.effort)
+  return callOpenAi(provider, system, history, tools, ev, options.signal, options.effort, options.preview)
 }

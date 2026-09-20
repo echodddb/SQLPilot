@@ -40,6 +40,11 @@
 
     <div class="chat-input-wrap">
       <div class="chat-input">
+        <div class="quick-bar">
+          <button class="quick-btn" :class="{ on: store.workbench === 'terminal' }" title="SSH 终端（当前会话项目的服务器）" @click="store.workbench = store.workbench === 'terminal' ? null : 'terminal'">🖥 终端</button>
+          <button class="quick-btn" :class="{ on: store.workbench === 'sql' }" title="SQL 控制台（查询会话窗口 / 数据库信息）" @click="store.workbench = store.workbench === 'sql' ? null : 'sql'">🗄 SQL</button>
+          <button class="quick-btn" :class="{ on: store.view === 'objects' }" title="对象浏览器（双击表看数据/结构/DDL）" @click="store.view = store.view === 'objects' ? 'chat' : 'objects'">🗃 对象</button>
+        </div>
         <textarea
           v-model="store.drafts[store.currentId]"
           placeholder="描述任务，如：查一下 LIS 库里最近一周的检验申请量，按天汇总"
@@ -48,6 +53,12 @@
         ></textarea>
         <div class="row">
           <span class="hint">
+            <span
+              v-if="curSession().ctx"
+              class="ctx-badge"
+              :class="ctxLevel"
+              :title="ctxTitle"
+            >📊 {{ fmtTok(curSession().ctx!.est) }}/{{ curSession().ctx!.windowK }}K · {{ ctxPct }}%</span>
             <select
               class="effort-select"
               :value="curSession().meta.effort ?? ''"
@@ -252,6 +263,43 @@ function onEnterKey(e: KeyboardEvent) {
   send()
 }
 
+// ---------- 上下文占用徽标 ----------
+function fmtTok(n: number): string {
+  return n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
+}
+const ctxPct = computed(() => {
+  const c = curSession().ctx
+  if (!c) return 0
+  return Math.min(100, Math.round((c.est / (c.windowK * 1000)) * 100))
+})
+const ctxLevel = computed(() => {
+  const p = ctxPct.value
+  return p >= 80 ? 'danger' : p >= 60 ? 'warn' : 'ok'
+})
+const ctxTitle = computed(() => {
+  const c = curSession().ctx
+  if (!c) return ''
+  const lines = [
+    `下次请求估算：≈${fmtTok(c.est)} tokens（系统提示词 + 全部对话历史）`,
+    `模型上下文窗口：${c.windowK}K · 已用 ${ctxPct.value}%`
+  ]
+  const u = c.usage
+  if (u) {
+    const io: string[] = []
+    if (u.input > 0) io.push(`输入 ${u.input.toLocaleString()} tok`)
+    if (u.output > 0) io.push(`输出 ${u.output.toLocaleString()} tok`)
+    lines.push(`最近请求（真实计量）：${io.join(' · ') || '无数据'}${u.input > 0 ? '' : `（厂商未回传输入量，输入按估算 ≈${fmtTok(c.est)}）`}`)
+    if (u.cacheRead || u.cacheWrite) {
+      lines.push(`缓存：命中 ${u.cacheRead.toLocaleString()} tok · 写入 ${u.cacheWrite.toLocaleString()} tok${u.cacheRead ? `（命中率 ${Math.round((u.cacheRead / Math.max(1, u.input + u.cacheRead)) * 100)}%）` : ''}`)
+    } else {
+      lines.push('缓存：本厂商未返回缓存命中数据')
+    }
+  } else {
+    lines.push('最近请求：该厂商流式响应未返回用量数据，仅显示估算值')
+  }
+  return lines.join('\n')
+})
+
 async function send() {
   const text = (store.drafts[store.currentId] || '').trim()
   if (!text || curSession().running) return
@@ -294,4 +342,19 @@ watch(msgSignature, async () => {
   background: var(--bg-card);
 }
 .plan-actions .hint { font-size: 11.5px; color: var(--text-dim); }
+.ctx-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 99px; cursor: default;
+  font-family: var(--mono); white-space: nowrap;
+}
+.ctx-badge.ok { background: var(--accent-dim); color: var(--accent); }
+.ctx-badge.warn { background: var(--yellow-dim, rgba(200, 160, 40, 0.15)); color: var(--yellow); }
+.ctx-badge.danger { background: var(--red-dim); color: var(--red); font-weight: 700; }
+/* 输入框上方快捷按钮（终端/SQL/对象）：小号、轻量 */
+.quick-bar { display: flex; gap: 4px; margin-bottom: 6px; }
+.quick-btn {
+  border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim);
+  border-radius: 7px; font-size: 11px; padding: 2px 9px; cursor: pointer; font-family: inherit;
+}
+.quick-btn:hover { color: var(--accent); border-color: var(--accent); }
+.quick-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
 </style>

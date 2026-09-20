@@ -20,6 +20,39 @@ import type { ApprovalDecision, ApprovalRequest } from './tools'
 let win: BrowserWindow | null = null
 const pendingApprovals = new Map<string, { resolve: (d: ApprovalDecision) => void; sessionId: string }>()
 let approvalSeq = 0
+// LLM 发送前预览（按会话归属，停止/退出时兜底取消）
+const pendingPreviews = new Map<string, { resolve: (ok: boolean) => void; sessionId: string }>()
+let previewSeq = 0
+
+function previewLlmRequest(url: string, body: any, sessionId: string): Promise<boolean> {
+  if (!loadConfig().previewLlm) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const requestId = `pv_${++previewSeq}`
+    pendingPreviews.set(requestId, { resolve, sessionId })
+    if (win && !win.isDestroyed()) {
+      try {
+        win.webContents.send('llm:preview', { requestId, sessionId, url, body })
+      } catch {
+        pendingPreviews.delete(requestId)
+        resolve(false)
+        return
+      }
+    } else {
+      pendingPreviews.delete(requestId)
+      resolve(false)
+      return
+    }
+    // 超时 5 分钟未响应视为取消
+    setTimeout(() => {
+      const p = pendingPreviews.get(requestId)
+      if (p) {
+        pendingPreviews.delete(requestId)
+        p.resolve(false)
+        try { win?.webContents.send('llm:preview:expired', { requestId }) } catch { /* 忽略 */ }
+      }
+    }, 5 * 60_000)
+  })
+}
 
 export function bindWindow(w: BrowserWindow): void {
   win = w
@@ -184,7 +217,8 @@ export function registerIpc(): void {
     // 数据库连接是可选能力：无连接时仍可对话（文件工具/技能可用），涉及数据库时模型会提示
     runTurn(sessionId, text, provider, cfg.instantClientDir, {
       emit,
-      requestApproval
+      requestApproval,
+      previewLlm: (url, body) => previewLlmRequest(url, body, sessionId)
     })
     return { ok: true }
   })
@@ -200,12 +234,18 @@ export function registerIpc(): void {
 
   ipcMain.handle('chat:stop', (_e, { sessionId }: { sessionId: string }) => {
     cancelSession(sessionId)
-    // 只拒绝本会话挂起的确认，不影响其他并发会话
+    // 只拒绝本会话挂起的确认与预览，不影响其他并发会话
     for (const [requestId, p] of pendingApprovals) {
       if (p.sessionId !== sessionId) continue
       p.resolve('deny')
       pendingApprovals.delete(requestId)
       win?.webContents.send('agent:confirm:expired', { requestId })
+    }
+    for (const [requestId, p] of pendingPreviews) {
+      if (p.sessionId !== sessionId) continue
+      p.resolve(false)
+      pendingPreviews.delete(requestId)
+      win?.webContents.send('llm:preview:expired', { requestId })
     }
     return { ok: true }
   })
@@ -370,23 +410,34 @@ export function registerIpc(): void {
   })
 
   // ---------- SQL 控制台（人工执行，走审计，不做 agent 门控） ----------
-  ipcMain.handle('sql:run', async (_e, { connId, sql }: { connId: string; sql: string }) => {
+  // sessionKey = 查询窗口 id：每个窗口独立数据库会话，事务互不可见（Navicat 行为）
+  ipcMain.handle('sql:run', async (_e, { connId, sql, sessionKey }: { connId: string; sql: string; sessionKey?: string }) => {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === connId)
     if (!profile) return { ok: false, error: '连接不存在' }
     const v = classifySql(sql)
+    const isOracle = profile.type === 'oracle'
+    // 按数据库特性处理事务：Oracle 本身无自动提交——控制台 DML 保持事务打开，
+    // 由用户显式 COMMIT/ROLLBACK（DDL 在 Oracle 内部隐式提交，属数据库自身行为）；
+    // MySQL/OB 连接为原生 autocommit，无需额外提交
     try {
-      const adapter = getAdapter(profile, cfg.instantClientDir)
+      const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
       const r = await adapter.query(sql, 500, 60_000)
-      await adapter.commit?.()
       appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', conn: profile.name, detail: `[控制台] ${sql.slice(0, 400)}`, mode: 'human' })
-      // 写语句没有结果网格，给一条明确的成功消息（DML 带影响行数，Oracle 说明已提交）
+      const head = (sql.trim().replace(/^(--[^\n]*\r?\n|\/\*[\s\S]*?\*\/|\s)+/, '').match(/^[a-zA-Z]+/)?.[0] || '').toUpperCase()
+      // 写语句没有结果网格，给一条明确的成功/事务状态消息
       let message: string | undefined
-      if (!v.ok) {
+      if (head === 'COMMIT') {
+        message = '已提交(COMMIT)'
+      } else if (head === 'ROLLBACK') {
+        message = '已回滚(ROLLBACK)'
+      } else if (!v.ok) {
         if (v.kind === 'dml' || v.kind === 'multi') {
-          message = `影响 ${r.rowCount} 行${profile.type === 'oracle' ? '，已提交(COMMIT)' : ''}`
+          message = isOracle
+            ? `影响 ${r.rowCount} 行 · 事务未提交（COMMIT 生效 / ROLLBACK 回滚）`
+            : `影响 ${r.rowCount} 行`
         } else {
-          message = `执行成功（${v.kind.toUpperCase()}）`
+          message = '执行成功'
         }
       }
       return {
@@ -399,9 +450,18 @@ export function registerIpc(): void {
     }
   })
 
+  // 关闭查询窗口时释放其独立会话（未提交事务随断连由数据库回滚）
+  ipcMain.handle('sql:closeSession', (_e, { connId, sessionKey }: { connId: string; sessionKey: string }) => {
+    dropAdapter(connId, sessionKey)
+    return { ok: true }
+  })
+
   // ---------- 对象浏览器（Navicat 式只读浏览：数据分页/结构/DDL） ----------
   const quoteIdent = (isOracle: boolean, name: string): string =>
     isOracle ? `"${name.replace(/"/g, '""')}"` : `\`${name.replace(/`/g, '``')}\``
+
+  // 行数缓存：同表同条件 10 秒内翻页复用 COUNT，避免大表反复全表计数
+  const objCountCache = new Map<string, { total: number; at: number }>()
 
   ipcMain.handle('obj:data', async (_e, { connId, schema, table, page, pageSize, where, orderBy, orderDir }: {
     connId: string; schema: string; table: string; page?: number; pageSize?: number; where?: string; orderBy?: string; orderDir?: string
@@ -426,17 +486,25 @@ export function registerIpc(): void {
       const sql = isOracle
         ? `SELECT * FROM (SELECT t.*, ROWNUM rn FROM (SELECT * FROM ${ident}${whereSql}${orderSql}) t WHERE ROWNUM <= ${hi}) WHERE rn > ${lo}`
         : `SELECT * FROM ${ident}${whereSql}${orderSql} LIMIT ${lo}, ${size}`
-      const [data, cnt] = await Promise.all([
-        adapter.query(sql, size, 60_000),
-        adapter.query(`SELECT COUNT(*) AS CNT FROM ${ident}${whereSql}`, 1, 60_000)
-      ])
+      const data = await adapter.query(sql, size, 60_000)
+      const cacheKey = `${connId}|${s}|${t}|${cond}`
+      let total: number
+      const cached = objCountCache.get(cacheKey)
+      if (cached && Date.now() - cached.at < 10_000) {
+        total = cached.total
+      } else {
+        const cnt = await adapter.query(`SELECT COUNT(*) AS CNT FROM ${ident}${whereSql}`, 1, 60_000)
+        total = Number(cnt.rows[0]?.[0]) || 0
+        if (objCountCache.size > 200) objCountCache.clear()
+        objCountCache.set(cacheKey, { total, at: Date.now() })
+      }
       let columns = data.columns
       let rows = data.rows
       if (isOracle && columns.length && columns[columns.length - 1] === 'RN') {
         columns = columns.slice(0, -1)
         rows = rows.map((r) => r.slice(0, -1))
       }
-      return { ok: true, columns, rows, total: Number(cnt.rows[0]?.[0]) || 0, ms: data.ms }
+      return { ok: true, columns, rows, total, ms: data.ms }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }
@@ -763,6 +831,16 @@ export function registerIpc(): void {
     return { ok: true }
   })
 
+  // ---------- LLM 发送前预览回复 ----------
+  ipcMain.handle('llm:preview:reply', (_e, { requestId, ok }: { requestId: string; ok: boolean }) => {
+    const p = pendingPreviews.get(requestId)
+    if (p) {
+      pendingPreviews.delete(requestId)
+      p.resolve(!!ok)
+    }
+    return { ok: true }
+  })
+
   ipcMain.handle('audit:list', () => readAudit(300))
 
   ipcMain.handle('app:info', () => ({
@@ -775,6 +853,10 @@ export async function shutdown(): Promise<void> {
   for (const [id, p] of pendingApprovals) {
     p.resolve('deny')
     pendingApprovals.delete(id)
+  }
+  for (const [id, p] of pendingPreviews) {
+    p.resolve(false)
+    pendingPreviews.delete(id)
   }
   persistSessions()
   await closeAll()

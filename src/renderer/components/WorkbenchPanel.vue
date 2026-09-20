@@ -91,7 +91,7 @@
         </template>
       </div>
       <div class="wb-hsplit" @mousedown="startHDrag"></div>
-      <div class="wb-main sql-main">
+      <div class="wb-main sql-main" ref="sqlMainEl">
         <div class="sql-tabs" v-if="sqlTabs.length">
           <div v-for="st in sqlTabs" :key="st.id" class="sql-tab" :class="{ active: st.id === activeSqlId }" @click="activeSqlId = st.id">
             <span>{{ st.kind === 'info' ? '📊' : '📝' }} {{ st.title }}</span>
@@ -109,6 +109,10 @@
                 <option v-for="c in allConns" :key="c.id" :value="c.id">{{ c.name }}</option>
               </select>
               <button class="wb-mini" :disabled="st.running" @click="runSqlTab(st)">{{ st.running ? '执行中…' : '▶ 执行 (Ctrl+Enter)' }}</button>
+              <template v-if="isOracleConn(st.connId)">
+                <button class="wb-mini" title="提交当前事务（Oracle 无自动提交，DML 需显式 COMMIT 生效）" :disabled="st.running" @click="runTx(st, 'COMMIT')">✓ 提交</button>
+                <button class="wb-mini" title="回滚当前事务" :disabled="st.running" @click="runTx(st, 'ROLLBACK')">↩ 回滚</button>
+              </template>
               <button class="wb-mini" title="查看该连接的数据库信息" @click="openInfo(st.connId)">📊 信息</button>
               <span v-if="st.msg" class="sql-msg" :class="{ err: !st.ok }">{{ st.msg }}</span>
               <span style="flex: 1"></span>
@@ -130,7 +134,12 @@
             </div>
           </div>
           <!-- 数据库信息窗口 -->
-          <div v-show="st.id === activeSqlId && st.kind === 'info'" class="info-pane">
+          <div v-show="st.id === activeSqlId && st.kind === 'info'" class="info-pane" @click="maybeCloseAs($event, st)">
+            <div class="info-pane-bar">
+              <span class="info-pane-name">{{ st.title }} · 数据库信息</span>
+              <span style="flex: 1"></span>
+              <button class="obj-mini" title="重新采集基本信息与活跃会话" @click.stop="refreshInfo(st)">⟳ 刷新全部</button>
+            </div>
             <div v-if="st.infoLoading" class="sql-empty"><span class="spinner"></span> 采集数据库信息中…</div>
             <div v-else-if="st.infoError" class="sql-empty" style="color: var(--red)">✗ {{ st.infoError }}</div>
             <template v-else-if="st.info">
@@ -346,6 +355,9 @@ function doFit(id: string) {
 let offData: (() => void) | null = null
 let offExit: (() => void) | null = null
 let resizeObs: ResizeObserver | null = null
+let cmResizeObs: ResizeObserver | null = null
+let cmResizeTimer: number | undefined
+const sqlMainEl = ref<HTMLElement | null>(null)
 
 onMounted(() => {
   offData = window.sqlpilot.onTermData(({ termId, data }) => {
@@ -356,12 +368,20 @@ onMounted(() => {
   })
   resizeObs = new ResizeObserver(() => activeId.value && doFit(activeId.value))
   if (hostEl.value) resizeObs.observe(hostEl.value)
+  // 拖拽面板高度/分隔条后让可见的 CodeMirror 重新排版（节流 120ms）
+  cmResizeObs = new ResizeObserver(() => {
+    if (cmResizeTimer) return
+    cmResizeTimer = window.setTimeout(() => { cmResizeTimer = undefined; refreshActiveCm() }, 120)
+  })
+  if (sqlMainEl.value) cmResizeObs.observe(sqlMainEl.value)
 })
 
 onBeforeUnmount(() => {
   offData?.()
   offExit?.()
   resizeObs?.disconnect()
+  cmResizeObs?.disconnect()
+  if (cmResizeTimer) clearTimeout(cmResizeTimer)
   for (const t of terms.value) {
     window.sqlpilot.termClose(t.id)
     t.term.dispose()
@@ -459,13 +479,15 @@ interface SqlTab {
   ok: boolean
   msg: string
   result: any
+  /** 本窗口当前占用的独立会话对应的连接（切换连接后释放旧会话） */
+  prevConn?: string
   /** 信息窗口 */
   info: { sections: { title: string; rows: { k: string; v: string }[] }[]; tables: { title: string; columns: string[]; rows: any[][] }[] } | null
   infoLoading: boolean
   infoError: string
-  /** Oracle 连接的活跃会话交互块（列可选 + 可刷新） */
+  /** Oracle 连接的活跃会话交互块（列可选 + 可刷新）；seq 为请求序号，防止乱序响应覆盖最新状态 */
   isOracle?: boolean
-  as?: { available: string[]; selected: string[]; columns: string[]; rows: any[][]; ms: number; note: string; loading: boolean; error: string; open: boolean } | null
+  as?: { available: string[]; selected: string[]; columns: string[]; rows: any[][]; ms: number; note: string; loading: boolean; error: string; open: boolean; seq: number } | null
 }
 const sqlTabs = ref<SqlTab[]>([])
 const activeSqlId = ref('')
@@ -478,17 +500,32 @@ function connName(id: string): string {
 
 function newQuery(connId?: string) {
   const cid = connId || activeConnId.value || allConns.value[0]?.id || ''
-  if (!cid) return
+  if (!cid) {
+    alert('请先在左侧"数据库连接"区添加一个连接')
+    return
+  }
   activeConnId.value = cid
   sqlSeq++
   const tab = reactive({
     id: `sqltab_${Date.now()}_${sqlSeq}`, kind: 'query', connId: cid, title: `查询${sqlSeq}`,
     sql: '', running: false, ok: true, msg: '', result: null,
-    info: null, infoLoading: false, infoError: ''
+    info: null, infoLoading: false, infoError: '',
+    isOracle: undefined,
+    as: undefined
   }) as SqlTab
   sqlTabs.value.push(tab)
   activeSqlId.value = tab.id
   nextTick(() => { ensureCm(tab); refreshActiveCm() })
+}
+
+/** 采集连接信息（复用已打开的标签时也会重取，避免读到旧快照） */
+async function loadInfo(st: SqlTab) {
+  st.infoLoading = true
+  st.infoError = ''
+  const r = await window.sqlpilot.connInfo(st.connId)
+  st.infoLoading = false
+  if (r.ok) st.info = { sections: r.sections || [], tables: r.tables || [] }
+  else st.infoError = r.error || '获取信息失败'
 }
 
 async function openInfo(connId: string) {
@@ -496,6 +533,8 @@ async function openInfo(connId: string) {
   const found = sqlTabs.value.find((t) => t.kind === 'info' && t.connId === connId)
   if (found) {
     activeSqlId.value = found.id
+    loadInfo(found)
+    if (found.isOracle) loadActiveSessions(found)
     return
   }
   const isOracle = allConns.value.find((c: any) => c.id === connId)?.type === 'oracle'
@@ -504,24 +543,23 @@ async function openInfo(connId: string) {
     sql: '', running: false, ok: true, msg: '', result: null,
     info: null, infoLoading: true, infoError: '',
     isOracle,
-    as: isOracle ? { available: [], selected: [], columns: [], rows: [], ms: 0, note: '', loading: true, error: '', open: false } : null
+    as: isOracle ? { available: [], selected: [], columns: [], rows: [], ms: 0, note: '', loading: true, error: '', open: false, seq: 0 } : null
   }) as SqlTab
   sqlTabs.value.push(tab)
   activeSqlId.value = tab.id
-  const r = await window.sqlpilot.connInfo(connId)
-  tab.infoLoading = false
-  if (r.ok) tab.info = { sections: r.sections || [], tables: r.tables || [] }
-  else tab.infoError = r.error || '获取信息失败'
+  loadInfo(tab)
   if (isOracle) loadActiveSessions(tab)
 }
 
-/** 活跃会话：selected 为空时后端用默认列；返回后 available=真实列集、columns=实际生效列 */
+/** 活跃会话：selected 为空时后端用默认列；seq 防止乱序响应覆盖最新状态（快速连续勾选列时） */
 async function loadActiveSessions(st: SqlTab) {
   if (!st.as) return
+  const mySeq = ++st.as.seq
   st.as.loading = true
   st.as.error = ''
   try {
     const r = await window.sqlpilot.activeSessions(st.connId, st.as.selected.length ? [...st.as.selected] : undefined)
+    if (mySeq !== st.as.seq) return // 已有更新的请求在途，丢弃本次响应
     if (r.ok) {
       st.as.available = r.available || []
       st.as.columns = r.columns || []
@@ -533,9 +571,9 @@ async function loadActiveSessions(st: SqlTab) {
       st.as.error = r.error || '查询失败'
     }
   } catch (e: any) {
-    st.as.error = String(e?.message || e)
+    if (mySeq === st.as.seq) st.as.error = String(e?.message || e)
   } finally {
-    st.as.loading = false
+    if (mySeq === st.as.seq) st.as.loading = false
   }
 }
 
@@ -551,6 +589,19 @@ function toggleAsCol(st: SqlTab, col: string) {
   loadActiveSessions(st)
 }
 
+/** 信息页刷新：基本信息 + 活跃会话一起重取 */
+function refreshInfo(st: SqlTab) {
+  loadInfo(st)
+  if (st.isOracle) loadActiveSessions(st)
+}
+
+/** 列选择面板：点击面板/按钮以外的区域时收起 */
+function maybeCloseAs(e: MouseEvent, st: SqlTab) {
+  if (!st.as?.open) return
+  const t = e.target as HTMLElement
+  if (!t.closest('.as-cols') && !t.closest('.as-head')) st.as.open = false
+}
+
 function asFmt(v: any): string {
   if (v === null || v === undefined) return '∅'
   if (v instanceof Date) return v.toISOString().replace('T', ' ').slice(0, 19)
@@ -563,7 +614,12 @@ function asFull(v: any): string {
 
 function closeSqlTab(id: string) {
   const i = sqlTabs.value.findIndex((t) => t.id === id)
-  if (i >= 0) sqlTabs.value.splice(i, 1)
+  if (i >= 0) {
+    const t = sqlTabs.value[i]
+    // 释放该窗口的独立数据库会话（未提交事务随断连由数据库回滚）
+    if (t.kind === 'query' && t.prevConn) window.sqlpilot.sqlCloseSession(t.prevConn, t.id)
+    sqlTabs.value.splice(i, 1)
+  }
   cms.delete(id)
   cmHosts.delete(id)
   if (activeSqlId.value === id) activeSqlId.value = sqlTabs.value[Math.min(i, sqlTabs.value.length - 1)]?.id || ''
@@ -622,11 +678,30 @@ async function runSqlTab(st: SqlTab) {
     .trim()
     .replace(/;+\s*$/, '')
   if (!sql || st.running || !st.connId) return
+  await execSql(st, sql)
+}
+
+/** 提交/回滚快捷键：Oracle 无自动提交，事务由用户显式控制 */
+function runTx(st: SqlTab, stmt: 'COMMIT' | 'ROLLBACK') {
+  if (st.running || !st.connId) return
+  execSql(st, stmt)
+}
+
+function isOracleConn(connId: string): boolean {
+  return allConns.value.find((c: any) => c.id === connId)?.type === 'oracle'
+}
+
+async function execSql(st: SqlTab, sql: string) {
+  // 切换过连接：释放旧连接上本窗口的独立会话（未提交事务随断连回滚）
+  if (st.prevConn && st.prevConn !== st.connId) {
+    window.sqlpilot.sqlCloseSession(st.prevConn, st.id)
+  }
+  st.prevConn = st.connId
   st.running = true
   st.msg = ''
   st.result = null
   try {
-    const r = await window.sqlpilot.sqlRun(st.connId, sql)
+    const r = await window.sqlpilot.sqlRun(st.connId, sql, st.id)
     if (r.ok) {
       st.ok = true
       st.result = r.result
@@ -794,6 +869,8 @@ async function runSqlTab(st: SqlTab) {
 
 /* 数据库信息面板 */
 .info-pane { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px; }
+.info-pane-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.info-pane-name { font-size: 12.5px; color: var(--text); font-weight: 600; }
 .info-sec { margin-bottom: 16px; }
 .info-title { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; letter-spacing: 0.5px; }
 .info-grid { display: grid; grid-template-columns: minmax(120px, max-content) 1fr; gap: 4px 16px; font-size: 12.5px; }

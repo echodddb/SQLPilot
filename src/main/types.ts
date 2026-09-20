@@ -43,6 +43,8 @@ export interface ProviderConfig {
   effort?: ThinkingEffort
   /** 界面展示用：是否已存 Key（真实值不下发渲染层） */
   hasKey?: boolean
+  /** 上下文窗口（K tokens）：会话上下文占用显示用；留空用厂商预设 */
+  contextK?: number
 }
 
 /** 项目挂载的 SSH 远程服务器（密码认证，密码经 DPAPI 加密存 secrets） */
@@ -77,10 +79,14 @@ export interface AppConfig {
   projects: ProjectConfig[]
   /** 技能启用状态（技能本体在 userData/skills/） */
   skillsEnabled: Record<string, boolean>
-  /** 全局默认 Oracle Instant Client 目录 */
+  /** Oracle Instant Client 目录（全局默认，连接 11g 时需要） */
   instantClientDir?: string
   /** 界面主题 */
   theme?: 'dark' | 'light'
+  /** 系统提示词脱敏：不发送连接主机/账号、服务器地址、项目路径等明细（默认开启） */
+  maskPromptDetails?: boolean
+  /** LLM 发送前预览：每次请求弹窗展示完整内容，用户确认后才发出（默认关闭） */
+  previewLlm?: boolean
 }
 
 export interface ToolCall {

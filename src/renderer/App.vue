@@ -54,33 +54,6 @@
 
         <button
           class="btn ghost"
-          :class="{ 'term-active': panel === 'terminal' }"
-          title="底部工作台：SSH 终端（当前会话项目的服务器）"
-          @click="panel = panel === 'terminal' ? null : 'terminal'"
-        >
-          🖥 终端
-        </button>
-
-        <button
-          class="btn ghost"
-          :class="{ 'term-active': panel === 'sql' }"
-          title="底部工作台：SQL 控制台（直接执行语句）"
-          @click="panel = panel === 'sql' ? null : 'sql'"
-        >
-          🗄 SQL
-        </button>
-
-        <button
-          class="btn ghost"
-          :class="{ 'term-active': store.view === 'objects' }"
-          title="对象浏览器：双击表查看数据/结构/DDL（Navicat 式）"
-          @click="store.view = store.view === 'objects' ? 'chat' : 'objects'"
-        >
-          🗃 对象
-        </button>
-
-        <button
-          class="btn ghost"
           @click="store.view = store.view === 'settings' ? 'chat' : 'settings'" title="设置">
           ⚙ 设置
         </button>
@@ -90,11 +63,12 @@
       <ObjectsView v-else-if="store.view === 'objects'" style="flex: 1; min-height: 0" />
       <SettingsView v-else style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
       <!-- 工作台面板独立于上方视图，切设置页不断开终端 -->
-      <WorkbenchPanel v-if="panel" :tab="panel" @close="panel = null" @update:tab="(t) => (panel = t)" />
+      <WorkbenchPanel v-if="store.workbench" :tab="store.workbench" @close="store.workbench = null" @update:tab="(t) => (store.workbench = t)" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
     <ConfirmModal v-if="store.confirmQueue.length" />
+    <PreviewModal v-if="store.previewQueue.length" />
     <ProjectModal v-if="projectModal" @close="projectModal = false" @created="onProjectCreated" />
     <ProjectEditor v-if="projectEditorTarget" :project="projectEditorTarget" @close="projectEditorTarget = null" @saved="projectEditorTarget = null" />
     <SessionModal
@@ -118,6 +92,7 @@ import ObjectsView from './components/ObjectsView.vue'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
 import ConnManager from './components/ConnManager.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
+import PreviewModal from './components/PreviewModal.vue'
 import ProjectModal from './components/ProjectModal.vue'
 import ProjectEditor from './components/ProjectEditor.vue'
 import SessionModal from './components/SessionModal.vue'
@@ -128,7 +103,6 @@ const theme = ref<'dark' | 'light'>('dark')
 const projectModal = ref(false)
 const projectEditorTarget = ref<any>(null)
 const sessionModal = ref<'new' | 'switch' | null>(null)
-const panel = ref<'terminal' | 'sql' | null>(null)
 
 const boundProject = computed(() => {
   const pid = curSession()?.meta.projectId

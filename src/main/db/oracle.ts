@@ -89,6 +89,10 @@ export class OracleAdapter implements DbAdapter {
   }
 
   async test(): Promise<string> {
+    return this.runSerial(() => this.testInner())
+  }
+
+  private async testInner(): Promise<string> {
     const c = await this.ensure()
     try {
       const r = await c.execute<string[]>(`SELECT banner FROM v$version WHERE banner LIKE 'Oracle%'`, {}, { maxRows: 2, outFormat: oracledb.OUT_FORMAT_ARRAY })
@@ -100,6 +104,10 @@ export class OracleAdapter implements DbAdapter {
   }
 
   async listSchemas(): Promise<string[]> {
+    return this.runSerial(() => this.listSchemasInner())
+  }
+
+  private async listSchemasInner(): Promise<string[]> {
     const c = await this.ensure()
     const r = await c.execute<string[]>(
       `SELECT owner FROM all_tables GROUP BY owner ORDER BY owner`,
@@ -110,6 +118,10 @@ export class OracleAdapter implements DbAdapter {
   }
 
   async listTables(schema: string): Promise<TableInfo[]> {
+    return this.runSerial(() => this.listTablesInner(schema))
+  }
+
+  private async listTablesInner(schema: string): Promise<TableInfo[]> {
     const c = await this.ensure()
     const r = await c.execute<any[]>(
       `SELECT object_name, object_type FROM all_objects
@@ -122,6 +134,10 @@ export class OracleAdapter implements DbAdapter {
   }
 
   async describeTable(schema: string, table: string) {
+    return this.runSerial(() => this.describeTableInner(schema, table))
+  }
+
+  private async describeTableInner(schema: string, table: string) {
     const c = await this.ensure()
     const s = schema.toUpperCase()
     const t = table.toUpperCase()
@@ -153,6 +169,10 @@ export class OracleAdapter implements DbAdapter {
   }
 
   async getDdl(schema: string, table: string): Promise<string> {
+    return this.runSerial(() => this.getDdlInner(schema, table))
+  }
+
+  private async getDdlInner(schema: string, table: string): Promise<string> {
     const c = await this.ensure()
     const s = schema.toUpperCase()
     const t = table.toUpperCase()

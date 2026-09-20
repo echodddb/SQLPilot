@@ -50,6 +50,10 @@
                 </option>
               </datalist>
             </div>
+            <div class="fitem" style="width: 150px">
+              <label>上下文窗口 K</label>
+              <input type="number" v-model.number="editP.contextK" :placeholder="String(presetContextK())" title="会话上下文占用百分比的分母；留空用厂商预设" />
+            </div>
           </div>
 
           <div class="frow">
@@ -123,6 +127,16 @@
           </select>
           <br />密码加密存储（Windows DPAPI）：{{ store.secretsAvailable ? '✓ 可用' : '✗ 不可用' }}
         </div>
+        <div class="privacy-cfg">
+          <label class="privacy-item">
+            <input type="checkbox" :checked="store.cfg?.maskPromptDetails !== false" @change="toggleCfg('maskPromptDetails', $event)" />
+            <span>系统提示词脱敏<em>（默认开）</em>：不向大模型发送连接服务名/库名、服务器地址账号、项目本地路径等明细，模型按名称寻址</span>
+          </label>
+          <label class="privacy-item">
+            <input type="checkbox" :checked="!!store.cfg?.previewLlm" @change="toggleCfg('previewLlm', $event)" />
+            <span>大模型发送前预览<em>（默认关）</em>：每次请求前弹窗展示完整发送内容，确认后才发出（开启/关闭立即生效，含正在进行的回合）</span>
+          </label>
+        </div>
       </div>
 
       <div class="card">
@@ -140,10 +154,10 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { store, MODES, toPlain } from '../store'
+import { store, MODES, toPlain, pushNotice } from '../store'
 import { VENDOR_CATALOG } from '../../main/agent/catalog'
 
-const editP = ref<any>({ name: '', vendor: 'deepseek', protocol: 'openai', baseUrl: '', apiKey: '', model: '', effort: 'off' })
+const editP = ref<any>({ name: '', vendor: 'deepseek', protocol: 'openai', baseUrl: '', apiKey: '', model: '', effort: 'off', contextK: undefined })
 const icDir = ref(store.cfg?.instantClientDir || '')
 const defaultMode = ref(store.cfg?.mode || 'readonly')
 const audit = ref<any[]>([])
@@ -171,6 +185,12 @@ async function doTestProvider() {
 const activeProviderId = computed(() => store.cfg?.activeProviderId)
 
 const currentVendor = computed(() => VENDOR_CATALOG.find((v) => v.id === editP.value.vendor) || VENDOR_CATALOG[0])
+
+/** 当前所选模型的厂商预设上下文窗口（K），作为表单占位与默认值 */
+function presetContextK(): number {
+  const m = currentVendor.value.models.find((x) => x.id === editP.value.model)
+  return m?.contextK || 128
+}
 
 function vendorLabel(id: string | undefined) {
   return VENDOR_CATALOG.find((v) => v.id === id)?.label.split('（')[0].split(' ')[0] || '自定义'
@@ -223,6 +243,7 @@ async function saveProvider() {
   if (!p.name || !p.baseUrl || !p.model) { alert('名称、Base URL、模型均必填'); return }
   if (!p.id && !p.apiKey) { alert('请填写 API Key'); return }
   if (!p.id) p.id = `p_${Date.now()}`
+  if (!p.contextK || p.contextK <= 0) p.contextK = undefined
   // 空 Key = 沿用已存（主进程对空值不覆盖 secrets；渲染层拿到的是掩码，没有明文可回填）
   try {
     const idx = store.cfg.providers.findIndex((x: any) => x.id === p.id)
@@ -257,8 +278,20 @@ async function saveGeneral() {
   await window.sqlpilot.setConfig(toPlain(store.cfg))
 }
 
+/** 隐私相关开关：即改即存（maskPromptDetails / previewLlm）；预览开关变化时在聊天里给提示 */
+async function toggleCfg(key: 'maskPromptDetails' | 'previewLlm', e: Event) {
+  const on = (e.target as HTMLInputElement).checked
+  store.cfg[key] = on
+  await window.sqlpilot.setConfig(toPlain(store.cfg))
+  if (key === 'previewLlm') {
+    pushNotice(on
+      ? '👁 已开启发送前预览：下一次把内容发给大模型前会弹窗展示完整请求，确认后才发出'
+      : '👁 已关闭发送前预览：请求将直接发出（脱敏不受影响，仍默认开启）')
+  }
+}
+
 function resetForm() {
-  editP.value = { name: '', vendor: 'deepseek', protocol: 'openai', baseUrl: '', apiKey: '', model: '', effort: 'off' }
+  editP.value = { name: '', vendor: 'deepseek', protocol: 'openai', baseUrl: '', apiKey: '', model: '', effort: 'off', contextK: undefined }
   onVendorChange()
 }
 
@@ -302,4 +335,7 @@ async function doImport() {
 .frow { display: flex; gap: 10px; margin-bottom: 10px; }
 .fitem { flex: 1; min-width: 0; }
 .fitem label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.privacy-cfg { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
+.privacy-item { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; line-height: 1.6; }
+.privacy-item em { color: var(--text-faint); font-style: normal; }
 </style>

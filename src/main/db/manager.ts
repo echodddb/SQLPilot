@@ -2,12 +2,17 @@ import type { ConnProfile, DbAdapter } from '../types'
 import { OracleAdapter } from './oracle'
 import { MySqlAdapter } from './mysql'
 
-// 连接池管理：每个连接 profile 对应一个惰性建连的适配器实例
-
+// 连接池：默认每个连接 profile 一个共享适配器（agent/信息面板/对象浏览器用）；
+// 带 sessionKey 时每个会话键独立一条连接（SQL 控制台的每个查询窗口 = 独立数据库会话，事务互不可见）
 const adapters = new Map<string, DbAdapter>()
 
-export function getAdapter(profile: ConnProfile, globalClientDir?: string): DbAdapter {
-  let a = adapters.get(profile.id)
+export function adapterPoolKey(profileId: string, sessionKey?: string): string {
+  return sessionKey ? `${profileId}::${sessionKey}` : profileId
+}
+
+export function getAdapter(profile: ConnProfile, globalClientDir?: string, sessionKey?: string): DbAdapter {
+  const key = adapterPoolKey(profile.id, sessionKey)
+  let a = adapters.get(key)
   if (a) return a
   if (profile.type === 'oracle') {
     a = new OracleAdapter(profile, globalClientDir)
@@ -18,15 +23,24 @@ export function getAdapter(profile: ConnProfile, globalClientDir?: string): DbAd
     }
     a = new MySqlAdapter(profile)
   }
-  adapters.set(profile.id, a)
+  adapters.set(key, a)
   return a
 }
 
-export function dropAdapter(id: string): void {
-  const a = adapters.get(id)
-  if (a) {
-    a.close().catch(() => {})
-    adapters.delete(id)
+/** 释放适配器；不带 sessionKey 时连同该连接的所有窗口级会话一起释放 */
+export function dropAdapter(id: string, sessionKey?: string): void {
+  const keys = sessionKey ? [adapterPoolKey(id, sessionKey)] : [id]
+  if (!sessionKey) {
+    for (const k of adapters.keys()) {
+      if (k.startsWith(`${id}::`)) keys.push(k)
+    }
+  }
+  for (const k of keys) {
+    const a = adapters.get(k)
+    if (a) {
+      a.close().catch(() => {})
+      adapters.delete(k)
+    }
   }
 }
 

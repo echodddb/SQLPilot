@@ -37,7 +37,7 @@
                     :key="tb.name"
                     class="obj-node table"
                     :title="`${s}.${tb.name}\n双击打开（数据 / 结构 / DDL）`"
-                    @dblclick.stop="openTab(c.id, s, tb.name, c.type)"
+                    @dblclick.stop="openTab(c.id, s, tb.name)"
                   >{{ tb.type === 'VIEW' ? '👁' : '▣' }} {{ tb.name }}</div>
                   <div v-if="!filteredTables(tree[c.id].tables[s]).length" class="obj-node dim">（无匹配对象）</div>
                 </template>
@@ -176,7 +176,6 @@ interface ObjTab {
   key: string
   connId: string
   connName: string
-  connType: string
   schema: string
   table: string
   sub: 'data' | 'cols' | 'ddl'
@@ -188,6 +187,8 @@ interface ObjTab {
   loading: boolean
   result: { columns: string[]; rows: any[][]; total: number; ms: number } | null
   error: string
+  /** 请求序号：防止乱序响应覆盖最新状态（快速翻页/排序时） */
+  seq: number
   cols: { columns: { name: string; type: string; nullable: string }[]; approxRows?: number } | null
   colsLoading: boolean
   colsError: string
@@ -239,8 +240,13 @@ async function toggleSchema(connId: string, schema: string) {
 async function loadTables(connId: string, schema: string) {
   const t = ensureTree(connId)
   const r = await window.sqlpilot.getTables(connId, schema)
-  t.tables[schema] = r.ok ? r.tables || [] : []
-  if (!r.ok) connErrors[connId] = r.error || '获取对象列表失败'
+  if (r.ok) {
+    t.tables[schema] = r.tables || []
+    connErrors[connId] = ''
+  } else {
+    t.tables[schema] = []
+    connErrors[connId] = r.error || '获取对象列表失败'
+  }
 }
 
 async function refreshTables(connId: string, schema: string) {
@@ -254,7 +260,7 @@ function filteredTables(list: any[]) {
 }
 
 // ---------- 右侧标签页 ----------
-function openTab(connId: string, schema: string, table: string, connType: string) {
+function openTab(connId: string, schema: string, table: string) {
   const key = `${connId}::${schema}::${table}`
   const found = tabs.value.find((t) => t.key === key)
   if (found) {
@@ -262,10 +268,10 @@ function openTab(connId: string, schema: string, table: string, connType: string
   } else {
     const conn = connections.value.find((c: any) => c.id === connId)
     const tab: ObjTab = reactive({
-      key, connId, connName: conn?.name || connId, connType,
+      key, connId, connName: conn?.name || connId,
       schema, table, sub: 'data',
       page: 1, pageSize: 50, where: '', orderBy: '', orderDir: 'asc',
-      loading: false, result: null, error: '',
+      loading: false, result: null, error: '', seq: 0,
       cols: null, colsLoading: false, colsError: '',
       ddl: '', ddlLoading: false, ddlError: ''
     })
@@ -283,6 +289,7 @@ function closeTab(key: string) {
 
 async function loadData(tab: ObjTab, page: number) {
   tab.page = page
+  const mySeq = ++tab.seq
   tab.loading = true
   tab.error = ''
   try {
@@ -291,6 +298,7 @@ async function loadData(tab: ObjTab, page: number) {
       page: tab.page, pageSize: tab.pageSize,
       where: tab.where, orderBy: tab.orderBy || undefined, orderDir: tab.orderDir
     })
+    if (mySeq !== tab.seq) return // 已有更新的请求在途，丢弃本次响应
     if (r.ok) {
       tab.result = { columns: r.columns || [], rows: r.rows || [], total: r.total || 0, ms: r.ms || 0 }
     } else {
@@ -298,10 +306,11 @@ async function loadData(tab: ObjTab, page: number) {
       tab.error = r.error || '查询失败'
     }
   } catch (e: any) {
+    if (mySeq !== tab.seq) return
     tab.result = null
     tab.error = String(e?.message || e)
   } finally {
-    tab.loading = false
+    if (mySeq === tab.seq) tab.loading = false
   }
 }
 
@@ -348,7 +357,7 @@ watch(
   () => store.objOpen,
   async (o) => {
     if (!o) return
-    openTab(o.connId, o.schema, o.table, '')
+    openTab(o.connId, o.schema, o.table)
     const t = ensureTree(o.connId)
     t.expanded = true
     if (!t.schemas) await loadSchemas(o.connId)

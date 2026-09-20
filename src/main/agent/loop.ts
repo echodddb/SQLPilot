@@ -9,6 +9,7 @@ import { appendAudit } from '../audit'
 import { listSkills } from '../skills'
 import { loadConfig } from '../config'
 import { writeFileAtomic } from '../atomic'
+import { modelContextK } from './catalog'
 
 export type AgentEvent =
   | { type: 'text'; sessionId: string; text: string }
@@ -18,11 +19,15 @@ export type AgentEvent =
   | { type: 'session-updated'; sessionId: string; meta: SessionMeta }
   | { type: 'done'; sessionId: string; note?: string }
   | { type: 'error'; sessionId: string; error: string }
+  /** 会话上下文占用：est=下次请求估算 tokens，windowK=模型窗口(K)，usage=最近一次真实计量（有则带） */
+  | { type: 'context'; sessionId: string; est: number; windowK: number; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }
 
 export interface RunDeps {
   emit: (ev: AgentEvent) => void
   /** sessionId 用于把写操作确认归属到具体会话（多会话并发时互不影响） */
   requestApproval: (req: ApprovalRequest, sessionId: string) => Promise<ApprovalDecision>
+  /** LLM 发送前预览：返回 false 表示用户取消该次请求（主进程按配置决定是否启用） */
+  previewLlm?: (url: string, body: any) => Promise<boolean>
 }
 
 export interface SessionMeta {
@@ -41,6 +46,8 @@ interface SessionState extends SessionMeta {
   sessionApproved: Set<string>
   cancelRequested: boolean
   abortCtrl: AbortController | null
+  /** 最近一次 LLM 响应的真实计量（上下文徽标显示用，不持久化） */
+  lastUsage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
 }
 
 const sessions = new Map<string, SessionState>()
@@ -164,6 +171,21 @@ export function cancelSession(id: string): void {
 }
 
 const MAX_ITERATIONS = 24
+
+/** 粗略 token 估算：CJK 字符约 1.1 tok/字，其余约 3.8 字符/tok（够显示用，非精确计量） */
+export function estimateTokens(text: string): number {
+  const cjk = (text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length
+  return Math.ceil(cjk * 1.1 + (text.length - cjk) / 3.8)
+}
+
+function estimateContextTokens(system: string, messages: ChatMsg[]): number {
+  let est = estimateTokens(system)
+  for (const m of messages) {
+    est += estimateTokens(m.content || '')
+    if (m.toolCalls) for (const tc of m.toolCalls) est += estimateTokens(tc.args || '')
+  }
+  return est
+}
 /** 会话历史条数上限：超出时从最近的 user 边界截断，防止上下文与 sessions.json 无限膨胀 */
 const MAX_MESSAGES = 200
 
@@ -202,19 +224,20 @@ const MODE_LINES: Record<PermissionMode, string> = {
   yolo: '完全放开模式：所有操作自动执行——执行写操作前仍须先说明影响，谨慎行事。复杂任务仍建议先调用 enter_plan_mode 规划'
 }
 
-function fmtConnLine(c: ConnProfile, tag?: string): string {
-  const target = c.type === 'oracle' ? `service=${c.serviceName}` : `db=${c.database || '(未指定)'}`
-  return `- ${tag ? `[${tag}] ` : ''}${c.name}: ${TYPE_LABELS[c.type]} ${target} [${c.role === 'readonly' ? '只读账号' : '管理账号'}]`
+function fmtConnLine(c: ConnProfile, tag?: string, mask = false): string {
+  // 脱敏：不发送服务名/库名（连接按名称寻址，明细不进提示词）
+  const target = mask ? '' : c.type === 'oracle' ? `service=${c.serviceName}` : `db=${c.database || '(未指定)'}`
+  return `- ${tag ? `[${tag}] ` : ''}${c.name}: ${TYPE_LABELS[c.type]}${target ? ` ${target}` : ''} [${c.role === 'readonly' ? '只读账号' : '管理账号'}]`
 }
 
-function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, project: ProjectConfig | undefined, skills: { name: string; description: string }[]): string {
+function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, project: ProjectConfig | undefined, skills: { name: string; description: string }[], mask = false): string {
   // 连接分两组：关联本项目的优先，其余全局连接仍可用
   const projConns = project ? connections.filter((c) => c.projectId === project.id) : []
   const otherConns = connections.filter((c) => !project || c.projectId !== project.id)
   const connLines = connections.length
     ? [
-        ...projConns.map((c) => fmtConnLine(c, '本项目')),
-        ...otherConns.map((c) => fmtConnLine(c, projConns.length ? '未关联' : undefined))
+        ...projConns.map((c) => fmtConnLine(c, '本项目', mask)),
+        ...otherConns.map((c) => fmtConnLine(c, projConns.length ? '未关联' : undefined, mask))
       ].join('\n')
     : '（当前未配置任何数据库连接：数据库类任务请提示用户先在左侧添加连接；文件读写（fs_*）与技能类任务可正常进行，无需数据库。）'
 
@@ -226,13 +249,18 @@ function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, pro
     dialects.push('- MySQL/OB MySQL 租户：用标准 MySQL 语法；OB 特有信息可查 oceanbase.GV$ 系统视图（如 GV$OB_SERVERS、CDB_OB_TENANTS 等，视权限而定）。')
   }
 
+  // 脱敏：服务器只发名称/标签/备注（按名称寻址），不发 user@host:port
   const serverLines = project?.servers?.length
-    ? '\n项目挂载的远程服务器（server_run/server_read_file/server_tail 操作；执行命令前先说明影响，注意 tag 标记）：\n' +
-      project.servers.map((s) => `- ${s.name} [${s.tag || '未标记'}]: ${s.user}@${s.host}:${s.port}${s.note ? `（${s.note}）` : ''}`).join('\n') + '\n'
+    ? '\n项目挂载的远程服务器（按名称寻址，server_run/server_read_file/server_tail 操作；执行命令前先说明影响，注意 tag 标记）：\n' +
+      project.servers.map((s) => (mask
+        ? `- ${s.name} [${s.tag || '未标记'}]${s.note ? `（${s.note}）` : ''}`
+        : `- ${s.name} [${s.tag || '未标记'}]: ${s.user}@${s.host}:${s.port}${s.note ? `（${s.note}）` : ''}`
+      )).join('\n') + '\n'
     : ''
 
+  // 脱敏：不发项目根目录的完整本地路径（fs 工具用相对路径，无需绝对路径）
   const projectBlock = project
-    ? `\n当前绑定项目：${project.name}（根目录 ${project.rootPath}）。可用 fs_list/fs_read/fs_write 操作项目内文件（路径相对项目根），产出的报告/脚本等文件默认写入项目目录。${project.description ? `\n项目说明：${project.description}` : ''}\n`
+    ? `\n当前绑定项目：${project.name}${mask ? '' : `（根目录 ${project.rootPath}）`}。可用 fs_list/fs_read/fs_write 操作项目内文件（路径相对项目根），产出的报告/脚本等文件默认写入项目目录。${project.description ? `\n项目说明：${project.description}` : ''}\n`
     : ''
 
   const skillLines = skills.length
@@ -283,11 +311,23 @@ export async function runTurn(
       const cfg = loadConfig()
       const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
       const skills = listSkills().filter((s) => cfg.skillsEnabled[s.id] !== false)
-      const system = buildSystemPrompt(cfg.connections, sess.mode, project, skills)
+      const system = buildSystemPrompt(cfg.connections, sess.mode, project, skills, cfg.maskPromptDetails !== false)
+      const windowK = modelContextK(provider)
+      const est = estimateContextTokens(system, sess.messages)
+      // 先发估算（请求前徽标即可更新），响应带回真实计量后再补发一次
+      deps.emit({ type: 'context', sessionId, est, windowK, usage: sess.lastUsage })
       const res = await callLlm(provider, system, sess.messages, TOOLS, {
         onText: (t) => deps.emit({ type: 'text', sessionId, text: t }),
         onReasoning: (t) => deps.emit({ type: 'reasoning', sessionId, text: t })
-      }, { signal: sess.abortCtrl.signal, effort: sess.effort ?? undefined })
+      }, {
+        signal: sess.abortCtrl.signal,
+        effort: sess.effort ?? undefined,
+        preview: deps.previewLlm ? (url, body) => deps.previewLlm!(url, body) : undefined
+      })
+      if (res.usage) {
+        sess.lastUsage = res.usage
+        deps.emit({ type: 'context', sessionId, est, windowK, usage: res.usage })
+      }
       sess.messages.push({ role: 'assistant', content: res.content || null, toolCalls: res.toolCalls, thinking: res.thinking, thinkingSig: res.thinkingSig })
 
       if (!res.toolCalls.length) {

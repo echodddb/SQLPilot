@@ -69,8 +69,9 @@ const api = {
   sftpDownload: (serverId: string, remotePath: string, localDir: string) => ipcRenderer.invoke('sftp:download', { serverId, remotePath, localDir }),
   sftpUpload: (serverId: string, remoteDir: string) => ipcRenderer.invoke('sftp:upload', { serverId, remoteDir }),
   showInFolder: (p: string) => ipcRenderer.invoke('shell:showInFolder', { p }),
-  // SQL 控制台
-  sqlRun: (connId: string, sql: string) => ipcRenderer.invoke('sql:run', { connId, sql }),
+  // SQL 控制台（sessionKey = 查询窗口 id，每窗口独立数据库会话）
+  sqlRun: (connId: string, sql: string, sessionKey?: string) => ipcRenderer.invoke('sql:run', { connId, sql, sessionKey }),
+  sqlCloseSession: (connId: string, sessionKey: string) => ipcRenderer.invoke('sql:closeSession', { connId, sessionKey }),
   // 数据库信息面板（Navicat 式概览）
   connInfo: (id: string) => ipcRenderer.invoke('conn:info', { id }),
   // Oracle 活跃会话（列可选）
@@ -98,6 +99,18 @@ const api = {
   openFolder: (p: string) => ipcRenderer.invoke('shell:openFolder', { p }),
   // 权限确认
   replyConfirm: (requestId: string, decision: string) => ipcRenderer.invoke('confirm:reply', { requestId, decision }),
+  // LLM 发送前预览
+  replyLlmPreview: (requestId: string, ok: boolean) => ipcRenderer.invoke('llm:preview:reply', { requestId, ok }),
+  onLlmPreview: (cb: (p: any) => void) => {
+    const l = (_e: any, p: any) => cb(p)
+    ipcRenderer.on('llm:preview', l)
+    return () => ipcRenderer.removeListener('llm:preview', l)
+  },
+  onLlmPreviewExpired: (cb: (p: { requestId: string }) => void) => {
+    const l = (_e: any, p: any) => cb(p)
+    ipcRenderer.on('llm:preview:expired', l)
+    return () => ipcRenderer.removeListener('llm:preview:expired', l)
+  },
   // 其他
   getAudit: () => ipcRenderer.invoke('audit:list'),
   appInfo: () => ipcRenderer.invoke('app:info'),

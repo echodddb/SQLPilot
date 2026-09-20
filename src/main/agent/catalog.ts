@@ -7,6 +7,8 @@ export interface ModelPreset {
   id: string
   label: string
   note?: string
+  /** 上下文窗口（K tokens），用于会话上下文占用显示；厂商更新后可在提供商表单覆盖 */
+  contextK?: number
 }
 
 export interface VendorPreset {
@@ -27,8 +29,8 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://api.deepseek.com/v1',
     thinkingStyle: 'none',
     models: [
-      { id: 'deepseek-chat', label: 'deepseek-chat', note: '通用（官方别名，自动指向最新 V 系列）' },
-      { id: 'deepseek-reasoner', label: 'deepseek-reasoner', note: '深度思考（别名，自动指向最新 R 系列）' }
+      { id: 'deepseek-chat', label: 'deepseek-chat', note: '通用（官方别名，自动指向最新 V 系列）', contextK: 128 },
+      { id: 'deepseek-reasoner', label: 'deepseek-reasoner', note: '深度思考（别名，自动指向最新 R 系列）', contextK: 128 }
     ]
   },
   {
@@ -38,10 +40,10 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     thinkingStyle: 'glm_thinking',
     models: [
-      { id: 'glm-5.3', label: 'GLM-5.3', note: '旗舰，Agent/工程能力强' },
-      { id: 'glm-5.3-flash', label: 'GLM-5.3-Flash', note: '多模态/低成本/1M 上下文' },
-      { id: 'glm-5.3-flashx', label: 'GLM-5.3-FlashX', note: 'Flash 极速版' },
-      { id: 'glm-5.2', label: 'GLM-5.2', note: '上代旗舰' }
+      { id: 'glm-5.3', label: 'GLM-5.3', note: '旗舰，Agent/工程能力强', contextK: 200 },
+      { id: 'glm-5.3-flash', label: 'GLM-5.3-Flash', note: '多模态/低成本/1M 上下文', contextK: 1000 },
+      { id: 'glm-5.3-flashx', label: 'GLM-5.3-FlashX', note: 'Flash 极速版', contextK: 128 },
+      { id: 'glm-5.2', label: 'GLM-5.2', note: '上代旗舰', contextK: 128 }
     ]
   },
   {
@@ -51,9 +53,9 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     thinkingStyle: 'qwen_thinking',
     models: [
-      { id: 'qwen3.8-max', label: 'qwen3.8-max' },
-      { id: 'qwen3.7-plus', label: 'qwen3.7-plus' },
-      { id: 'qwen3.8-flash', label: 'qwen3.8-flash', note: '高速/低成本' }
+      { id: 'qwen3.8-max', label: 'qwen3.8-max', contextK: 128 },
+      { id: 'qwen3.7-plus', label: 'qwen3.7-plus', contextK: 128 },
+      { id: 'qwen3.8-flash', label: 'qwen3.8-flash', note: '高速/低成本', contextK: 1000 }
     ]
   },
   {
@@ -63,8 +65,8 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://api.moonshot.cn/v1',
     thinkingStyle: 'none',
     models: [
-      { id: 'kimi-k2-turbo-preview', label: 'Kimi-K2-Turbo' },
-      { id: 'kimi-k2-preview', label: 'Kimi-K2' }
+      { id: 'kimi-k2-turbo-preview', label: 'Kimi-K2-Turbo', contextK: 256 },
+      { id: 'kimi-k2-preview', label: 'Kimi-K2', contextK: 256 }
     ]
   },
   {
@@ -74,9 +76,9 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://api.openai.com/v1',
     thinkingStyle: 'openai_effort',
     models: [
-      { id: 'gpt-5', label: 'GPT-5' },
-      { id: 'gpt-5-mini', label: 'GPT-5-mini' },
-      { id: 'gpt-4.1', label: 'GPT-4.1' }
+      { id: 'gpt-5', label: 'GPT-5', contextK: 400 },
+      { id: 'gpt-5-mini', label: 'GPT-5-mini', contextK: 400 },
+      { id: 'gpt-4.1', label: 'GPT-4.1', contextK: 1000 }
     ]
   },
   {
@@ -86,9 +88,9 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://api.anthropic.com',
     thinkingStyle: 'anthropic_budget',
     models: [
-      { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
-      { id: 'claude-opus-4-1', label: 'Claude Opus 4.1' },
-      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' }
+      { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5', contextK: 200 },
+      { id: 'claude-opus-4-1', label: 'Claude Opus 4.1', contextK: 200 },
+      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', contextK: 200 }
     ]
   },
   {
@@ -98,7 +100,7 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     baseUrl: 'https://api.z.ai/api/anthropic',
     thinkingStyle: 'anthropic_budget',
     models: [
-      { id: 'glm-5.3', label: 'GLM-5.3', note: '实测 Coding Plan 通道仅含此型号；flash/air 系列不在该通道' }
+      { id: 'glm-5.3', label: 'GLM-5.3', note: '实测 Coding Plan 通道仅含此型号；flash/air 系列不在该通道', contextK: 200 }
     ]
   },
   {
@@ -132,4 +134,11 @@ export function anthropicThinking(style: VendorPreset['thinkingStyle'], effort: 
 
 export function findVendor(id: string | undefined): VendorPreset {
   return VENDOR_CATALOG.find((v) => v.id === id) || VENDOR_CATALOG[VENDOR_CATALOG.length - 1]
+}
+
+/** 会话上下文窗口（K tokens）：提供商覆盖 > 厂商预设匹配 > 默认 128K */
+export function modelContextK(provider: { vendor?: string; model: string; contextK?: number }): number {
+  if (provider.contextK && provider.contextK > 0) return provider.contextK
+  const v = findVendor(provider.vendor)
+  return v.models.find((m) => m.id === provider.model)?.contextK || 128
 }
