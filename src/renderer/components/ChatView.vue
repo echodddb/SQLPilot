@@ -21,7 +21,19 @@
             <div class="bubble">{{ m.text }}</div>
           </template>
           <template v-else-if="m.role === 'reasoning'">
-            <div class="content" v-if="m.text">💭 {{ m.text }}</div>
+            <div v-if="m.collapsed">
+              <button class="reasoning-toggle show" title="展开思考过程" @click="toggleReasoning(m)">
+                <span class="chev">▸</span>💭 思考过程（{{ m.text.length }} 字）<span class="op">展开</span>
+              </button>
+            </div>
+            <template v-else>
+              <div v-if="answerStarted(idx) || m.settled">
+                <button class="reasoning-toggle" title="收起思考过程" @click="toggleReasoning(m)">
+                  <span class="chev">▾</span>💭 思考过程<span class="op">收起</span>
+                </button>
+              </div>
+              <div class="content" v-if="m.text">💭 {{ m.text }}</div>
+            </template>
           </template>
           <template v-else-if="m.role === 'error'">
             <div class="content">⚠ {{ m.text }}</div>
@@ -42,8 +54,7 @@
       <div class="chat-input">
         <div class="quick-bar">
           <button class="quick-btn" :class="{ on: store.workbench === 'terminal' }" title="SSH 终端（当前会话项目的服务器）" @click="store.workbench = store.workbench === 'terminal' ? null : 'terminal'">🖥 终端</button>
-          <button class="quick-btn" :class="{ on: store.workbench === 'sql' }" title="SQL 控制台（查询会话窗口 / 数据库信息）" @click="store.workbench = store.workbench === 'sql' ? null : 'sql'">🗄 SQL</button>
-          <button class="quick-btn" :class="{ on: store.view === 'objects' }" title="对象浏览器（双击表看数据/结构/DDL）" @click="store.view = store.view === 'objects' ? 'chat' : 'objects'">🗃 对象</button>
+          <button class="quick-btn" :class="{ on: store.view === 'db' }" title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；顶栏 🗃 数据库同款入口）" @click="store.view = store.view === 'db' ? 'chat' : 'db'">🗃 数据库</button>
         </div>
         <textarea
           v-model="store.drafts[store.currentId]"
@@ -76,7 +87,10 @@
           </span>
           <span>
             <button v-if="curSession().running" class="btn danger" style="margin-right:6px" @click="stop">■ 停止</button>
-            <button class="btn ghost" style="margin-right:6px" @click="newChat" :disabled="curSession().running">清空对话</button>
+            <button class="btn ghost" style="margin-right:6px" @click="onArchiveClick" :disabled="curSession().running || !!store.archiveProgress" :title="store.archiveProgress ? store.archiveProgress.note : '总结当前对话归档到项目（该项目其他会话可读）后清空本会话'">
+              <template v-if="store.archiveProgress">⟳ 归档中…</template>
+              <template v-else>📦 归档对话</template>
+            </button>
             <button class="btn primary" @click="send" :disabled="curSession().running || !store.drafts[store.currentId]?.trim()">发送</button>
           </span>
         </div>
@@ -87,10 +101,14 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort } from '../store'
+import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort, archiveAndClear } from '../store'
 import ToolCard from './ToolCard.vue'
 
 const scrollEl = ref<HTMLElement | null>(null)
+
+async function onArchiveClick() {
+  await archiveAndClear()
+}
 
 async function onEffortChange(e: Event) {
   await setSessionEffort((e.target as HTMLSelectElement).value)
@@ -103,6 +121,21 @@ function isPlanTarget(idx: number): boolean {
   if (idx !== s.msgs.length - 1) return false
   const m = s.msgs[idx]
   return m.role === 'assistant' && !!m.text.trim() && m.tools.length === 0
+}
+
+// 思考过程折叠：手动切换过的不参与后续自动折叠
+function toggleReasoning(m: { collapsed?: boolean; manualToggle?: boolean }): void {
+  m.collapsed = !m.collapsed
+  m.manualToggle = true
+}
+
+// 该条思考之后是否已有助手正文（决定展开态是否显示"收起"入口）
+function answerStarted(idx: number): boolean {
+  const msgs = curSession()?.msgs || []
+  for (let i = idx + 1; i < msgs.length; i++) {
+    if (msgs[i].role === 'assistant' && msgs[i].text) return true
+  }
+  return false
 }
 
 // ---------- Markdown 渲染（标题/列表/引用/表格/代码块带复制） ----------

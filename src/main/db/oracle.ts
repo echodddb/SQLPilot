@@ -1,5 +1,5 @@
 import oracledb from 'oracledb'
-import type { ConnProfile, DbAdapter, QueryResult, TableInfo } from '../types'
+import type { ConnProfile, DbAdapter, EditSupport, QueryResult, TableInfo } from '../types'
 import { getPassword } from '../secrets'
 
 oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB]
@@ -9,6 +9,13 @@ interface OraExecuteResult<T> {
   rows: T[]
   metaData?: { name: string }[]
   rowsAffected?: number
+}
+
+/** 超时哨兵：catch 侧按 code 识别而不是匹配消息文本——数据库自身报错也可能含"超时"字样（如中文 NLS 的 ORA-04021） */
+function queryTimeoutError(ms: number): Error {
+  const e = new Error(`查询超时（>${ms}ms），连接已重置`)
+  ;(e as any).code = 'SQLPILOT_QUERY_TIMEOUT'
+  return e
 }
 
 interface OraConnection {
@@ -126,6 +133,7 @@ export class OracleAdapter implements DbAdapter {
     const r = await c.execute<any[]>(
       `SELECT object_name, object_type FROM all_objects
        WHERE owner = :s AND object_type IN ('TABLE','VIEW','MATERIALIZED VIEW') AND secondary = 'N'
+         AND object_name NOT LIKE 'SYS_IOT_OVER_%'
        ORDER BY object_type, object_name`,
       { s: schema.toUpperCase() },
       { maxRows: 5000, outFormat: oracledb.OUT_FORMAT_ARRAY }
@@ -172,6 +180,25 @@ export class OracleAdapter implements DbAdapter {
     return this.runSerial(() => this.getDdlInner(schema, table))
   }
 
+  /** 网格编辑支持：rowid 定位行（恒可用），虚拟列不可更新 */
+  async editSupport(schema: string, table: string): Promise<EditSupport> {
+    return this.runSerial(() => this.editSupportInner(schema, table))
+  }
+
+  private async editSupportInner(schema: string, table: string): Promise<EditSupport> {
+    const c = await this.ensure()
+    let readonlyCols: string[] = []
+    try {
+      const r = await c.execute<any[]>(
+        `SELECT column_name FROM all_tab_cols WHERE owner = :s AND table_name = :t AND virtual_column = 'YES'`,
+        { s: schema.toUpperCase(), t: table.toUpperCase() },
+        { maxRows: 500, outFormat: oracledb.OUT_FORMAT_ARRAY }
+      )
+      readonlyCols = r.rows.map((x: any) => String(x[0]))
+    } catch { /* 视图无 virtual_column 列时按可更新处理，更新失败由数据库报错兜底 */ }
+    return { editable: true, keyMode: 'rowid', keyCols: [], readonlyCols }
+  }
+
   private async getDdlInner(schema: string, table: string): Promise<string> {
     const c = await this.ensure()
     const s = schema.toUpperCase()
@@ -190,29 +217,30 @@ export class OracleAdapter implements DbAdapter {
     throw new Error(`无法获取 ${s}.${t} 的 DDL`)
   }
 
-  async query(sql: string, maxRows: number, timeoutMs: number): Promise<QueryResult> {
-    return this.runSerial(() => this.doQuery(sql, maxRows, timeoutMs))
+  async query(sql: string, maxRows: number, timeoutMs: number, binds?: any): Promise<QueryResult> {
+    return this.runSerial(() => this.doQuery(sql, maxRows, timeoutMs, binds))
   }
 
-  private async doQuery(sql: string, maxRows: number, timeoutMs: number): Promise<QueryResult> {
+  private async doQuery(sql: string, maxRows: number, timeoutMs: number, binds?: any): Promise<QueryResult> {
     const c = await this.ensure()
     c.callTimeout = timeoutMs
     const started = Date.now()
     // callTimeout 覆盖单次往返；外层再整体封顶 1.5 倍，超时后重置连接
-    const qp = c.execute(sql, {}, { maxRows, outFormat: oracledb.OUT_FORMAT_ARRAY })
+    const qp = c.execute(sql, binds || {}, { maxRows, outFormat: oracledb.OUT_FORMAT_ARRAY })
     qp.catch(() => {})
+    const timeoutErr = queryTimeoutError(timeoutMs)
     let res: Awaited<typeof qp>
     try {
       res = await Promise.race([
         qp,
         new Promise<never>((_, rej) =>
-          setTimeout(() => rej(new Error(`查询超时（>${timeoutMs}ms），连接已重置`)), Math.round(timeoutMs * 1.5))
+          setTimeout(() => rej(timeoutErr), Math.round(timeoutMs * 1.5))
         )
       ])
     } catch (e) {
       // 只有超时才需要重置连接；普通语句错误（语法/权限等）保持连接，
       // 避免模型"报错-修正-重试"循环里每次失败都付一次完整重连
-      if (/超时/.test(String((e as Error)?.message))) {
+      if ((e as any)?.code === 'SQLPILOT_QUERY_TIMEOUT') {
         this.conn = null
         this.connPromise = null
         c.close().catch(() => {})
@@ -237,9 +265,15 @@ export class OracleAdapter implements DbAdapter {
     }
   }
 
-  /** 写操作后显式提交（oracledb 默认关闭自动提交） */
-  async commit(): Promise<void> {
-    const c = this.conn
-    if (c) await this.runSerial(() => c.commit())
+  /** 写操作后显式提交（oracledb 默认关闭自动提交）。
+   *  返回 false = 排队期间连接已被超时重置，事务随重置回滚、无可提交内容 */
+  async commit(): Promise<boolean> {
+    return this.runSerial(async () => {
+      // 连接必须在串行链内取：链外捕获的引用可能在排队期间被重置置空
+      const c = this.conn
+      if (!c) return false
+      await c.commit()
+      return true
+    })
   }
 }

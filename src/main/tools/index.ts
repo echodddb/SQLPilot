@@ -6,7 +6,9 @@ import type { ConnProfile, PermissionMode, SshServer } from '../types'
 import { resolveConnection, getAdapter } from '../db/manager'
 import { classifySql } from '../db/guard'
 import { appendAudit } from '../audit'
+import { cached, metaDropConn, metaKeys } from '../meta'
 import { readSkill } from '../skills'
+import { appendMemory } from '../memory'
 import * as ssh from '../ssh'
 
 export interface ToolDef {
@@ -54,7 +56,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'db_list_tables',
-    description: '列出指定 schema 下的表和视图',
+    description: '列出指定 schema 下的表和视图。写 SQL 前不确定表名/找不到表时先用它定位，禁止凭猜测或记忆拼表名。',
     parameters: {
       type: 'object',
       properties: {
@@ -66,7 +68,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'db_describe_table',
-    description: '查看表结构：列名、类型、是否可空，以及近似行数',
+    description: '查看表结构：列名、类型、是否可空，以及近似行数。写 SQL 涉及某张表前先调用它确认列名与类型，禁止凭猜测写列名；结果有缓存，重复调用代价很小。',
     parameters: {
       type: 'object',
       properties: {
@@ -79,7 +81,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'db_get_ddl',
-    description: '获取表/视图的建表 DDL 语句',
+    description: '获取表/视图的建表 DDL 语句。需要精确列定义、约束、索引、分区信息时用它，比 describe_table 更完整；改表结构前列出当前 DDL 作为依据。',
     parameters: {
       type: 'object',
       properties: {
@@ -142,11 +144,27 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'read_skill',
-    description: '读取指定技能的完整指令内容。当任务匹配某技能描述时，先读取再遵循其步骤执行。',
+    description: '读取技能的指令内容。当任务匹配某技能描述时，先读取其 SKILL.md 再严格遵循执行。技能可能附带资源文件（SKILL.md 中引用的相对路径，如 admin/backup-recovery.md）：需要时用 path 参数读取，路径相对技能根目录（引用中的技能名前缀可省略），仅支持文本类文件。',
     parameters: {
       type: 'object',
-      properties: { name: { type: 'string', description: '技能名称' } },
+      properties: {
+        name: { type: 'string', description: '技能名称' },
+        path: { type: 'string', description: '技能内资源文件的相对路径（省略 = 读 SKILL.md 本身）' }
+      },
       required: ['name']
+    }
+  },
+  {
+    name: 'memory_append',
+    description: '追加一条跨会话记忆，避免后续会话重复探索。三个归属维度：全局（默认，跨项目通用事实）、某个数据库连接（conn 参数，该库的环境/规模/约定）、当前项目（project=true，仅本会话绑定项目可见的专属事实）。计划模式不可用；无需批准。',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要记住的一条事实（一句话写全上下文，如"cesdb 为生产库，XX 表约 2 亿行，禁全表扫描"）' },
+        conn: { type: 'string', description: '连接名称（归属该连接的记忆）；与 project 互斥' },
+        project: { type: 'boolean', description: 'true = 归属当前会话绑定的项目（项目专属事实，如"本项目的变更都先在测试连接验证"）；与 conn 互斥' }
+      },
+      required: ['text']
     }
   },
   {
@@ -395,9 +413,39 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
 
     // ---------- 技能 ----------
     if (name === 'read_skill') {
-      const s = readSkill(String(args.name ?? ''))
-      appendAudit({ kind: 'tool', detail: `read_skill ${s.id}` })
-      return { ok: true, result: JSON.stringify({ skill: s.id, content: s.content.slice(0, 30000) }) }
+      const rel = args.path ? String(args.path) : undefined
+      const s = readSkill(String(args.name ?? ''), rel)
+      appendAudit({ kind: 'tool', detail: `read_skill ${s.id}${rel ? ` :: ${s.path}` : ''}` })
+      return { ok: true, result: JSON.stringify({ skill: s.id, path: s.path, content: s.content.slice(0, 30000) }) }
+    }
+
+    // ---------- 跨会话记忆 ----------
+    if (name === 'memory_append') {
+      if (ctx.mode === 'plan') {
+        return { ok: false, result: JSON.stringify({ error: '计划模式为只读探索，memory_append 被拒绝。' }) }
+      }
+      const text = String(args.text ?? '').trim()
+      if (!text) return { ok: false, result: JSON.stringify({ error: 'text 不能为空' }) }
+      const conn = args.conn ? String(args.conn) : null
+      if (conn && args.project) {
+        return { ok: false, result: JSON.stringify({ error: 'conn 与 project 不能同时指定：涉及具体数据库的事实记到连接，项目专属事实用 project。' }) }
+      }
+      // 归属校验并统一按名称寻址（记忆文件以名称命名，注入提示词时也按名称读取）
+      if (args.project) {
+        if (!ctx.project) {
+          return { ok: false, result: JSON.stringify({ error: '当前会话未绑定项目，无法记录项目记忆；省略 project 参数可记入全局记忆。' }) }
+        }
+        const r = appendMemory({ kind: 'project', name: ctx.project.name }, text)
+        appendAudit({ kind: 'tool', conn: `项目 ${ctx.project.name}`, detail: `memory_append: ${text.slice(0, 200)}` })
+        return { ok: true, result: JSON.stringify({ saved: true, scope: `项目 ${ctx.project.name}`, file: r.file, totalEntries: r.entries }) }
+      }
+      const target = conn ? ctx.connections.find((c) => c.name === conn || c.id === conn) : null
+      if (conn && !target) {
+        return { ok: false, result: JSON.stringify({ error: `连接 "${conn}" 不存在`, available: ctx.connections.map((c) => c.name) }) }
+      }
+      const r = appendMemory(target ? { kind: 'conn', name: target.name } : { kind: 'global' }, text)
+      appendAudit({ kind: 'tool', conn: target?.name || '全局', detail: `memory_append: ${text.slice(0, 200)}` })
+      return { ok: true, result: JSON.stringify({ saved: true, scope: target ? `连接 ${target.name}` : '全局', file: r.file, totalEntries: r.entries }) }
     }
 
     // ---------- 本机控制 ----------
@@ -575,19 +623,23 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     const adapter = getAdapter(profile, ctx.globalClientDir)
 
     if (name === 'db_list_schemas') {
-      const schemas = await adapter.listSchemas()
+      // 元数据走持久化缓存：agent 循环内反复探索不再每次打库（对象树 ⟳ 或 DDL 会失效重读）
+      const schemas = await cached(metaKeys.schemas(profile.id), false, () => adapter.listSchemas())
       appendAudit({ kind: 'tool', conn: profile.name, detail: `db_list_schemas → ${schemas.length} 个 schema` })
       return { ok: true, result: JSON.stringify({ schemas: schemas.slice(0, 200), total: schemas.length }) }
     }
 
     if (name === 'db_list_tables') {
-      const tables = await adapter.listTables(String(args.schema))
+      const s = profile.type === 'oracle' ? String(args.schema).toUpperCase() : String(args.schema)
+      const tables = await cached(metaKeys.tables(profile.id, s), false, () => adapter.listTables(s))
       appendAudit({ kind: 'tool', conn: profile.name, detail: `db_list_tables ${args.schema} → ${tables.length} 个对象` })
       return { ok: true, result: JSON.stringify({ schema: args.schema, tables: tables.slice(0, 300), total: tables.length }) }
     }
 
     if (name === 'db_describe_table') {
-      const info = await adapter.describeTable(String(args.schema), String(args.table))
+      const s = profile.type === 'oracle' ? String(args.schema).toUpperCase() : String(args.schema)
+      const t = profile.type === 'oracle' ? String(args.table).toUpperCase() : String(args.table)
+      const info = await cached(metaKeys.describe(profile.id, s, t), false, () => adapter.describeTable(s, t))
       appendAudit({ kind: 'tool', conn: profile.name, detail: `db_describe_table ${args.schema}.${args.table}` })
       return { ok: true, result: JSON.stringify(info) }
     }
@@ -620,9 +672,11 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       const gated = await gateWrite(ctx, { tool: 'db_write', conn: profile.name, sql, kind: v.kind, risk: v.risk }, profile.name, sql)
       if (gated) return { ok: false, result: gated }
       const r = await adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS)
-      await adapter.commit?.()
+      const committed = (await adapter.commit?.()) !== false
+      // agent 执行了 DDL：该连接的元数据缓存全部失效
+      if (v.kind === 'ddl') metaDropConn(profile.id)
       appendAudit({ kind: 'sql.write', conn: profile.name, detail: `执行完成: ${sql.slice(0, 100)}`, mode: ctx.mode, approved: true })
-      return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: profile.type === 'oracle' ? '已提交(COMMIT)' : undefined }) }
+      return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: profile.type === 'oracle' ? (committed ? '已提交(COMMIT)' : '连接已被重置，事务未提交（语句可能未生效）') : undefined }) }
     }
 
     return { ok: false, result: JSON.stringify({ error: `未知工具: ${name}` }) }

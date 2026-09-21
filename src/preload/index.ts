@@ -30,12 +30,19 @@ const api = {
   saveConn: (profile: any, password?: string) => ipcRenderer.invoke('conn:save', { profile: plain(profile), password }),
   deleteConn: (id: string) => ipcRenderer.invoke('conn:delete', { id }),
   testConn: (profile: any, password?: string) => ipcRenderer.invoke('conn:test', { profile, password }),
-  getSchemas: (connId: string) => ipcRenderer.invoke('conn:schemas', { id: connId }),
-  getTables: (connId: string, schema: string) => ipcRenderer.invoke('conn:tables', { id: connId, schema }),
+  getSchemas: (connId: string, refresh?: boolean) => ipcRenderer.invoke('conn:schemas', { id: connId, refresh }),
+  getTables: (connId: string, schema: string, refresh?: boolean) => ipcRenderer.invoke('conn:tables', { id: connId, schema, refresh }),
   // 会话（模式/模型/项目均为会话级）
   listSessions: () => ipcRenderer.invoke('session:list'),
   newSession: () => ipcRenderer.invoke('session:new'),
   deleteSession: (id: string) => ipcRenderer.invoke('session:delete', { id }),
+  archiveSession: (id: string, remove: boolean) => ipcRenderer.invoke('session:archive', { id, remove }),
+  getProjectArchive: (projectId: string) => ipcRenderer.invoke('archive:get', { projectId }),
+  onArchiveProgress: (cb: (p: any) => void) => {
+    const l = (_e: any, p: any) => cb(p)
+    ipcRenderer.on('archive:progress', l)
+    return () => ipcRenderer.removeListener('archive:progress', l)
+  },
   updateSession: (id: string, patch: any) => ipcRenderer.invoke('session:update', { id, patch: plain(patch) }),
   // 对话
   sendChat: (sessionId: string, text: string) => ipcRenderer.invoke('chat:send', { sessionId, text }),
@@ -80,17 +87,26 @@ const api = {
   // 对象浏览器（数据/结构/DDL）
   objData: (p: { connId: string; schema: string; table: string; page?: number; pageSize?: number; where?: string; orderBy?: string; orderDir?: string }) =>
     ipcRenderer.invoke('obj:data', plain(p)),
-  objDescribe: (connId: string, schema: string, table: string) =>
-    ipcRenderer.invoke('obj:describe', { connId, schema, table }),
+  objDescribe: (connId: string, schema: string, table: string, refresh?: boolean) =>
+    ipcRenderer.invoke('obj:describe', { connId, schema, table, refresh }),
   objDdl: (connId: string, schema: string, table: string) =>
     ipcRenderer.invoke('obj:ddl', { connId, schema, table }),
+  // 结果网格编辑（对象浏览器数据页）
+  objEditInfo: (connId: string, schema: string, table: string) =>
+    ipcRenderer.invoke('obj:editInfo', { connId, schema, table }),
+  objSaveEdits: (p: { connId: string; sessionKey: string; schema: string; table: string; keyMode: 'rowid' | 'cols'; keyCols: string[]; edits: { rid?: string; keys?: any[]; col: string; value: string | null }[] }) =>
+    ipcRenderer.invoke('obj:saveEdits', plain(p)),
+  // 查询结果导出（弹保存对话框，CSV 全量导出）
+  exportResult: (p: { connId: string; sessionKey: string; sql: string; columns: string[] }) =>
+    ipcRenderer.invoke('export:result', plain(p)),
   // 技能
   listSkills: () => ipcRenderer.invoke('skill:list'),
   saveSkill: (p: { id?: string; name: string; description: string; content: string }) => ipcRenderer.invoke('skill:save', plain(p)),
   deleteSkill: (id: string) => ipcRenderer.invoke('skill:delete', { id }),
-  readSkillFull: (id: string) => ipcRenderer.invoke('skill:read', { id }),
+  readSkillFull: (id: string, resourcePath?: string) => ipcRenderer.invoke('skill:read', { id, resourcePath }),
   toggleSkill: (id: string, enabled: boolean) => ipcRenderer.invoke('skill:toggle', { id, enabled }),
   importSkill: () => ipcRenderer.invoke('skill:import'),
+  importSkillUrl: (url: string) => ipcRenderer.invoke('skill:importUrl', { url }),
   // 模型提供商
   testProvider: (provider: any, apiKey?: string) => ipcRenderer.invoke('provider:test', { provider: plain(provider), apiKey }),
   // 剪贴板与外链

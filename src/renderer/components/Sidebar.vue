@@ -31,6 +31,7 @@
       <div class="ctx-menu" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
         <div class="ctx-item" @click="ctxAction('edit')">✎　编辑项目属性</div>
         <div class="ctx-item" @click="ctxAction('new')">＋　新建会话</div>
+        <div class="ctx-item" @click="ctxAction('archive')">📦　查看归档</div>
         <div class="ctx-item" @click="ctxAction('folder')">📂　在资源管理器中打开</div>
         <div class="ctx-sep"></div>
         <div class="ctx-item danger" @click="ctxAction('delete')">🗑　删除项目</div>
@@ -43,21 +44,31 @@
     </div>
     <div class="session-list">
       <template v-for="g in sessionGroups" :key="g.key">
-        <div class="session-group-title">📁 {{ g.label }}</div>
         <div
-          v-for="id in g.ids"
-          :key="id"
-          class="session-item"
-          :class="{ active: id === store.currentId }"
-          @click="store.currentId = id"
-          :title="store.sessions[id]?.meta.title"
+          class="session-group-title session-group-toggle"
+          :title="collapsed.has(g.key) ? '展开该项目的会话' : '折叠该项目的会话'"
+          @click="toggleGroup(g.key)"
         >
-          <span class="mode-dot" :class="store.sessions[id]?.meta.mode"></span>
-          <span class="name">{{ store.sessions[id]?.meta.title || '会话' }}</span>
-          <span v-if="store.sessions[id]?.running" class="spinner" style="width:10px;height:10px"></span>
-          <button class="icon-btn" title="删除会话" @click.stop="removeSession(id)">✕</button>
+          <span class="chev">{{ collapsed.has(g.key) ? '▸' : '▾' }}</span>
+          <span>📁 {{ g.label }}</span>
+          <span v-if="g.ids.length" class="cnt">{{ g.ids.length }}</span>
         </div>
-        <div v-if="!g.ids.length" class="session-item" style="pointer-events:none; opacity:.55">（暂无会话，点击项目名新建）</div>
+        <template v-if="!collapsed.has(g.key)">
+          <div
+            v-for="id in g.ids"
+            :key="id"
+            class="session-item"
+            :class="{ active: id === store.currentId }"
+            @click="store.currentId = id"
+            :title="store.sessions[id]?.meta.title"
+          >
+            <span class="mode-dot" :class="store.sessions[id]?.meta.mode"></span>
+            <span class="name">{{ store.sessions[id]?.meta.title || '会话' }}</span>
+          <span v-if="store.sessions[id]?.running" class="spinner" style="width:10px;height:10px"></span>
+          <button class="icon-btn" :title="store.sessions[id]?.running ? '会话执行中，停止后才能归档' : '归档会话（总结对话到项目归档后移除）'" :disabled="store.sessions[id]?.running" @click.stop="removeSession(id)">📦</button>
+          </div>
+          <div v-if="!g.ids.length" class="session-item" style="pointer-events:none; opacity:.55">（暂无会话，点击项目名新建）</div>
+        </template>
       </template>
     </div>
 
@@ -75,39 +86,15 @@
       <template v-for="g in groups" :key="g.type">
         <div class="conn-group-title">{{ g.label }}</div>
         <template v-for="c in g.items" :key="c.id">
-          <div class="conn-item" @click="toggle(c.id)" :title="`${c.user}@${c.host}:${c.port}`">
-            <span>{{ tree[c.id]?.expanded ? '▾' : '▸' }}</span>
+          <!-- 对象浏览在数据库工作台（顶栏 🗃 数据库）；侧边栏只做连接管理，点行进入工作台 -->
+          <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击进入数据库工作台`" @click="store.view = 'db'">
+            <span>🗄</span>
             <span class="name">{{ c.name }}</span>
             <span v-if="projName(c.projectId)" class="sub" style="background: var(--bg-card-hover); color: var(--text-dim)" :title="'已关联项目：' + projName(c.projectId)">{{ projName(c.projectId) }}</span>
             <span class="sub" :class="{ rw: c.role !== 'readonly' }">{{ c.role === 'readonly' ? 'RO' : 'RW' }}</span>
             <button class="icon-btn" title="编辑" @click.stop="openConnModal(c)">✎</button>
             <button class="icon-btn" title="删除" @click.stop="removeConn(c)">✕</button>
           </div>
-
-          <template v-if="tree[c.id]?.expanded">
-            <div v-if="tree[c.id].loading" class="tree-schema" style="pointer-events:none">加载中…</div>
-            <template v-else-if="tree[c.id].schemas?.length">
-              <div
-                v-for="s in tree[c.id].schemas"
-                :key="s"
-                class="tree-schema"
-                :class="{ open: tree[c.id].opened === s }"
-                @click="openSchema(c.id, s)"
-              >🗄 {{ s }}</div>
-              <template v-if="tree[c.id].opened && tree[c.id].tables[tree[c.id].opened]">
-                <div
-                  v-for="t in tree[c.id].tables[tree[c.id].opened].slice(0, 200)"
-                  :key="t.name"
-                  class="tree-table"
-                  :class="{ view: t.type === 'VIEW' }"
-                  :title="`${tree[c.id].opened}.${t.name}（双击在对象浏览器打开 / 单击填入输入框）`"
-                  @click="pickTable(`${tree[c.id].opened}.${t.name}`)"
-                  @dblclick.stop="openObject(c.id, String(tree[c.id].opened), t.name)"
-                >{{ t.type === 'VIEW' ? '👁' : '▣' }} {{ t.name }}</div>
-              </template>
-            </template>
-            <div v-else class="tree-schema" style="pointer-events:none; color: var(--text-dim)">（无可见 schema）</div>
-          </template>
         </template>
       </template>
     </div>
@@ -120,15 +107,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, reactive } from 'vue'
-import { store, curSession, removeSession, createSessionInProject, TYPE_LABELS, openObject } from '../store'
+import { computed, inject, reactive, watch } from 'vue'
+import { store, curSession, removeSession, createSessionInProject, TYPE_LABELS } from '../store'
 
 const openConnModal = inject<(c?: any) => void>('openConnModal')!
 const openProjectModal = inject<() => void>('openProjectModal')!
 const openSessionModal = inject<(mode: 'new' | 'switch') => void>('openSessionModal')!
 const openProjectEditor = inject<(p: any) => void>('openProjectEditor')!
-
-const tree = store.tree
+const openArchiveView = inject<(p: any) => void>('openArchiveView')!
 
 // 项目右键菜单
 const ctxMenu = reactive({ show: false, x: 0, y: 0, project: null as any })
@@ -138,12 +124,34 @@ function openProjectMenu(e: MouseEvent, p: any) {
   ctxMenu.y = Math.min(e.clientY, window.innerHeight - 170)
   ctxMenu.project = p
 }
+// 透明遮罩若残留会吞掉下一次点击（输入框点不进去、光标不出现）：
+// Esc/窗口失焦/滚动（菜单是屏幕坐标，滚动后已脱离锚点）/尺寸变化都必须关闭
+function closeCtxMenu() {
+  ctxMenu.show = false
+}
+function onCtxKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeCtxMenu()
+}
+watch(() => ctxMenu.show, (open) => {
+  if (open) {
+    window.addEventListener('keydown', onCtxKeydown)
+    window.addEventListener('blur', closeCtxMenu)
+    window.addEventListener('resize', closeCtxMenu)
+    document.addEventListener('scroll', closeCtxMenu, true)
+  } else {
+    window.removeEventListener('keydown', onCtxKeydown)
+    window.removeEventListener('blur', closeCtxMenu)
+    window.removeEventListener('resize', closeCtxMenu)
+    document.removeEventListener('scroll', closeCtxMenu, true)
+  }
+})
 async function ctxAction(action: string) {
   const p = ctxMenu.project
   ctxMenu.show = false
   if (!p) return
   if (action === 'edit') openProjectEditor(p)
   else if (action === 'new') await newSessionFor(p.id)
+  else if (action === 'archive') openArchiveView(p)
   else if (action === 'folder') await window.sqlpilot.openFolder(p.rootPath)
   else if (action === 'delete') await removeProject(p)
 }
@@ -181,6 +189,28 @@ const sessionGroups = computed(() => {
   return groups
 })
 
+// 分组折叠状态：纯 UI 状态，localStorage 持久化（不值得进 config.json）
+const COLLAPSED_KEY = 'sqlpilot.sessionGroups.collapsed'
+const collapsed = reactive(new Set<string>())
+try {
+  const saved = JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]')
+  if (Array.isArray(saved)) for (const k of saved) collapsed.add(String(k))
+} catch { /* 损坏时忽略 */ }
+
+function toggleGroup(key: string) {
+  if (collapsed.has(key)) collapsed.delete(key)
+  else collapsed.add(key)
+  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]))
+}
+
+// 当前会话切换/恢复时自动展开其所在分组——"当前"不应藏在折叠里
+watch(() => store.currentId, (id) => {
+  if (!id) return
+  const pid = store.sessions[id]?.meta.projectId
+  const key = pid && sessionGroups.value.some((g) => g.key === pid) ? pid : '__none__'
+  if (collapsed.has(key)) toggleGroup(key)
+}, { immediate: true })
+
 function newSessionClick() {
   if (!store.cfg?.projects?.length) {
     openProjectModal()
@@ -191,40 +221,6 @@ function newSessionClick() {
 
 async function newSessionFor(projectId: string) {
   await createSessionInProject(projectId)
-}
-
-async function toggle(id: string) {
-  const t = ensureTree(id)
-  t.expanded = !t.expanded
-  if (t.expanded && !t.schemas) {
-    t.loading = true
-    const r = await window.sqlpilot.getSchemas(id)
-    t.schemas = r.ok ? r.schemas || [] : []
-    t.loading = false
-    if (!r.ok) alert('获取 schema 失败：' + r.error)
-  }
-}
-
-async function openSchema(connId: string, schema: string) {
-  const t = ensureTree(connId)
-  t.opened = t.opened === schema ? null : schema
-  if (t.opened && !t.tables[schema]) {
-    const r = await window.sqlpilot.getTables(connId, schema)
-    t.tables[schema] = r.ok ? r.tables || [] : []
-    if (!r.ok) alert('获取表列表失败：' + r.error)
-  }
-}
-
-function ensureTree(id: string) {
-  if (!tree[id]) {
-    tree[id] = reactive({ expanded: false, schemas: undefined as any, loading: false, tables: {}, opened: null as any })
-  }
-  return tree[id]
-}
-
-function pickTable(name: string) {
-  const cur = store.drafts[store.currentId] || ''
-  store.drafts[store.currentId] = (cur ? cur.trimEnd() + ' ' : '') + name
 }
 
 async function removeConn(c: any) {
@@ -248,6 +244,26 @@ async function removeProject(p: any) {
   color: var(--text-faint);
   font-weight: 600;
   letter-spacing: 0.5px;
+}
+.session-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+}
+.session-group-toggle:hover { color: var(--text-dim); }
+.session-group-toggle .chev {
+  width: 12px;
+  flex-shrink: 0;
+  font-size: 10px;
+  text-align: center;
+}
+.session-group-toggle .cnt {
+  margin-left: auto;
+  font-weight: 400;
+  opacity: 0.75;
 }
 .session-item {
   display: flex;

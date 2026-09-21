@@ -319,6 +319,36 @@ option { background: var(--bg-card); color: var(--text); }
   white-space: pre-wrap;
   line-height: 1.7;
 }
+/* 思考过程折叠/展开按钮（正文输出后自动折叠成这个按钮）：与快捷栏按钮同语言的胶囊样式 */
+.reasoning-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  padding: 3px 11px;
+  margin: 5px 0 5px 12px;
+  border-radius: 99px;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1.6;
+}
+.reasoning-toggle:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.reasoning-toggle .chev { font-size: 10px; }
+.reasoning-toggle .op { color: var(--text-faint); font-size: 11px; }
+.reasoning-toggle:hover .op { color: var(--accent); }
+/* 折叠态：强调色胶囊（与激活态快捷按钮同语言）——灰色小字在深色背景里几乎不可见，用户找不到展开入口 */
+.reasoning-toggle.show {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-size: 12px;
+  padding: 4px 13px;
+}
+.reasoning-toggle.show .op { color: var(--accent); opacity: 0.75; }
+.reasoning-toggle.show:hover { filter: brightness(1.15); }
 .msg.error .content {
   color: var(--red);
   background: var(--red-dim);

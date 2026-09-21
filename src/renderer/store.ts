@@ -14,6 +14,12 @@ export interface UiMsg {
   tools: UiTool[]
   /** 已追加过工具卡片，后续文本需另起新消息 */
   closed?: boolean
+  /** 思考过程折叠状态：流式输出时展开，助手正文开始/回合结束后自动折叠，可手动切换 */
+  collapsed?: boolean
+  /** 用户手动切换过折叠：此后自动折叠跳过该条（尊重手动展开） */
+  manualToggle?: boolean
+  /** 所属回合已结束（含从历史恢复）：展开态据此显示"收起"入口 */
+  settled?: boolean
 }
 
 export interface SessionMeta {
@@ -43,7 +49,7 @@ export function toPlain<T>(v: T): T {
 
 export const store = reactive({
   ready: false,
-  view: 'chat' as 'chat' | 'settings' | 'objects',
+  view: 'chat' as 'chat' | 'db' | 'settings',
   cfg: null as any,
   sessions: {} as Record<string, UiSession>,
   sessionOrder: [] as string[],
@@ -52,23 +58,15 @@ export const store = reactive({
   confirmQueue: [] as { requestId: string; sessionId?: string; tool: string; conn: string; sql: string; kind: string; risk: number }[],
   /** LLM 发送前预览队列（开启 previewLlm 时每次请求弹出） */
   previewQueue: [] as { requestId: string; sessionId?: string; url: string; body: any }[],
+  /** 归档进行中的前台提示（阶段事件驱动；done/error 时清除） */
+  archiveProgress: null as { sessionId: string; stage: string; note: string } | null,
   secretsAvailable: false,
   // 侧边栏 schema 树状态: connId -> { expanded, schemas?, loading, tables, opened }
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
   drafts: {} as Record<string, string>,
-  /** 对象浏览器：跨组件打开对象的请求（Sidebar 双击 → ObjectsView 监听），n 为序号保证重复打开同一对象也能触发 */
-  objOpen: null as { connId: string; schema: string; table: string; n: number } | null,
-  /** 底部工作台面板：终端 / SQL 控制台（ChatView 快捷按钮控制） */
-  workbench: null as 'terminal' | 'sql' | null
+  /** 底部工作台面板：SSH 终端（数据库相关窗口都在数据库工作台视图里） */
+  workbench: null as 'terminal' | null
 })
-
-let objSeq = 0
-
-/** 在对象浏览器中打开一张表/视图（自动切换视图） */
-export function openObject(connId: string, schema: string, table: string): void {
-  store.view = 'objects'
-  store.objOpen = { connId, schema, table, n: ++objSeq }
-}
 
 export function curSession(): UiSession {
   return store.sessions[store.currentId]
@@ -100,6 +98,14 @@ function historyToUi(history: any[]): UiMsg[] {
     if (m.role === 'user') {
       out.push(mk('user', m.content || ''))
     } else if (m.role === 'assistant') {
+      // 思考块恢复为折叠态消息（正文/结论已就位，按需展开）；无签名的思考来自
+      // OpenAI 协议历史，仅用于界面展示，不会回传给 Anthropic（见 llm.ts）
+      if (m.thinking) {
+        const r = mk('reasoning', m.thinking)
+        r.collapsed = true
+        r.settled = true
+        out.push(r)
+      }
       if (m.content) out.push(mk('assistant', m.content))
       if (m.toolCalls?.length) {
         const tools: UiTool[] = m.toolCalls.map((tc: any) => {
@@ -149,6 +155,8 @@ export async function init(): Promise<void> {
       const last = lastMsgOf(s)
       if (!last || last.role !== 'assistant' || last.tools.length > 0 || last.closed) {
         s.msgs.push({ id: ++msgSeq, role: 'assistant', text: '', tools: [] })
+        // 正文开始输出：此前所有思考过程自动折叠（手动展开过的不动）
+        for (const m of s.msgs) if (m.role === 'reasoning' && !m.manualToggle) m.collapsed = true
       }
       lastMsgOf(s)!.text += ev.text
     } else if (ev.type === 'reasoning') {
@@ -188,9 +196,18 @@ export async function init(): Promise<void> {
       }
     } else if (ev.type === 'done') {
       s.running = false
+      // 回合结束（含无正文的收尾）：折叠未手动展开过的思考过程
+      for (const m of s.msgs) if (m.role === 'reasoning') {
+        if (!m.manualToggle) m.collapsed = true
+        m.settled = true
+      }
       if (ev.note) s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.note, tools: [] })
     } else if (ev.type === 'error') {
       s.running = false
+      for (const m of s.msgs) if (m.role === 'reasoning') {
+        if (!m.manualToggle) m.collapsed = true
+        m.settled = true
+      }
       s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.error, tools: [] })
     }
   })
@@ -205,6 +222,11 @@ export async function init(): Promise<void> {
 
   window.sqlpilot.onLlmPreview((p: any) => {
     store.previewQueue.push(p)
+  })
+
+  // 归档阶段提示：summary/save 阶段展示，done/error 清除（结果通知由归档调用方 pushNotice）
+  window.sqlpilot.onArchiveProgress((p) => {
+    store.archiveProgress = p.stage === 'done' || p.stage === 'error' ? null : { sessionId: p.id, stage: p.stage, note: p.note }
   })
 
   window.sqlpilot.onLlmPreviewExpired(({ requestId }: any) => {
@@ -249,16 +271,42 @@ export async function createSessionInProject(projectId: string): Promise<void> {
   store.currentId = meta.id
 }
 
+/** 归档会话（总结对话到项目归档，该项目其他会话可读）并从列表移除。
+ *  最后一个会话不删除，只归档清空（保证界面始终有当前会话） */
 export async function removeSession(id: string): Promise<void> {
   if (Object.keys(store.sessions).length <= 1) {
-    // 最后一个会话：只清空不删除
-    await newChat()
+    await archiveAndClear()
     return
   }
-  await window.sqlpilot.deleteSession(id)
+  const title = store.sessions[id]?.meta.title || '会话'
+  const pid = store.sessions[id]?.meta.projectId
+  const projName = (store.cfg?.projects || []).find((p: any) => p.id === pid)?.name
+  const arch = projName ? `对话内容将总结归档到项目「${projName}」，供该项目其他会话参考；` : '该会话未绑定项目，内容不会归档；'
+  if (!window.confirm(`归档会话「${title}」？\n${arch}会话将从列表移除。`)) return
+  const r = await window.sqlpilot.archiveSession(id, true)
+  if (!r.ok) {
+    window.alert(r.error || '归档失败')
+    return
+  }
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
   if (store.currentId === id) store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
+  if (!r.archived) window.alert(r.note || '会话内容未归档')
+  else pushNotice(`会话「${title}」${r.note}${r.preview ? `：${r.preview}…` : ''}`)
+}
+
+/** 归档当前对话到项目并清空本会话（原"清空对话"，内容不再直接丢弃） */
+export async function archiveAndClear(): Promise<void> {
+  const s = curSession()
+  if (!s) return
+  if (s.msgs.length && !window.confirm('归档当前对话？\n内容将总结归档到项目后清空本会话，可重新开始。')) return
+  const r = await window.sqlpilot.archiveSession(store.currentId, false)
+  if (!r.ok) {
+    window.alert(r.error || '归档失败')
+    return
+  }
+  s.msgs = []
+  pushNotice(`${r.note}${r.preview ? `：${r.preview}…` : ''}`)
 }
 
 export async function setSessionMode(mode: string): Promise<void> {
