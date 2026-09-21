@@ -1,5 +1,5 @@
 import mysql from 'mysql2/promise'
-import type { ConnProfile, DbAdapter, QueryResult, TableInfo } from '../types'
+import type { ConnProfile, DbAdapter, EditSupport, QueryResult, TableInfo } from '../types'
 import { getPassword } from '../secrets'
 import { classifySql } from './guard'
 
@@ -8,6 +8,13 @@ const SYSTEM_SCHEMAS = new Set([
   'information_schema', 'performance_schema', 'mysql', 'sys',
   'oceanbase', '__public__', 'SYS', 'LBACSYS', 'ORAAUDITOR'
 ])
+
+/** 超时哨兵：catch 侧按 code 识别，避免数据库报错文本含"超时"时误杀健康连接 */
+function queryTimeoutError(ms: number): Error {
+  const e = new Error(`查询超时（>${ms}ms），已取消`)
+  ;(e as any).code = 'SQLPILOT_QUERY_TIMEOUT'
+  return e
+}
 
 export class MySqlAdapter implements DbAdapter {
   kind: string
@@ -116,20 +123,54 @@ export class MySqlAdapter implements DbAdapter {
     }
   }
 
-  async query(sql: string, maxRows: number, timeoutMs: number): Promise<QueryResult> {
+  /** 网格编辑支持：主键定位行（无主键回退第一个全非空唯一键），生成列不可更新 */
+  async editSupport(schema: string, table: string): Promise<EditSupport> {
+    const c = await this.ensure()
+    const [stats] = await c.query<any[]>(
+      `SELECT index_name, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols, MAX(non_unique) AS nu
+       FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? GROUP BY index_name`,
+      [schema, table]
+    )
+    const [cols] = await c.query<any[]>(
+      `SELECT column_name, is_nullable, extra FROM information_schema.columns WHERE table_schema = ? AND table_name = ?`,
+      [schema, table]
+    )
+    if (!cols.length) throw new Error(`表 ${schema}.${table} 不存在或无权限访问`)
+    const nameOf = (r: any) => String(r.column_name ?? r.COLUMN_NAME)
+    const nullable = new Set(cols.filter((r) => String(r.is_nullable ?? r.IS_NULLABLE).toUpperCase() === 'YES').map(nameOf))
+    const readonlyCols = cols.filter((r) => /GENERATED/i.test(String(r.extra ?? r.EXTRA))).map(nameOf)
+    let keyCols: string[] = []
+    const pk = (stats as any[]).find((r) => String(r.index_name ?? r.INDEX_NAME) === 'PRIMARY')
+    if (pk) {
+      keyCols = String(pk.cols).split(',').map((s) => s.trim())
+    } else {
+      // 唯一键须全列非空：键列含 NULL 时无法可靠定位行
+      const uniq = (stats as any[]).find(
+        (r) => Number(r.nu) === 0 && String(r.cols).split(',').every((k: string) => !nullable.has(k.trim()))
+      )
+      if (uniq) keyCols = String(uniq.cols).split(',').map((s) => s.trim())
+    }
+    if (!keyCols.length) {
+      return { editable: false, reason: '表没有主键或全非空唯一键，无法定位行', keyMode: 'cols', keyCols: [], readonlyCols }
+    }
+    return { editable: true, keyMode: 'cols', keyCols, readonlyCols }
+  }
+
+  async query(sql: string, maxRows: number, timeoutMs: number, binds?: any[]): Promise<QueryResult> {
     let c = await this.ensure()
     const started = Date.now()
     let res: [any[], any]
-    const qp = c.query({ sql, rowsAsArray: true }) as Promise<[any[], any]>
+    const qp = c.query({ sql, rowsAsArray: true, values: binds }) as Promise<[any[], any]>
     // 超时后被放弃的查询若再报错，避免 unhandled rejection 拖垮主进程
     qp.catch(() => {})
+    const timeoutErr = queryTimeoutError(timeoutMs)
     try {
       res = await Promise.race([
         qp,
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`查询超时（>${timeoutMs}ms），已取消`)), timeoutMs))
+        new Promise<never>((_, rej) => setTimeout(() => rej(timeoutErr), timeoutMs))
       ])
     } catch (e: any) {
-      if (/超时/.test(String(e?.message))) {
+      if ((e as any)?.code === 'SQLPILOT_QUERY_TIMEOUT') {
         await this.destroy()
         throw e
       }
@@ -141,7 +182,7 @@ export class MySqlAdapter implements DbAdapter {
         }
         await this.destroy()
         c = await this.ensure()
-        res = await c.query({ sql, rowsAsArray: true }) as [any[], any]
+        res = await c.query({ sql, rowsAsArray: true, values: binds }) as [any[], any]
       } else {
         throw e
       }

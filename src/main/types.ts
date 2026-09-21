@@ -128,7 +128,19 @@ export interface DbAdapter {
   listTables(schema: string): Promise<TableInfo[]>
   describeTable(schema: string, table: string): Promise<{ columns: { name: string; type: string; nullable: string }[]; approxRows?: number }>
   getDdl(schema: string, table: string): Promise<string>
-  query(sql: string, maxRows: number, timeoutMs: number): Promise<QueryResult>
-  /** Oracle 类适配器需要：写操作后显式提交 */
-  commit?(): Promise<void>
+  query(sql: string, maxRows: number, timeoutMs: number, binds?: any): Promise<QueryResult>
+  /** Oracle 类适配器需要：写操作后显式提交。返回 false = 连接已被重置、事务未提交 */
+  commit?(): Promise<boolean>
+  /** 结果网格编辑支持信息：行标识方式与不可更新列（无则该表不可编辑） */
+  editSupport?(schema: string, table: string): Promise<EditSupport>
+}
+
+export interface EditSupport {
+  editable: boolean
+  reason?: string
+  /** Oracle 用 rowid 定位行；MySQL/OB 用主键（或唯一键）列定位 */
+  keyMode: 'rowid' | 'cols'
+  keyCols: string[]
+  /** 虚拟列/生成列等不可作为 UPDATE 目标的列 */
+  readonlyCols: string[]
 }

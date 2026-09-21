@@ -20,8 +20,11 @@ export function classifySql(raw: string): SqlVerdict {
   sql = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ').trim()
   if (!sql) return { ok: false, kind: 'unknown', risk: 3, reason: '空语句' }
 
-  // 检测用副本：把字符串字面量清空，避免字面量里的分号/关键字造成误判
+  // 检测用副本：把字符串字面量清空，避免字面量里的分号/关键字造成误判。
+  // 先处理 Oracle q 字面量（q'[...]' 配对定界 / q'#...#' 单字符定界），其中的分号不构成多语句
   const plain = sql
+    .replace(/\bq'([\[\(\{<])[\s\S]*?[\]\)\}>]'/gi, "''")
+    .replace(/\bq'(.)[\s\S]*?\1'/gi, "''")
     .replace(/'(?:[^']|'')*'/g, "''")
     .replace(/"(?:[^"]|"")*"/g, '""')
     .replace(/`[^`]*`/g, '``')

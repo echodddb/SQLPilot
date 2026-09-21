@@ -77,16 +77,27 @@
       <div class="card">
         <h3>技能（Skills）
           <button class="btn" style="font-size:12px; margin-left:8px" @click="newSkill">＋ 新建</button>
-          <button class="btn ghost" style="font-size:12px; margin-left:4px" @click="doImport">导入 .md</button>
+          <button class="btn ghost" style="font-size:12px; margin-left:4px" @click="doImport">导入文件…</button>
         </h3>
         <div class="desc">
-          技能是一份 Markdown 指令（含名称和描述）。启用后模型会在任务匹配时自动读取并遵循其步骤——把您的 DBA
-          操作手册、巡检流程、报表规范写成技能即可复用。
+          技能是一份 Markdown 指令（SKILL.md，含名称和描述），可带附属资源文件。启用后模型会在任务匹配时自动读取并遵循其步骤——
+          把 DBA 操作手册、巡检流程写成技能即可复用。支持导入 .md 单文件或 .zip / 目录技能包（如
+          <a href="#" @click.prevent="fillOracleSkillsUrl">oracle/oracle-skills</a>）。
         </div>
+        <div class="frow" style="margin-top:10px">
+          <div class="fitem" style="flex:1">
+            <input type="text" v-model="importUrl" placeholder="技能包 URL：GitHub 仓库链接或 .zip 直链" style="width:100%" @keyup.enter="doImportUrl" />
+          </div>
+          <div class="fitem" style="flex:0 0 auto">
+            <button class="btn primary" :disabled="importing || !importUrl.trim()" @click="doImportUrl">{{ importing ? '下载导入中…' : '从 URL 导入' }}</button>
+          </div>
+        </div>
+        <div v-if="importMsg" class="test-result" :style="{ color: importOk ? 'var(--green)' : 'var(--red)', whiteSpace: 'pre-wrap' }">{{ importMsg }}</div>
 
         <div v-for="s in skills" :key="s.id" class="provider-item">
           <input type="checkbox" :checked="s.enabled" @change="toggleSkill(s, ($event.target as HTMLInputElement).checked)" title="启用/停用" />
           <b>{{ s.name }}</b>
+          <span v-if="s.files && s.files > 1" class="badge blue" title="技能包：SKILL.md + 附属资源文件">{{ s.files }} 个文件</span>
           <span style="color:var(--text-dim); font-size:12px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ s.description }}</span>
           <button class="icon-btn" @click="editSkill(s)" title="编辑">✎</button>
           <button class="icon-btn" @click="delSkill(s)" title="删除">✕</button>
@@ -326,8 +337,57 @@ async function saveSkillEditor() {
 
 async function doImport() {
   const r = await window.sqlpilot.importSkill()
-  if (r.ok) await loadSkills()
-  else if (r.error) alert('导入失败：' + r.error)
+  if (r.ok) {
+    showImportResult(r.pack ? { imported: r.pack.imported, updated: r.pack.updated } : null, r.skill ? [r.skill.name] : [])
+    await loadSkills()
+  } else if (r.error) {
+    importOk.value = false
+    importMsg.value = '✗ 导入失败：' + r.error
+  }
+}
+
+const importUrl = ref('')
+const importing = ref(false)
+const importOk = ref(true)
+const importMsg = ref('')
+
+function fillOracleSkillsUrl() {
+  importUrl.value = 'https://github.com/oracle/oracle-skills'
+}
+
+/** 导入结果反馈：包导入列出技能名，单文件导入只报数量 */
+function showImportResult(pack: { imported: { name: string }[]; updated: { name: string }[] } | null, single: string[]) {
+  importOk.value = true
+  if (pack) {
+    const parts: string[] = []
+    if (pack.imported.length) parts.push(`新增 ${pack.imported.length} 个：${pack.imported.map((s) => s.name).join('、')}`)
+    if (pack.updated.length) parts.push(`更新 ${pack.updated.length} 个：${pack.updated.map((s) => s.name).join('、')}`)
+    importMsg.value = '✓ ' + (parts.join('；') || '（包内没有可导入的技能）')
+  } else if (single.length) {
+    importMsg.value = `✓ 已导入技能：${single.join('、')}`
+  }
+}
+
+async function doImportUrl() {
+  const url = importUrl.value.trim()
+  if (!url || importing.value) return
+  importing.value = true
+  importMsg.value = ''
+  try {
+    const r = await window.sqlpilot.importSkillUrl(url)
+    if (r.ok) {
+      showImportResult(r.pack ? { imported: r.pack.imported, updated: r.pack.updated } : null, [])
+      await loadSkills()
+    } else {
+      importOk.value = false
+      importMsg.value = '✗ ' + (r.error || '导入失败')
+    }
+  } catch (e: any) {
+    importOk.value = false
+    importMsg.value = '✗ ' + (e?.message || e)
+  } finally {
+    importing.value = false
+  }
 }
 </script>
 

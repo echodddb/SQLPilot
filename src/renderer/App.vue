@@ -54,21 +54,31 @@
 
         <button
           class="btn ghost"
+          :class="{ 'term-active': store.view === 'db' }"
+          title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；再点返回对话）"
+          @click="store.view = store.view === 'db' ? 'chat' : 'db'">
+          🗃 数据库
+        </button>
+
+        <button
+          class="btn ghost"
           @click="store.view = store.view === 'settings' ? 'chat' : 'settings'" title="设置">
           ⚙ 设置
         </button>
       </div>
 
+      <!-- 数据库工作台用 v-show 保活：切到聊天/设置再回来，查询窗口/表数据 tab 不丢 -->
       <ChatView v-if="store.view === 'chat'" style="flex: 1; min-height: 0" />
-      <ObjectsView v-else-if="store.view === 'objects'" style="flex: 1; min-height: 0" />
-      <SettingsView v-else style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
-      <!-- 工作台面板独立于上方视图，切设置页不断开终端 -->
-      <WorkbenchPanel v-if="store.workbench" :tab="store.workbench" @close="store.workbench = null" @update:tab="(t) => (store.workbench = t)" />
+      <DbWorkbenchView v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
+      <SettingsView v-if="store.view === 'settings'" style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
+      <!-- 底部工作台面板（SSH 终端）独立于上方视图，切设置页不断开终端 -->
+      <WorkbenchPanel v-if="store.workbench" @close="store.workbench = null" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
     <ConfirmModal v-if="store.confirmQueue.length" />
     <PreviewModal v-if="store.previewQueue.length" />
+    <ArchiveModal v-if="archiveView" :project-id="archiveView.id" :project="archiveView.name" @close="archiveView = null" />
     <ProjectModal v-if="projectModal" @close="projectModal = false" @created="onProjectCreated" />
     <ProjectEditor v-if="projectEditorTarget" :project="projectEditorTarget" @close="projectEditorTarget = null" @saved="projectEditorTarget = null" />
     <SessionModal
@@ -80,6 +90,10 @@
     />
   </div>
   <div v-else class="empty-state"><div class="big">◆</div>加载中…</div>
+  <!-- 归档进行中的前台提示（阶段事件驱动，done/error 自动消失） -->
+  <div v-if="store.archiveProgress" class="archive-toast">
+    <span class="spinner"></span>{{ store.archiveProgress.note }}
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -88,11 +102,12 @@ import { store, curSession, init, setSessionMode, setSessionProvider, MODES, toP
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsView from './components/SettingsView.vue'
-import ObjectsView from './components/ObjectsView.vue'
+import DbWorkbenchView from './components/DbWorkbenchView.vue'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
 import ConnManager from './components/ConnManager.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import PreviewModal from './components/PreviewModal.vue'
+import ArchiveModal from './components/ArchiveModal.vue'
 import ProjectModal from './components/ProjectModal.vue'
 import ProjectEditor from './components/ProjectEditor.vue'
 import SessionModal from './components/SessionModal.vue'
@@ -103,6 +118,7 @@ const theme = ref<'dark' | 'light'>('dark')
 const projectModal = ref(false)
 const projectEditorTarget = ref<any>(null)
 const sessionModal = ref<'new' | 'switch' | null>(null)
+const archiveView = ref<{ id: string; name: string } | null>(null)
 
 const boundProject = computed(() => {
   const pid = curSession()?.meta.projectId
@@ -142,6 +158,7 @@ function openSessionModal(mode: 'new' | 'switch') {
 provide('openProjectModal', openProjectModalFn)
 provide('openProjectEditor', (p: any) => { projectEditorTarget.value = p })
 provide('openSessionModal', openSessionModal)
+provide('openArchiveView', (p: any) => { archiveView.value = { id: p.id, name: p.name } })
 
 async function onProjectCreated(project: any) {
   // 建好项目直接在该项目下开会话，一步到位
@@ -164,3 +181,39 @@ init().then(() => {
   applyTheme(store.cfg.theme === 'light' ? 'light' : 'dark')
 })
 </script>
+
+<style scoped>
+.archive-toast {
+  position: fixed;
+  bottom: 26px;
+  left: 50%;
+  transform: translateX(-50%);
+  /* 纯提示不拦截交互：toast 位于输入框上方区域，可点性必须穿透 */
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 18px;
+  border-radius: 99px;
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 12.5px;
+  box-shadow: var(--shadow-lg);
+  z-index: 300;
+  max-width: 80vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.archive-toast .spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--accent-dim);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>

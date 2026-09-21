@@ -1,4 +1,5 @@
 import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from 'electron'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { loadConfig, saveConfig } from './config'
 import { setPassword, deletePassword, getPassword, secretsAvailable } from './secrets'
@@ -10,11 +11,15 @@ import { OracleAdapter } from './db/oracle'
 import { MySqlAdapter } from './db/mysql'
 import {
   runTurn, resetSession, cancelSession, loadPersistedSessions, persistSessions,
-  getSession, listSessions, newSession, deleteSession, updateSession,
+  getSession, listSessions, newSession, deleteSession, updateSession, summarizeDropped,
   type AgentEvent
 } from './agent/loop'
-import { listSkills, saveSkill, deleteSkill, importSkill, readSkill } from './skills'
-import type { AppConfig, ConnProfile, ProjectConfig } from './types'
+import { callLlm } from './agent/llm'
+import { appendArchive, readProjectArchiveFull } from './memory'
+import { listSkills, saveSkill, deleteSkill, importSkill, importSkillPack, importSkillPackFromUrl, readSkill } from './skills'
+import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
+import { buildCsv } from './csv'
+import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
 import type { ApprovalDecision, ApprovalRequest } from './tools'
 
 let win: BrowserWindow | null = null
@@ -94,6 +99,9 @@ function resolveProvider(cfg: AppConfig, sessionId: string) {
   )
 }
 
+/** 会话归档总结的系统提示词 */
+const ARCHIVE_SUMMARY_SYSTEM = '你是会话归档器。把这段 DBA 助手与用户的对话总结为紧凑备忘，供同项目后续会话作背景参考。300 字以内，中文，直接输出正文（无开场白/客套），涵盖：做了什么、关键结论与数字、涉及的库和表、未完成事项、用户的约定或偏好。'
+
 export function registerIpc(): void {
   loadPersistedSessions()
 
@@ -129,6 +137,7 @@ export function registerIpc(): void {
     if (idx >= 0) cfg.connections[idx] = profile
     else cfg.connections.push(profile)
     saveConfig(cfg)
+    metaDropConn(profile.id) // 连接参数变了，元数据缓存全部作废
     if (password !== undefined) setPassword(profile.id, password)
     dropAdapter(profile.id)
     return { ok: true }
@@ -140,6 +149,7 @@ export function registerIpc(): void {
     saveConfig(cfg)
     deletePassword(id)
     dropAdapter(id)
+    metaDropConn(id)
     return { ok: true }
   })
 
@@ -166,24 +176,30 @@ export function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('conn:schemas', async (_e, { id }: { id: string }) => {
+  ipcMain.handle('conn:schemas', async (_e, { id, refresh }: { id: string; refresh?: boolean }) => {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === id)
     if (!profile) return { ok: false, error: '连接不存在' }
     try {
-      const schemas = await getAdapter(profile, cfg.instantClientDir).listSchemas()
+      const schemas = await cached(metaKeys.schemas(profile.id), !!refresh, () =>
+        getAdapter(profile, cfg.instantClientDir).listSchemas()
+      )
       return { ok: true, schemas }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }
   })
 
-  ipcMain.handle('conn:tables', async (_e, { id, schema }: { id: string; schema: string }) => {
+  ipcMain.handle('conn:tables', async (_e, { id, schema, refresh }: { id: string; schema: string; refresh?: boolean }) => {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === id)
     if (!profile) return { ok: false, error: '连接不存在' }
+    // Oracle 元数据一律大写规范化，保证缓存 key 与实际查询一致
+    const s = profile.type === 'oracle' ? schema.toUpperCase() : schema
     try {
-      const tables = await getAdapter(profile, cfg.instantClientDir).listTables(schema)
+      const tables = await cached(metaKeys.tables(profile.id, s), !!refresh, () =>
+        getAdapter(profile, cfg.instantClientDir).listTables(s)
+      )
       return { ok: true, tables }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
@@ -196,6 +212,60 @@ export function registerIpc(): void {
   ipcMain.handle('session:delete', (_e, { id }: { id: string }) => {
     deleteSession(id)
     return { ok: true }
+  })
+  // 归档会话：总结对话内容写入项目归档（该项目其他会话的提示词会注入），
+  // remove=true 同时删除会话（原"删除会话"），false 只清空（原"清空对话"）。
+  // 总结走 LLM 需要数秒：每阶段向渲染层发 archive:progress 事件做前台提示
+  ipcMain.handle('session:archive', async (_e, { id, remove }: { id: string; remove: boolean }) => {
+    try {
+      const cfg = loadConfig()
+      const sess = getSession(id)
+      if (sess.running) {
+        return { ok: false, error: '会话正在执行任务，请先停止（或等它结束）再归档' }
+      }
+      const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
+      let summary = ''
+      let note: string
+      if (!sess.messages.length) {
+        note = '会话为空，未生成归档'
+      } else if (!project) {
+        note = '会话未绑定项目，内容未归档'
+      } else {
+        // LLM 总结（同样走发送前预览）；失败/取消回退本地抽取式摘要
+        const provider = resolveProvider(cfg, id)
+        if (provider) {
+          win?.webContents.send('archive:progress', { id, stage: 'summary', note: `正在用模型总结「${sess.title}」…` })
+          try {
+            const res = await callLlm(provider, ARCHIVE_SUMMARY_SYSTEM, sess.messages, [], {}, {
+              preview: (url, body) => previewLlmRequest(url, body, id)
+            })
+            summary = (res.content || '').trim()
+          } catch {
+            /* 模型不可用/预览取消：走本地回退 */
+          }
+        }
+        if (!summary) {
+          win?.webContents.send('archive:progress', { id, stage: 'summary', note: '模型总结不可用（失败或已在预览中取消），改用本地抽取摘要…' })
+          summary = summarizeDropped(undefined, sess.messages)
+        }
+        win?.webContents.send('archive:progress', { id, stage: 'save', note: `写入项目「${project.name}」归档…` })
+        appendArchive(project.name, sess.title, summary)
+        note = `已归档到项目「${project.name}」`
+      }
+      if (remove) deleteSession(id)
+      else resetSession(id)
+      win?.webContents.send('archive:progress', { id, stage: 'done', note })
+      return { ok: true, archived: !!summary, note, preview: summary.slice(0, 160) }
+    } catch (e: any) {
+      win?.webContents.send('archive:progress', { id, stage: 'error', note: String(e?.message || e).slice(0, 200) })
+      return { ok: false, error: String(e?.message || e).slice(0, 300) }
+    }
+  })
+  ipcMain.handle('archive:get', (_e, { projectId }: { projectId: string }) => {
+    const cfg = loadConfig()
+    const project = cfg.projects.find((p) => p.id === projectId)
+    if (!project) return { ok: false, error: '项目不存在' }
+    return { ok: true, project: project.name, content: readProjectArchiveFull(project.name) || '' }
   })
   ipcMain.handle('session:update', (_e, { id, patch }: { id: string; patch: any }) => {
     updateSession(id, patch)
@@ -424,6 +494,8 @@ export function registerIpc(): void {
       const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
       const r = await adapter.query(sql, 500, 60_000)
       appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', conn: profile.name, detail: `[控制台] ${sql.slice(0, 400)}`, mode: 'human' })
+      // 控制台执行了 DDL：该连接的元数据缓存全部失效（表/列结构可能已变）
+      if (v.kind === 'ddl') metaDropConn(connId)
       const head = (sql.trim().replace(/^(--[^\n]*\r?\n|\/\*[\s\S]*?\*\/|\s)+/, '').match(/^[a-zA-Z]+/)?.[0] || '').toUpperCase()
       // 写语句没有结果网格，给一条明确的成功/事务状态消息
       let message: string | undefined
@@ -482,16 +554,27 @@ export function registerIpc(): void {
       const size = Math.min(Math.max(Number(pageSize) || 50, 10), 500)
       const lo = (p - 1) * size
       const hi = lo + size
-      // Oracle 11g 无 FETCH FIRST：三层嵌套 ROWNUM 分页（ORDER BY 必须在最内层）
-      const sql = isOracle
+      // Oracle 11g 无 FETCH FIRST：三层嵌套 ROWNUM 分页（ORDER BY 必须在最内层）。
+      // 最内层同时取 rowid 作为网格编辑的行标识（__RID 随后剥出，不进网格）
+      const withRid = isOracle
+        ? `SELECT * FROM (SELECT t.*, ROWNUM rn FROM (SELECT x.*, x.rowid AS "__RID" FROM ${ident} x${whereSql}${orderSql}) t WHERE ROWNUM <= ${hi}) WHERE rn > ${lo}`
+        : ''
+      const plain = isOracle
         ? `SELECT * FROM (SELECT t.*, ROWNUM rn FROM (SELECT * FROM ${ident}${whereSql}${orderSql}) t WHERE ROWNUM <= ${hi}) WHERE rn > ${lo}`
         : `SELECT * FROM ${ident}${whereSql}${orderSql} LIMIT ${lo}, ${size}`
-      const data = await adapter.query(sql, size, 60_000)
+      let data
+      try {
+        data = await adapter.query(withRid || plain, size, 60_000)
+      } catch (e: any) {
+        // 视图（尤其含 DISTINCT/GROUP BY/JOIN 的）不能选 rowid：降级为普通查询，本页不可编辑
+        if (!isOracle || !/00904|01446|invalid identifier/i.test(String(e?.message ?? e))) throw e
+        data = await adapter.query(plain, size, 60_000)
+      }
       const cacheKey = `${connId}|${s}|${t}|${cond}`
       let total: number
-      const cached = objCountCache.get(cacheKey)
-      if (cached && Date.now() - cached.at < 10_000) {
-        total = cached.total
+      const cachedCnt = objCountCache.get(cacheKey)
+      if (cachedCnt && Date.now() - cachedCnt.at < 10_000) {
+        total = cachedCnt.total
       } else {
         const cnt = await adapter.query(`SELECT COUNT(*) AS CNT FROM ${ident}${whereSql}`, 1, 60_000)
         total = Number(cnt.rows[0]?.[0]) || 0
@@ -500,22 +583,35 @@ export function registerIpc(): void {
       }
       let columns = data.columns
       let rows = data.rows
+      let rids: string[] | undefined
+      if (isOracle) {
+        const ridIdx = columns.indexOf('__RID')
+        if (ridIdx >= 0) {
+          rids = rows.map((r) => (r[ridIdx] == null ? '' : String(r[ridIdx])))
+          columns = columns.filter((_, i) => i !== ridIdx)
+          rows = rows.map((r) => r.filter((_, i) => i !== ridIdx))
+        }
+      }
       if (isOracle && columns.length && columns[columns.length - 1] === 'RN') {
         columns = columns.slice(0, -1)
         rows = rows.map((r) => r.slice(0, -1))
       }
-      return { ok: true, columns, rows, total, ms: data.ms }
+      return { ok: true, columns, rows, total, ms: data.ms, rids }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }
   })
 
-  ipcMain.handle('obj:describe', async (_e, { connId, schema, table }: { connId: string; schema: string; table: string }) => {
+  ipcMain.handle('obj:describe', async (_e, { connId, schema, table, refresh }: { connId: string; schema: string; table: string; refresh?: boolean }) => {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === connId)
     if (!profile) return { ok: false, error: '连接不存在' }
+    const s = profile.type === 'oracle' ? schema.toUpperCase() : schema
+    const t = profile.type === 'oracle' ? table.toUpperCase() : table
     try {
-      const info = await getAdapter(profile, cfg.instantClientDir).describeTable(schema, table)
+      const info = await cached(metaKeys.describe(connId, s, t), !!refresh, () =>
+        getAdapter(profile, cfg.instantClientDir).describeTable(s, t)
+      )
       return { ok: true, info }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
@@ -530,6 +626,141 @@ export function registerIpc(): void {
       const ddl = await getAdapter(profile, cfg.instantClientDir).getDdl(schema, table)
       return { ok: true, ddl }
     } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  // ---------- 结果网格编辑（对象浏览器数据页，人类通道：审计留痕，同 SQL 控制台） ----------
+
+  ipcMain.handle('obj:editInfo', async (_e, { connId, schema, table, refresh }: { connId: string; schema: string; table: string; refresh?: boolean }) => {
+    const cfg = loadConfig()
+    const profile = cfg.connections.find((c) => c.id === connId)
+    if (!profile) return { ok: false, error: '连接不存在' }
+    const s = profile.type === 'oracle' ? schema.toUpperCase() : schema
+    const t = profile.type === 'oracle' ? table.toUpperCase() : table
+    try {
+      const adapter = getAdapter(profile, cfg.instantClientDir)
+      if (!adapter.editSupport) {
+        return { ok: true, editable: false, reason: '该数据库类型暂不支持网格编辑', keyMode: 'cols', keyCols: [], readonlyCols: [] }
+      }
+      const info = await cached(metaKeys.edit(connId, s, t), !!refresh, () => adapter.editSupport!(s, t))
+      return { ok: true, ...info }
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  ipcMain.handle('obj:saveEdits', async (_e, { connId, sessionKey, schema, table, keyMode, keyCols, edits }: {
+    connId: string
+    sessionKey: string
+    schema: string
+    table: string
+    keyMode: 'rowid' | 'cols'
+    keyCols: string[]
+    edits: { rid?: string; keys?: any[]; col: string; value: string | null }[]
+  }) => {
+    const cfg = loadConfig()
+    const profile = cfg.connections.find((c) => c.id === connId)
+    if (!profile) return { ok: false, error: '连接不存在' }
+    if (!sessionKey) return { ok: false, error: '缺少会话标识' }
+    if (!Array.isArray(edits) || !edits.length) return { ok: false, error: '没有要保存的修改' }
+    const isOracle = profile.type === 'oracle'
+    const s = isOracle ? schema.toUpperCase() : schema
+    const t = isOracle ? table.toUpperCase() : table
+    const ident = `${quoteIdent(isOracle, s)}.${quoteIdent(isOracle, t)}`
+    // 列名校验：合法标识符 + 不在只读列清单（虚拟列/生成列）。值全部绑定变量，列名/表名全部引号转义
+    // 缓存未命中时回查一次（只读列防线不能依赖渲染层是否已取过 editInfo）
+    let es = metaGet<EditSupport>(metaKeys.edit(connId, s, t))
+    if (!es) {
+      const metaAdapter = getAdapter(profile, cfg.instantClientDir)
+      if (metaAdapter.editSupport) {
+        es = await metaAdapter.editSupport(s, t)
+        metaSet(metaKeys.edit(connId, s, t), es)
+      }
+    }
+    const ro = new Set((es?.readonlyCols || []).map((c) => (isOracle ? c.toUpperCase() : c)))
+    const colOk = (name: string) => /^[A-Za-z_][\w$#]*$/.test(name) && !ro.has(isOracle ? name.toUpperCase() : name)
+    // 每 tab 独立数据库会话：Oracle 的未提交事务与其他窗口/agent 互不可见
+    const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
+    const conflicts: number[] = []
+    let applied = 0
+    try {
+      if (!isOracle) await adapter.query('START TRANSACTION', 1, 10_000)
+      for (let i = 0; i < edits.length; i++) {
+        const e = edits[i]
+        if (!colOk(String(e.col))) throw new Error(`列 "${e.col}" 不可更新（只读列或非法标识符）`)
+        if (isOracle) {
+          if (!e.rid) throw new Error('本页数据没有行标识（rowid），请刷新后重试')
+          const r = await adapter.query(
+            `UPDATE ${ident} SET ${quoteIdent(true, String(e.col))} = :v WHERE rowid = :rid`,
+            1, 30_000, { v: e.value, rid: e.rid }
+          )
+          if (r.rowCount === 0) conflicts.push(i)
+          else applied++
+        } else {
+          if (!Array.isArray(e.keys) || e.keys.length !== keyCols.length) throw new Error('行键值缺失，请刷新后重试')
+          const where = keyCols.map((k) => `${quoteIdent(false, k)} = ?`).join(' AND ')
+          const r = await adapter.query(
+            `UPDATE ${ident} SET ${quoteIdent(false, String(e.col))} = ? WHERE ${where}`,
+            1, 30_000, [e.value, ...e.keys]
+          )
+          if (r.rowCount === 0) conflicts.push(i)
+          else applied++
+        }
+      }
+      // MySQL 侧整批原子：有冲突全部回滚；Oracle 保持事务打开，由工具栏 ✓/↩ 决定
+      if (!isOracle) {
+        await adapter.query(conflicts.length ? 'ROLLBACK' : 'COMMIT', 1, 10_000)
+      }
+      appendAudit({
+        kind: 'sql.write', conn: profile.name,
+        detail: `[网格编辑] ${s}.${t} ${applied} 处修改${conflicts.length ? `，${conflicts.length} 处冲突` : ''}${isOracle ? '（未提交）' : ''}`,
+        mode: 'human'
+      })
+      return { ok: true, applied, conflicts, uncommitted: isOracle }
+    } catch (e: any) {
+      if (!isOracle) {
+        try { await adapter.query('ROLLBACK', 1, 10_000) } catch { /* 忽略 */ }
+      }
+      appendAudit({ kind: 'sql.write', conn: profile.name, detail: `[网格编辑] ${s}.${t} 保存失败`, mode: 'human', error: String(e?.message || e).slice(0, 200) })
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  // ---------- 查询结果导出（CSV，Excel 可直接打开；重新执行查询取全量，不限于界面显示的行数） ----------
+  const EXPORT_MAX_ROWS = 100_000
+
+  ipcMain.handle('export:result', async (_e, { connId, sessionKey, sql, columns }: {
+    connId: string
+    sessionKey: string
+    sql: string
+    columns: string[]
+  }) => {
+    const cfg = loadConfig()
+    const profile = cfg.connections.find((c) => c.id === connId)
+    if (!profile) return { ok: false, error: '连接不存在' }
+    if (!sql?.trim()) return { ok: false, error: '当前窗口还没有执行过查询' }
+    if (!Array.isArray(columns) || !columns.length) return { ok: false, error: '至少选择一列' }
+    const v = classifySql(sql)
+    if (!v.ok) return { ok: false, error: '只能导出查询语句（SELECT/SHOW 等）的结果' }
+    try {
+      const ts = new Date()
+      const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(ts.getHours()).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}${String(ts.getSeconds()).padStart(2, '0')}`
+      const r = await dialog.showSaveDialog(win!, {
+        title: '导出查询结果',
+        defaultPath: `查询结果_${stamp}.csv`,
+        filters: [{ name: 'CSV（Excel 可直接打开）', extensions: ['csv'] }]
+      })
+      if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+      // 与显示同源（同一 sessionKey 会话）重新执行，取全量行（上限 10 万）
+      const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
+      const res = await adapter.query(sql, EXPORT_MAX_ROWS, 120_000)
+      const csv = buildCsv(res.columns, res.rows, columns)
+      await fs.writeFile(r.filePath, csv, 'utf8')
+      appendAudit({ kind: 'tool', conn: profile.name, detail: `导出查询结果 ${res.rows.length} 行 × ${columns.length} 列 → ${r.filePath}` })
+      return { ok: true, path: r.filePath, rows: res.rows.length, truncated: res.rows.length >= EXPORT_MAX_ROWS }
+    } catch (e: any) {
+      appendAudit({ kind: 'tool', conn: profile.name, detail: `导出查询结果失败: ${sql.slice(0, 200)}`, error: String(e?.message || e).slice(0, 200) })
       return { ok: false, error: String(e?.message || e) }
     }
   })
@@ -740,9 +971,10 @@ export function registerIpc(): void {
     return { ok: true }
   })
 
-  ipcMain.handle('skill:read', (_e, { id }: { id: string }) => {
+  ipcMain.handle('skill:read', (_e, { id, resourcePath }: { id: string; resourcePath?: string }) => {
     try {
-      return { ok: true, content: readSkill(id).content }
+      const s = readSkill(id, resourcePath)
+      return { ok: true, content: s.content }
     } catch (e: any) {
       return { ok: false, content: '', error: String(e?.message || e) }
     }
@@ -757,13 +989,31 @@ export function registerIpc(): void {
 
   ipcMain.handle('skill:import', async (_e) => {
     const r = await dialog.showOpenDialog(win!, {
-      properties: ['openFile'],
-      filters: [{ name: '技能文件', extensions: ['md'] }]
+      properties: ['openFile', 'openDirectory'],
+      filters: [{ name: '技能文件 / 技能包', extensions: ['md', 'zip'] }]
     })
     if (r.canceled || !r.filePaths.length) return { ok: false }
+    const p = r.filePaths[0]
     try {
-      const s = importSkill(r.filePaths[0])
+      const stat = await fs.stat(p)
+      if (stat.isDirectory() || /\.zip$/i.test(p)) {
+        const pack = await importSkillPack(p)
+        appendAudit({ kind: 'tool', detail: `导入技能包 ${path.basename(p)}：新增 ${pack.imported.length} 个，更新 ${pack.updated.length} 个` })
+        return { ok: true, pack }
+      }
+      const s = importSkill(p)
       return { ok: true, skill: s }
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  // 从 URL 导入技能包：GitHub 仓库链接自动转 zip 下载（如 https://github.com/oracle/oracle-skills）
+  ipcMain.handle('skill:importUrl', async (_e, { url }: { url: string }) => {
+    try {
+      const pack = await importSkillPackFromUrl(url)
+      appendAudit({ kind: 'tool', detail: `从 URL 导入技能包 ${String(url).slice(0, 200)}：新增 ${pack.imported.length} 个，更新 ${pack.updated.length} 个` })
+      return { ok: true, pack }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }

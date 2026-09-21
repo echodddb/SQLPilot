@@ -44,23 +44,31 @@ async function readSse(res: any, onData: (json: any) => void): Promise<void> {
   const reader = res.body.getReader()
   const decoder = new TextDecoder('utf-8')
   let buf = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    let idx: number
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim()
-      buf = buf.slice(idx + 1)
-      if (!line.startsWith('data:')) continue
-      const payload = line.slice(5).trim()
-      if (!payload || payload === '[DONE]') continue
-      try {
-        onData(JSON.parse(payload))
-      } catch {
-        /* 跳过坏帧 */
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx: number
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 1)
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        let json: any
+        try {
+          json = JSON.parse(payload)
+        } catch {
+          continue // 单帧损坏跳过，不影响后续帧
+        }
+        // 回调抛错（如流中 error 帧）必须向上传播，否则半截内容会被当成完整响应
+        onData(json)
       }
     }
+  } catch (e) {
+    try { await reader.cancel().catch(() => {}) } catch { /* 忽略 */ }
+    throw e
   }
 }
 
@@ -153,6 +161,10 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
     let stopReason: string | undefined
 
     await readSse(res, (j: any) => {
+      // 部分兼容网关以 {"error":...} 数据帧下发流中错误（如过载/截断），静默忽略会拿到半截内容
+      if (j?.error) {
+        throw new Error(`LLM 流中断: ${j.error?.message || JSON.stringify(j.error).slice(0, 300)}`)
+      }
       const ch = j?.choices?.[0]
       // 流式 usage 一般在最后一个 chunk（需 stream_options.include_usage）
       if (j?.usage && (j.usage.prompt_tokens != null || j.usage.completion_tokens != null)) {
@@ -186,7 +198,7 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
       if (ch.finish_reason) stopReason = ch.finish_reason
     })
 
-    return { content, toolCalls: [...tcMap.values()].filter((t) => t.name), stopReason, usage }
+    return { content, toolCalls: [...tcMap.values()].filter((t) => t.name), stopReason, usage, thinking: reasoning || undefined }
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onExternalAbort)
@@ -218,8 +230,9 @@ function toAnthropicMessages(history: ChatMsg[], includeThinking: boolean): any[
       flush()
       const blocks: any[] = []
       // 思考块必须位于 assistant 消息首位，否则开思考的续轮会被 API 拒绝；
-      // 反之本次请求未开思考时必须略去历史思考块（API 同样会拒绝）
-      if (includeThinking && m.thinking) blocks.push({ type: 'thinking', thinking: m.thinking, signature: m.thinkingSig || '' })
+      // 反之本次请求未开思考时必须略去历史思考块（API 同样会拒绝）。
+      // 另：无签名的 thinking 来自 OpenAI 协议历史（仅本地展示），回传 Anthropic 会被拒，须跳过
+      if (includeThinking && m.thinking && m.thinkingSig) blocks.push({ type: 'thinking', thinking: m.thinking, signature: m.thinkingSig })
       if (m.content) blocks.push({ type: 'text', text: m.content })
       for (const tc of m.toolCalls || []) {
         let input: any = {}
@@ -281,6 +294,10 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
     const toolBlocks = new Map<number, { id: string; name: string; args: string }>()
     await readSse(res, (j: any) => {
       const t = j?.type
+      // Anthropic 流中错误帧（overload 等）：不处理会静默截断内容
+      if (t === 'error') {
+        throw new Error(`LLM 流中断: ${j.error?.message || JSON.stringify(j.error).slice(0, 300)}`)
+      }
       if (t === 'message_start') {
         // usage 随 message_start 下发（含缓存命中字段）
         const u = j.message?.usage

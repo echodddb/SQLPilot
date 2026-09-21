@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Menu } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { registerIpc, bindWindow, shutdown } from './ipc'
 import { appendAudit } from './audit'
 
@@ -33,6 +34,7 @@ function migrateOldUserData(): void {
 }
 
 function createWindow(): void {
+  const indexHtml = path.join(__dirname, '../renderer/index.html')
   win = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -51,14 +53,14 @@ function createWindow(): void {
   win.removeMenu()
   Menu.setApplicationMenu(null)
 
-  // F12 开发者工具 / Ctrl+R 刷新
+  // F12 开发者工具 / Ctrl+R 刷新：仅开发构建或 SQLPILOT_DEV=1 时开放，生产包不给终端用户留入口
+  const devTools = !app.isPackaged || !!process.env.SQLPILOT_DEV
   win.webContents.on('before-input-event', (_e, input) => {
-    if (input.type === 'keyDown') {
-      if (input.key === 'F12') {
-        win?.webContents.toggleDevTools()
-      } else if (input.control && input.key === 'r') {
-        win?.webContents.reload()
-      }
+    if (!devTools || input.type !== 'keyDown') return
+    if (input.key === 'F12') {
+      win?.webContents.toggleDevTools()
+    } else if (input.control && input.key === 'r') {
+      win?.webContents.reload()
     }
   })
 
@@ -74,13 +76,14 @@ function createWindow(): void {
     console.error('[renderer gone]', details.reason)
   })
 
-  // 页面不弹新窗口、不允许导航离开本地文件
+  // 页面不弹新窗口、不允许导航离开应用自身页面（file:// 里也只放行本页，hash 变化除外）
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  const indexUrl = pathToFileURL(indexHtml).href
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault()
+    if (url.split('#')[0] !== indexUrl) e.preventDefault()
   })
 
-  win.loadFile(path.join(__dirname, '../renderer/index.html'))
+  win.loadFile(indexHtml)
   win.on('closed', () => {
     win = null
   })
