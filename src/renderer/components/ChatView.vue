@@ -2,6 +2,15 @@
   <div class="chat-wrap">
     <div class="chat-scroll" ref="scrollEl" @click="onChatClick">
       <div class="chat-inner">
+        <div v-if="runningTasks.length" class="subtask-bar">
+          <span style="font-size:11.5px; color:var(--text-dim); margin-right:4px">后台子代理</span>
+          <div v-for="t in runningTasks" :key="t.id" class="subtask-chip">
+            <span class="spinner" style="width:9px; height:9px; margin-right:5px"></span>
+            <b>{{ t.agentType }}</b> · {{ t.description }}
+            <span style="color:var(--text-faint); font-size:11px">{{ taskDur(t.startedAt) }}s</span>
+            <button class="x" title="停止该任务" @click="stopTask(t.id)">✕</button>
+          </div>
+        </div>
         <div v-if="!curSession().msgs.length" class="empty-state">
           <div class="big">◆</div>
           <b>SQLPilot 就绪</b> — 资深 DBA 助手，直接操作您配置的数据库
@@ -97,12 +106,14 @@
       </div>
     </div>
   </div>
+  <SubagentRunModal v-if="store.subRun" :run-id="store.subRun.runId" :title="store.subRun.title" />
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort, archiveAndClear } from '../store'
 import ToolCard from './ToolCard.vue'
+import SubagentRunModal from './SubagentRunModal.vue'
 
 const scrollEl = ref<HTMLElement | null>(null)
 
@@ -340,6 +351,19 @@ async function send() {
   await sendMessage(text)
 }
 
+const runningTasks = computed(() => (curSession()?.subTasks || []).filter((t: any) => t.status === 'running'))
+const taskTick = ref(0)
+const taskTimer = setInterval(() => { taskTick.value++ }, 5000)
+onBeforeUnmount(() => { if (taskTimer) clearInterval(taskTimer) })
+async function stopTask(id: string): Promise<void> {
+  await window.sqlpilot.subagentStopTask(id)
+}
+// 引用 taskTick：让模板里的耗时随周期重算
+function taskDur(startedAt: number): number {
+  void taskTick.value
+  return Math.round((Date.now() - startedAt) / 1000)
+}
+
 const msgSignature = computed(() => store.currentId + ':' + store.sessionOrder.join(',') + ':' + (curSession()?.msgs.map((m) => m.text.length + m.tools.length).join(',') || '') + ':' + (curSession()?.msgs.length || 0))
 
 let lastSessionId = ''
@@ -390,4 +414,17 @@ watch(msgSignature, async () => {
 }
 .quick-btn:hover { color: var(--accent); border-color: var(--accent); }
 .quick-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.subtask-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  border: 1px dashed var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px;
+  background: var(--bg-card);
+}
+.subtask-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--border); border-radius: 12px; padding: 2px 10px; font-size: 12px;
+}
+.subtask-chip .x {
+  border: none; background: none; color: var(--text-faint); cursor: pointer; font-size: 11px; padding: 0 2px;
+}
+.subtask-chip .x:hover { color: var(--red); }
 </style>

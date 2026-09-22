@@ -65,7 +65,12 @@ declare global {
       onLlmPreview(cb: (p: { requestId: string; sessionId?: string; url: string; body: any }) => void): () => void
       onLlmPreviewExpired(cb: (p: { requestId: string }) => void): () => void
       getAudit(): Promise<any[]>
+      auditQuery(q: { kinds?: string[]; actors?: string[]; conns?: string[]; sessionId?: string; runId?: string; q?: string; fromMs?: number; toMs?: number; approvedOnly?: boolean; errorsOnly?: boolean; limit?: number; offset?: number }): Promise<{ entries: any[]; total: number; hasMore: boolean }>
       appInfo(): Promise<{ secretsAvailable: boolean; version: string }>
+      subagentTasks(sessionId?: string): Promise<{ id: string; sessionId: string; agentType: string; description: string; status: string; startedAt: number; endedAt?: number; summary?: string; runFile?: string }[]>
+      subagentStopTask(id: string): Promise<{ ok: boolean }>
+      subagentAudit(runId: string): Promise<{ ok: boolean; entries: any[]; file: string }>
+      onSubtasks(cb: (p: { sessionId: string; tasks: any[] }) => void): () => void
       onAgentEvent(cb: (ev: any) => void): () => void
       onConfirm(cb: (req: any) => void): () => void
       onConfirmExpired(cb: (payload: any) => void): () => void

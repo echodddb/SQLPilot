@@ -6,10 +6,13 @@ import type { ConnProfile, PermissionMode, SshServer } from '../types'
 import { resolveConnection, getAdapter } from '../db/manager'
 import { classifySql } from '../db/guard'
 import { appendAudit } from '../audit'
+import type { AuditEntry } from '../audit'
 import { cached, metaDropConn, metaKeys } from '../meta'
 import { readSkill } from '../skills'
 import { appendMemory } from '../memory'
 import * as ssh from '../ssh'
+import { readRunAudit } from '../agent/subagent-audit'
+import { listSubagentTasks, stopSubagentTask, waitSubagentTask } from '../agent/subtask-registry'
 
 export interface ToolDef {
   name: string
@@ -23,6 +26,8 @@ export interface ApprovalRequest {
   sql: string
   kind: string
   risk: number
+  /** 发起者标注（如"子代理 explore"）：确认弹窗展示来源，主代理直接执行时为空 */
+  origin?: string
 }
 
 export type ApprovalDecision = 'once' | 'session' | 'deny'
@@ -37,6 +42,23 @@ export interface ToolContext {
   project?: { id: string; name: string; rootPath: string }
   /** 项目挂载的 SSH 服务器（server_* 工具用） */
   servers?: SshServer[]
+  /** 子代理执行标记（如 "sub:explore"）：写操作审计打标归属 */
+  origin?: string
+  /** 发起会话 id（审计结构化字段） */
+  sessionId?: string
+  /** 子代理运行 id（审计结构化字段，关联 subagent-runs/<runId>.jsonl） */
+  runId?: string
+}
+
+/** 工具侧审计公共字段：发起者/会话/子代理运行 id/权限模式/工具名（见 audit.ts 格式规范） */
+function auditBase(ctx: ToolContext, tool: string): { actor: string; sessionId?: string; runId?: string; mode: string; tool: string } {
+  return {
+    actor: ctx.origin || 'agent',
+    sessionId: ctx.sessionId,
+    runId: ctx.runId,
+    mode: ctx.mode,
+    tool
+  }
 }
 
 const MAX_ROWS = 500
@@ -198,6 +220,44 @@ export const TOOLS: ToolDef[] = [
     }
   },
   {
+    name: 'agent_spawn',
+    description: '派生子代理执行独立子任务。子代理拥有独立上下文（看不到本会话历史），只返回最终报告——中间的工具结果不占用本会话上下文。类型清单与适用场景见系统提示词"可用子代理"。prompt 必须自包含：写明目标、连接名、期望输出格式。并行扇出仅用于只读采集（如多连接巡检时一次派多个 explore）；写操作留在本会话执行。预计耗时长的采集任务可传 run_in_background=true 后台执行（立即返回任务 id，完成时会收到系统通知，用 task_output 取结果）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        agent_type: { type: 'string', description: '子代理类型（见系统提示词"可用子代理"清单，如 explore / general）' },
+        description: { type: 'string', description: '3-5 词任务短标签（界面展示用）' },
+        prompt: { type: 'string', description: '自包含的任务书：目标、连接名、范围、期望输出格式' },
+        run_in_background: { type: 'boolean', description: 'true = 后台执行，立即返回任务 id（默认前台；前台超过 2 分钟也会自动转后台）' }
+      },
+      required: ['agent_type', 'description', 'prompt']
+    }
+  },
+  {
+    name: 'task_output',
+    description: '查询后台子代理任务的进度或结果（task_id 来自 agent_spawn 后台返回或系统通知）。block=true 时等待任务完成（默认），block=false 立即返回当前状态。',
+    parameters: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: '任务 id' },
+        block: { type: 'boolean', description: '是否等待完成，默认 true' },
+        timeoutMs: { type: 'number', description: '等待超时毫秒数，默认 10000，最大 120000' }
+      },
+      required: ['task_id']
+    }
+  },
+  {
+    name: 'task_stop',
+    description: '停止一个运行中的后台子代理任务。',
+    parameters: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: '任务 id' }
+      },
+      required: ['task_id']
+    }
+  },
+  {
     name: 'enter_plan_mode',
     description: '进入计划模式（只读探索 + 制定执行计划，等待用户批准）。当任务涉及写操作、DDL 变更、多步骤执行或影响面较大时，即使当前模式允许写操作，也应先调用本工具规划。简单只读查询无需调用。',
     parameters: {
@@ -312,25 +372,33 @@ function approvalKey(req: ApprovalRequest): string {
   return `${req.tool}:${req.kind}:${req.conn}`
 }
 
-/** 写操作统一门控：计划/只读拒绝；确认/会话/放开按级别放行 */
+/** 写操作统一门控：计划/只读拒绝；确认/会话/放开按级别放行。
+ *  skipSuccessAudit = 批准成功时不记审计（调用方随后有带结果的成功审计时用，防同一次操作双条记录） */
 async function gateWrite(
   ctx: ToolContext,
   req: ApprovalRequest,
   auditConn: string,
-  detail: string
+  detail: string,
+  skipSuccessAudit = false
 ): Promise<string | null> {
+  // 子代理发起的写操作在审计里带归属标记（如 [sub:explore]）
+  const od = ctx.origin ? `[${ctx.origin}] ` : ''
+  const base = auditBase(ctx, req.tool)
+  const sqlField = req.tool === 'db_write' ? { sql: req.sql } : {}
   if (ctx.mode === 'plan' || ctx.mode === 'readonly') {
     const where = ctx.mode === 'plan' ? '计划模式（请先输出计划并获得用户批准）' : '只读模式'
-    appendAudit({ kind: 'sql.write', conn: auditConn, detail: detail.slice(0, 500), mode: ctx.mode, approved: false, error: `${where}拒绝` })
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: `${where}拒绝`, ...sqlField })
     return JSON.stringify({ error: `当前为${where}，写操作被拒绝。` })
   }
   const decision = await requestApprovalIfNeeded(ctx, req)
   if (decision === 'denied') {
-    appendAudit({ kind: 'sql.write', conn: auditConn, detail: detail.slice(0, 500), mode: ctx.mode, approved: false, error: '用户拒绝' })
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: '用户拒绝', ...sqlField })
     return JSON.stringify({ error: '用户拒绝了该操作' })
   }
   if (decision === 'session') ctx.sessionApproved.add(approvalKey(req))
-  appendAudit({ kind: 'sql.write', conn: auditConn, detail: detail.slice(0, 500), mode: ctx.mode, approved: true })
+  if (!skipSuccessAudit) {
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: true, ...sqlField })
+  }
   return null
 }
 
@@ -349,10 +417,50 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     return { ok: false, result: JSON.stringify({ error: `工具参数不是合法 JSON: ${argsJson.slice(0, 200)}` }) }
   }
 
+  // 工具侧统一审计入口：自动带发起者/会话/子代理运行 id/权限模式/工具名（格式见 audit.ts）
+  const audit = (e: AuditEntry) => appendAudit({ ...auditBase(ctx, name), ...e })
+
   try {
     // ---------- 会话规划控制（由 agent loop 拦截处理，不落到这里） ----------
     if (name === 'enter_plan_mode' || name === 'exit_plan_mode') {
       return { ok: false, result: JSON.stringify({ error: '该工具由会话调度层处理，此处不应到达' }) }
+    }
+    // agent_spawn 同样由 loop 派发（并发扇出），executeTool 不处理
+    if (name === 'agent_spawn') {
+      return { ok: false, result: JSON.stringify({ error: '该工具由会话调度层处理，此处不应到达' }) }
+    }
+
+    // ---------- 后台子代理任务收割 ----------
+    if (name === 'task_output' || name === 'task_stop') {
+      const taskId = String(args.task_id ?? '')
+      if (!taskId) return { ok: false, result: JSON.stringify({ error: 'task_id 不能为空' }) }
+      if (name === 'task_stop') {
+        const r = stopSubagentTask(taskId)
+        if (!r.ok) return { ok: false, result: JSON.stringify({ error: `任务 ${taskId} 不存在（可能已结束并被清理）` }) }
+        audit({ kind: 'tool', target: taskId, detail: `task_stop ${taskId}` })
+        const t = listSubagentTasks().find((x) => x.id === taskId)
+        return { ok: true, result: JSON.stringify({ stopped: true, status: t?.status || 'running', note: t?.status === 'running' ? '中止信号已发出，任务将在当前工具调用完成后停止' : undefined }) }
+      }
+      const block = args.block !== false
+      const timeoutMs = Math.min(Math.max(Number(args.timeoutMs) || 10_000, 0), 120_000)
+      let task = listSubagentTasks().find((x) => x.id === taskId)
+      if (!task) {
+        return { ok: false, result: JSON.stringify({ error: `任务 ${taskId} 不存在（可能是前台子代理或已清理的后台任务）` }) }
+      }
+      if (block && task.status === 'running') {
+        await waitSubagentTask(taskId, timeoutMs)
+        task = listSubagentTasks().find((x) => x.id === taskId) || task
+      }
+      audit({ kind: 'tool', target: taskId, detail: `task_output ${taskId} → ${task.status}` })
+      return {
+        ok: true,
+        result: JSON.stringify({
+          task: { id: task.id, agentType: task.agentType, description: task.description, status: task.status, summary: task.summary, runFile: task.runFile },
+          report: task.status === 'running' ? undefined : task.report,
+          retrieval_status: task.status === 'running' ? 'not_ready' : 'success',
+          note: task.status === 'running' ? `仍在运行（已等待 ${timeoutMs}ms）。任务完成后会有系统通知送达，稍后再查或继续别的工作。` : undefined
+        })
+      }
     }
 
     // ---------- 项目文件工具 ----------
@@ -382,7 +490,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
           }
         }
         walk(root, 0)
-        appendAudit({ kind: 'tool', conn: ctx.project.name, detail: `fs_list → ${entries.length} 项` })
+        audit({ kind: 'tool', conn: ctx.project.name, target: '(项目根)', detail: `fs_list → ${entries.length} 项`, rows: entries.length })
         return { ok: true, result: JSON.stringify({ project: ctx.project.name, entries }) }
       }
       if (name === 'fs_read') {
@@ -390,7 +498,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         const stat = fs.statSync(p)
         if (stat.size > 2 * 1024 * 1024) throw new Error('文件超过 2MB，拒绝读取')
         const content = fs.readFileSync(p, 'utf8')
-        appendAudit({ kind: 'tool', conn: ctx.project.name, detail: `fs_read ${args.path}` })
+        audit({ kind: 'tool', conn: ctx.project.name, target: String(args.path), detail: `fs_read ${args.path}` })
         return { ok: true, result: JSON.stringify({ path: String(args.path), size: stat.size, content: content.slice(0, 20000) }) }
       }
       if (name === 'fs_write') {
@@ -415,7 +523,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     if (name === 'read_skill') {
       const rel = args.path ? String(args.path) : undefined
       const s = readSkill(String(args.name ?? ''), rel)
-      appendAudit({ kind: 'tool', detail: `read_skill ${s.id}${rel ? ` :: ${s.path}` : ''}` })
+      audit({ kind: 'tool', target: `${s.id}${rel ? ` :: ${s.path}` : ''}`, detail: `read_skill ${s.id}${rel ? ` :: ${s.path}` : ''}` })
       return { ok: true, result: JSON.stringify({ skill: s.id, path: s.path, content: s.content.slice(0, 30000) }) }
     }
 
@@ -436,7 +544,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
           return { ok: false, result: JSON.stringify({ error: '当前会话未绑定项目，无法记录项目记忆；省略 project 参数可记入全局记忆。' }) }
         }
         const r = appendMemory({ kind: 'project', name: ctx.project.name }, text)
-        appendAudit({ kind: 'tool', conn: `项目 ${ctx.project.name}`, detail: `memory_append: ${text.slice(0, 200)}` })
+        audit({ kind: 'tool', conn: `项目 ${ctx.project.name}`, target: `(项目记忆)`, detail: `memory_append: ${text.slice(0, 200)}` })
         return { ok: true, result: JSON.stringify({ saved: true, scope: `项目 ${ctx.project.name}`, file: r.file, totalEntries: r.entries }) }
       }
       const target = conn ? ctx.connections.find((c) => c.name === conn || c.id === conn) : null
@@ -444,7 +552,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         return { ok: false, result: JSON.stringify({ error: `连接 "${conn}" 不存在`, available: ctx.connections.map((c) => c.name) }) }
       }
       const r = appendMemory(target ? { kind: 'conn', name: target.name } : { kind: 'global' }, text)
-      appendAudit({ kind: 'tool', conn: target?.name || '全局', detail: `memory_append: ${text.slice(0, 200)}` })
+      audit({ kind: 'tool', conn: target?.name || '全局', target: target ? `(连接记忆)` : '(全局记忆)', detail: `memory_append: ${text.slice(0, 200)}` })
       return { ok: true, result: JSON.stringify({ saved: true, scope: target ? `连接 ${target.name}` : '全局', file: r.file, totalEntries: r.entries }) }
     }
 
@@ -526,7 +634,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         return { ok: false, result: JSON.stringify({ error: '仅支持 http/https 网址' }) }
       }
       await shell.openExternal(url)
-      appendAudit({ kind: 'tool', detail: `open_url ${url.slice(0, 200)}` })
+      audit({ kind: 'tool', target: url.slice(0, 200), detail: `open_url ${url.slice(0, 200)}` })
       return { ok: true, result: JSON.stringify({ opened: url }) }
     }
 
@@ -542,7 +650,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       }
 
       if (name === 'server_list') {
-        appendAudit({ kind: 'tool', detail: `server_list → ${servers.length} 台` })
+        audit({ kind: 'tool', detail: `server_list → ${servers.length} 台`, rows: servers.length })
         return {
           ok: true,
           result: JSON.stringify({
@@ -573,7 +681,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
 
       if (name === 'server_read_file') {
         const r = await ssh.readFile(server, String(args.path ?? ''))
-        appendAudit({ kind: 'tool', conn: server.name, detail: `server_read_file ${args.path}` })
+        audit({ kind: 'tool', conn: server.name, target: `${server.name}:${args.path}`, detail: `server_read_file ${args.path}` })
         return { ok: true, result: JSON.stringify(r) }
       }
 
@@ -584,7 +692,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         // 而本工具在只读模式下无审批门控，必须完全字面化防注入
         const shq = `'${p.replace(/'/g, "'\\''")}'`
         const r = await ssh.execCommand(server, `tail -n ${lines} ${shq}`, 60_000)
-        appendAudit({ kind: 'tool', conn: server.name, detail: `server_tail ${p} -n ${lines}` })
+        audit({ kind: 'tool', conn: server.name, target: `${server.name}:${p}`, detail: `server_tail ${p} -n ${lines}`, rows: lines })
         return { ok: r.exitCode === 0, result: JSON.stringify({ path: p, lines, content: r.stdout.slice(0, 20000) || r.stderr.slice(0, 2000) }) }
       }
 
@@ -613,7 +721,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         const localRel = String(args.localPath ?? '')
         const localAbs = safeProjectPath(ctx.project.rootPath, localRel)
         await ssh.getFile(server, remotePath, localAbs)
-        appendAudit({ kind: 'tool', conn: server.name, detail: `server_get_file ${remotePath} → ${localRel}` })
+        audit({ kind: 'tool', conn: server.name, target: `${remotePath} → ${localRel}`, detail: `server_get_file ${remotePath} → ${localRel}` })
         return { ok: true, result: JSON.stringify({ remotePath, savedTo: localRel }) }
       }
     }
@@ -625,14 +733,14 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     if (name === 'db_list_schemas') {
       // 元数据走持久化缓存：agent 循环内反复探索不再每次打库（对象树 ⟳ 或 DDL 会失效重读）
       const schemas = await cached(metaKeys.schemas(profile.id), false, () => adapter.listSchemas())
-      appendAudit({ kind: 'tool', conn: profile.name, detail: `db_list_schemas → ${schemas.length} 个 schema` })
+      audit({ kind: 'tool', conn: profile.name, detail: `db_list_schemas → ${schemas.length} 个 schema`, rows: schemas.length })
       return { ok: true, result: JSON.stringify({ schemas: schemas.slice(0, 200), total: schemas.length }) }
     }
 
     if (name === 'db_list_tables') {
       const s = profile.type === 'oracle' ? String(args.schema).toUpperCase() : String(args.schema)
       const tables = await cached(metaKeys.tables(profile.id, s), false, () => adapter.listTables(s))
-      appendAudit({ kind: 'tool', conn: profile.name, detail: `db_list_tables ${args.schema} → ${tables.length} 个对象` })
+      audit({ kind: 'tool', conn: profile.name, target: String(args.schema), detail: `db_list_tables ${args.schema} → ${tables.length} 个对象`, rows: tables.length })
       return { ok: true, result: JSON.stringify({ schema: args.schema, tables: tables.slice(0, 300), total: tables.length }) }
     }
 
@@ -640,13 +748,13 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       const s = profile.type === 'oracle' ? String(args.schema).toUpperCase() : String(args.schema)
       const t = profile.type === 'oracle' ? String(args.table).toUpperCase() : String(args.table)
       const info = await cached(metaKeys.describe(profile.id, s, t), false, () => adapter.describeTable(s, t))
-      appendAudit({ kind: 'tool', conn: profile.name, detail: `db_describe_table ${args.schema}.${args.table}` })
+      audit({ kind: 'tool', conn: profile.name, target: `${args.schema}.${args.table}`, detail: `db_describe_table ${args.schema}.${args.table}`, rows: info.columns.length })
       return { ok: true, result: JSON.stringify(info) }
     }
 
     if (name === 'db_get_ddl') {
       const ddl = await adapter.getDdl(String(args.schema), String(args.table))
-      appendAudit({ kind: 'tool', conn: profile.name, detail: `db_get_ddl ${args.schema}.${args.table}` })
+      audit({ kind: 'tool', conn: profile.name, target: `${args.schema}.${args.table}`, detail: `db_get_ddl ${args.schema}.${args.table}` })
       return { ok: true, result: JSON.stringify({ ddl }) }
     }
 
@@ -654,12 +762,12 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       const sql = String(args.sql ?? '').trim()
       const v = classifySql(sql)
       if (!v.ok) {
-        appendAudit({ kind: 'sql.read', conn: profile.name, detail: sql.slice(0, 500), mode: ctx.mode, error: `拦截: ${v.reason || v.kind}` })
+        audit({ kind: 'sql.read', conn: profile.name, detail: '只读通道拦截', sql, error: `拦截: ${v.reason || v.kind}` })
         return { ok: false, result: JSON.stringify({ error: `只读通道拦截该语句（${v.kind}）: ${v.reason || '仅允许 SELECT/EXPLAIN/SHOW 类语句'}。如确需执行写操作请使用 db_write 工具。` }) }
       }
       const r = await adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS)
       const out = fmtQueryResult(r)
-      appendAudit({ kind: 'sql.read', conn: profile.name, detail: sql.slice(0, 500), mode: ctx.mode })
+      audit({ kind: 'sql.read', conn: profile.name, detail: 'db_query 执行', sql, rows: r.rowCount, ms: r.ms })
       return { ok: true, result: JSON.stringify(out) }
     }
 
@@ -669,20 +777,20 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       if (v.ok) {
         return { ok: false, result: JSON.stringify({ error: '这是只读语句，请使用 db_query 工具执行' }) }
       }
-      const gated = await gateWrite(ctx, { tool: 'db_write', conn: profile.name, sql, kind: v.kind, risk: v.risk }, profile.name, sql)
+      const gated = await gateWrite(ctx, { tool: 'db_write', conn: profile.name, sql, kind: v.kind, risk: v.risk }, profile.name, sql, true)
       if (gated) return { ok: false, result: gated }
       const r = await adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS)
       const committed = (await adapter.commit?.()) !== false
       // agent 执行了 DDL：该连接的元数据缓存全部失效
       if (v.kind === 'ddl') metaDropConn(profile.id)
-      appendAudit({ kind: 'sql.write', conn: profile.name, detail: `执行完成: ${sql.slice(0, 100)}`, mode: ctx.mode, approved: true })
+      audit({ kind: 'sql.write', conn: profile.name, detail: '执行完成', sql, rows: r.rowCount, ms: r.ms, approved: true, target: v.kind === 'ddl' ? '(DDL)' : undefined })
       return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: profile.type === 'oracle' ? (committed ? '已提交(COMMIT)' : '连接已被重置，事务未提交（语句可能未生效）') : undefined }) }
     }
 
     return { ok: false, result: JSON.stringify({ error: `未知工具: ${name}` }) }
   } catch (e: any) {
     // 批准后的执行失败也要留痕（gateWrite 只在执行前记了 approved）
-    appendAudit({ kind: 'tool', detail: `${name} 执行失败: ${String(e?.message || e).slice(0, 300)}` })
+    audit({ kind: 'tool', detail: `${name} 执行失败`, error: String(e?.message || e).slice(0, 300) })
     return { ok: false, result: JSON.stringify({ error: String(e?.message || e).slice(0, 800) }) }
   }
 }

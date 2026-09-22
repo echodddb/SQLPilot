@@ -1,10 +1,24 @@
 import { reactive, nextTick } from 'vue'
 
+/** 子代理实时状态（挂在对应 agent_spawn 工具卡片上，按 toolCallId 关联） */
+export interface UiSub {
+  agentType: string
+  description: string
+  status: 'running' | 'done' | 'stopped' | 'error'
+  /** 每次子代理工具调用一行摘要 */
+  activity: string[]
+  /** 结束摘要："7 轮 · 23 次工具 · 95s" */
+  summary?: string
+}
+
 export interface UiTool {
   name: string
   args: string
   status: 'running' | 'ok' | 'error'
   result?: string
+  /** 对应主进程 toolCallId：子代理 sub-* 事件据此挂到本卡片 */
+  toolCallId?: string
+  sub?: UiSub
 }
 
 export interface UiMsg {
@@ -35,6 +49,8 @@ export interface UiSession {
   meta: SessionMeta
   msgs: UiMsg[]
   running: boolean
+  /** 本会话的后台子代理任务（任务条展示，registry 快照） */
+  subTasks: any[]
   /** 上下文占用徽标：est=估算 tokens，windowK=模型窗口，usage=最近一次真实计量 */
   ctx?: { est: number; windowK: number; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }
 }
@@ -55,7 +71,7 @@ export const store = reactive({
   sessionOrder: [] as string[],
   currentId: '' as string,
   /** 确认请求队列：多会话并发时依次处理，互不覆盖 */
-  confirmQueue: [] as { requestId: string; sessionId?: string; tool: string; conn: string; sql: string; kind: string; risk: number }[],
+  confirmQueue: [] as { requestId: string; sessionId?: string; tool: string; conn: string; sql: string; kind: string; risk: number; origin?: string }[],
   /** LLM 发送前预览队列（开启 previewLlm 时每次请求弹出） */
   previewQueue: [] as { requestId: string; sessionId?: string; url: string; body: any }[],
   /** 归档进行中的前台提示（阶段事件驱动；done/error 时清除） */
@@ -65,7 +81,9 @@ export const store = reactive({
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
   drafts: {} as Record<string, string>,
   /** 底部工作台面板：SSH 终端（数据库相关窗口都在数据库工作台视图里） */
-  workbench: null as 'terminal' | null
+  workbench: null as 'terminal' | null,
+  /** 子代理完整过程查看弹窗（审计 JSONL 实时读取） */
+  subRun: null as { runId: string; title: string } | null
 })
 
 export function curSession(): UiSession {
@@ -78,7 +96,7 @@ export function curDraft(): string {
 
 function ensureSessionRecord(meta: SessionMeta): UiSession {
   if (!store.sessions[meta.id]) {
-    store.sessions[meta.id] = { meta, msgs: [], running: false }
+    store.sessions[meta.id] = { meta, msgs: [], running: false, subTasks: [] }
     if (!store.sessionOrder.includes(meta.id)) store.sessionOrder.push(meta.id)
   } else {
     store.sessions[meta.id].meta = meta
@@ -113,7 +131,7 @@ function historyToUi(history: any[]): UiMsg[] {
           const result = res?.content ?? ''
           let ok = true
           try { ok = !JSON.parse(result)?.error } catch { ok = true }
-          return { name: tc.name, args: tc.args, status: ok ? ('ok' as const) : ('error' as const), result }
+          return { name: tc.name, args: tc.args, status: ok ? ('ok' as const) : ('error' as const), result, toolCallId: tc.id }
         })
         const last = out[out.length - 1]
         if (last && last.role === 'assistant' && last.tools.length === 0 && !last.closed) {
@@ -171,20 +189,64 @@ export async function init(): Promise<void> {
         last && last.role === 'assistant'
           ? last
           : s.msgs[s.msgs.push({ id: ++msgSeq, role: 'assistant', text: '', tools: [] }) - 1]
-      target.tools.push({ name: ev.tool, args: ev.args, status: 'running' })
+      target.tools.push({ name: ev.tool, args: ev.args, status: 'running', toolCallId: ev.toolCallId })
       target.closed = true
+    } else if (ev.type === 'sub-start' || ev.type === 'sub-activity' || ev.type === 'sub-end') {
+      // 子代理事件按 subId(=agent_spawn 的 toolCallId) 定位卡片；旧历史无 id 时兜底最后一个运行中的 spawn 卡片
+      const findSub = (): UiTool | undefined => {
+        for (let i = s.msgs.length - 1; i >= 0; i--) {
+          for (const t of s.msgs[i].tools) {
+            if (t.toolCallId && t.toolCallId === ev.subId) return t
+          }
+        }
+        for (let i = s.msgs.length - 1; i >= 0; i--) {
+          for (const t of s.msgs[i].tools) {
+            if (t.name === 'agent_spawn' && t.status === 'running') return t
+          }
+        }
+        return undefined
+      }
+      const t = findSub()
+      if (!t) return
+      if (ev.type === 'sub-start') {
+        t.sub = { agentType: ev.agentType, description: ev.description, status: 'running', activity: [] }
+      } else if (ev.type === 'sub-activity') {
+        if (!t.sub) t.sub = { agentType: '', description: '', status: 'running', activity: [] }
+        t.sub.activity.push(ev.note)
+        if (t.sub.activity.length > 300) t.sub.activity.splice(0, t.sub.activity.length - 300)
+      } else {
+        if (!t.sub) t.sub = { agentType: '', description: '', status: 'running', activity: [] }
+        // 区分收尾形态：stopped=用户停止 / exhausted=迭代或预算收口，都不是错误
+        t.sub.status = ev.status === 'completed' ? 'done' : ev.status === 'failed' ? 'error' : 'stopped'
+        t.sub.summary = ev.summary
+      }
     } else if (ev.type === 'tool-end') {
-      for (let i = s.msgs.length - 1; i >= 0; i--) {
-        const m = s.msgs[i]
-        for (let j = m.tools.length - 1; j >= 0; j--) {
-          if (m.tools[j].name === ev.tool && m.tools[j].status === 'running') {
-            m.tools[j].status = ev.ok ? 'ok' : 'error'
-            m.tools[j].result = ev.result
-            i = -1
-            break
+      // 优先按 toolCallId 精确匹配：并发扇出时同名工具卡片（如多个 agent_spawn）同时 running，
+      // 按名字从后往前匹配会把结果挂到错误的卡片上
+      let target: UiTool | undefined
+      if (ev.toolCallId) {
+        for (let i = s.msgs.length - 1; i >= 0 && !target; i--) {
+          for (const t of s.msgs[i].tools) {
+            if (t.toolCallId === ev.toolCallId && t.status === 'running') { target = t; break }
           }
         }
       }
+      if (!target) {
+        for (let i = s.msgs.length - 1; i >= 0 && !target; i--) {
+          const m = s.msgs[i]
+          for (let j = m.tools.length - 1; j >= 0; j--) {
+            if (m.tools[j].name === ev.tool && m.tools[j].status === 'running') { target = m.tools[j]; break }
+          }
+        }
+      }
+      if (target) {
+        target.status = ev.ok ? 'ok' : 'error'
+        target.result = ev.result
+      }
+    } else if (ev.type === 'notice') {
+      s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.text, tools: [] })
+    } else if (ev.type === 'sub-tasks') {
+      s.subTasks = ev.tasks || []
     } else if (ev.type === 'session-updated') {
       const target = store.sessions[ev.sessionId]
       if (target) target.meta = ev.meta
@@ -210,6 +272,11 @@ export async function init(): Promise<void> {
       }
       s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.error, tools: [] })
     }
+  })
+
+  window.sqlpilot.onSubtasks(({ sessionId, tasks }: any) => {
+    const t = store.sessions[sessionId]
+    if (t) t.subTasks = tasks || []
   })
 
   window.sqlpilot.onConfirm((req: any) => {
@@ -349,6 +416,15 @@ export async function approvePlan(): Promise<void> {
   s.meta.mode = 'confirm'
   await window.sqlpilot.updateSession(store.currentId, { mode: 'confirm' })
   await sendMessage('批准以上计划，请严格按计划开始执行。')
+}
+
+/** 打开/关闭子代理完整过程弹窗 */
+export function openSubRun(runId: string, title: string): void {
+  store.subRun = { runId, title }
+}
+
+export function closeSubRun(): void {
+  store.subRun = null
 }
 
 /** 在当前会话里追加一条系统提示（功能开关提醒等，不进入真实对话历史） */

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { loadConfig, saveConfig } from './config'
 import { setPassword, deletePassword, getPassword, secretsAvailable } from './secrets'
-import { readAudit, appendAudit } from './audit'
+import { readAudit, appendAudit, queryAudit } from './audit'
 import { getAdapter, dropAdapter, closeAll } from './db/manager'
 import { testServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, sftpList, sftpDownload, sftpUpload } from './ssh'
 import { classifySql } from './db/guard'
@@ -21,6 +21,8 @@ import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
 import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
 import type { ApprovalDecision, ApprovalRequest } from './tools'
+import { listSubagentTasks, onSubtaskChange, stopSubagentTask } from './agent/subtask-registry'
+import { readRunAudit } from './agent/subagent-audit'
 
 let win: BrowserWindow | null = null
 const pendingApprovals = new Map<string, { resolve: (d: ApprovalDecision) => void; sessionId: string }>()
@@ -171,7 +173,7 @@ export function registerIpc(): void {
       }
     } catch (e: any) {
       // 连接测试失败落审计：弹窗一关报错就没了，这里留底便于排查
-      appendAudit({ kind: 'conn', conn: profile.name, detail: `连接测试失败 ${profile.type} ${profile.host}:${profile.port}`, error: String(e?.message || e).slice(0, 300) })
+      appendAudit({ kind: 'conn', actor: 'human', conn: profile.name, target: `${profile.host}:${profile.port}`, detail: `连接测试失败 ${profile.type} ${profile.host}:${profile.port}`, error: String(e?.message || e).slice(0, 300) })
       return { ok: false, error: String(e?.message || e) }
     }
   })
@@ -450,7 +452,7 @@ export function registerIpc(): void {
       if (name === '.' || name === '..' || !name) name = 'file'
       const local = path.join(dir, name)
       await sftpDownload(s, remotePath, local)
-      appendAudit({ kind: 'tool', conn: s.name, detail: `sftp 下载 ${remotePath} → ${local}` })
+      appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: `${remotePath} → ${local}`, detail: `sftp 下载 ${remotePath} → ${local}` })
       return { ok: true, local }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
@@ -466,7 +468,7 @@ export function registerIpc(): void {
       for (const f of r.filePaths) {
         const name = f.split(/[\\/]/).pop() || 'file'
         await sftpUpload(s, f, remoteDir.replace(/\/+$/, '') + '/' + name)
-        appendAudit({ kind: 'tool', conn: s.name, detail: `sftp 上传 ${f} → ${remoteDir}` })
+        appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: `${f} → ${remoteDir}`, detail: `sftp 上传 ${f} → ${remoteDir}` })
       }
       return { ok: true, count: r.filePaths.length }
     } catch (e: any) {
@@ -493,7 +495,7 @@ export function registerIpc(): void {
     try {
       const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
       const r = await adapter.query(sql, 500, 60_000)
-      appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', conn: profile.name, detail: `[控制台] ${sql.slice(0, 400)}`, mode: 'human' })
+      appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)', detail: '查询窗口执行', sql, rows: r.rowCount, ms: r.ms, mode: 'human', approved: v.ok ? undefined : true })
       // 控制台执行了 DDL：该连接的元数据缓存全部失效（表/列结构可能已变）
       if (v.kind === 'ddl') metaDropConn(connId)
       const head = (sql.trim().replace(/^(--[^\n]*\r?\n|\/\*[\s\S]*?\*\/|\s)+/, '').match(/^[a-zA-Z]+/)?.[0] || '').toUpperCase()
@@ -517,7 +519,7 @@ export function registerIpc(): void {
         result: { columns: r.columns, rows: r.rows.slice(0, 200), rowCount: r.rowCount, truncated: r.rows.length > 200, ms: r.ms, kind: v.kind, message }
       }
     } catch (e: any) {
-      appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', conn: profile.name, detail: `[控制台] ${sql.slice(0, 400)}`, mode: 'human', error: String(e?.message || e).slice(0, 200) })
+      appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)', detail: '查询窗口执行失败', sql, mode: 'human', approved: v.ok ? undefined : false, error: String(e?.message || e).slice(0, 200) })
       return { ok: false, error: String(e?.message || e) }
     }
   })
@@ -713,16 +715,16 @@ export function registerIpc(): void {
         await adapter.query(conflicts.length ? 'ROLLBACK' : 'COMMIT', 1, 10_000)
       }
       appendAudit({
-        kind: 'sql.write', conn: profile.name,
-        detail: `[网格编辑] ${s}.${t} ${applied} 处修改${conflicts.length ? `，${conflicts.length} 处冲突` : ''}${isOracle ? '（未提交）' : ''}`,
-        mode: 'human'
+        kind: 'sql.write', actor: 'human', conn: profile.name, target: `${s}.${t}`,
+        detail: `网格编辑：${applied} 处修改${conflicts.length ? `，${conflicts.length} 处冲突` : ''}${isOracle ? '（未提交）' : ''}`,
+        rows: applied, mode: 'human', approved: true
       })
       return { ok: true, applied, conflicts, uncommitted: isOracle }
     } catch (e: any) {
       if (!isOracle) {
         try { await adapter.query('ROLLBACK', 1, 10_000) } catch { /* 忽略 */ }
       }
-      appendAudit({ kind: 'sql.write', conn: profile.name, detail: `[网格编辑] ${s}.${t} 保存失败`, mode: 'human', error: String(e?.message || e).slice(0, 200) })
+      appendAudit({ kind: 'sql.write', actor: 'human', conn: profile.name, target: `${s}.${t}`, detail: '网格编辑保存失败', mode: 'human', approved: false, error: String(e?.message || e).slice(0, 200) })
       return { ok: false, error: String(e?.message || e) }
     }
   })
@@ -757,10 +759,10 @@ export function registerIpc(): void {
       const res = await adapter.query(sql, EXPORT_MAX_ROWS, 120_000)
       const csv = buildCsv(res.columns, res.rows, columns)
       await fs.writeFile(r.filePath, csv, 'utf8')
-      appendAudit({ kind: 'tool', conn: profile.name, detail: `导出查询结果 ${res.rows.length} 行 × ${columns.length} 列 → ${r.filePath}` })
+      appendAudit({ kind: 'tool', actor: 'human', conn: profile.name, target: r.filePath, detail: `导出查询结果 ${res.rows.length} 行 × ${columns.length} 列`, rows: res.rows.length })
       return { ok: true, path: r.filePath, rows: res.rows.length, truncated: res.rows.length >= EXPORT_MAX_ROWS }
     } catch (e: any) {
-      appendAudit({ kind: 'tool', conn: profile.name, detail: `导出查询结果失败: ${sql.slice(0, 200)}`, error: String(e?.message || e).slice(0, 200) })
+      appendAudit({ kind: 'tool', actor: 'human', conn: profile.name, detail: '导出查询结果失败', sql: sql.slice(0, 500), error: String(e?.message || e).slice(0, 200) })
       return { ok: false, error: String(e?.message || e) }
     }
   })
@@ -998,7 +1000,7 @@ export function registerIpc(): void {
       const stat = await fs.stat(p)
       if (stat.isDirectory() || /\.zip$/i.test(p)) {
         const pack = await importSkillPack(p)
-        appendAudit({ kind: 'tool', detail: `导入技能包 ${path.basename(p)}：新增 ${pack.imported.length} 个，更新 ${pack.updated.length} 个` })
+        appendAudit({ kind: 'tool', actor: 'human', detail: `导入技能包 ${path.basename(p)}：新增 ${pack.imported.length} 个，更新 ${pack.updated.length} 个` })
         return { ok: true, pack }
       }
       const s = importSkill(p)
@@ -1012,7 +1014,7 @@ export function registerIpc(): void {
   ipcMain.handle('skill:importUrl', async (_e, { url }: { url: string }) => {
     try {
       const pack = await importSkillPackFromUrl(url)
-      appendAudit({ kind: 'tool', detail: `从 URL 导入技能包 ${String(url).slice(0, 200)}：新增 ${pack.imported.length} 个，更新 ${pack.updated.length} 个` })
+      appendAudit({ kind: 'tool', actor: 'human', detail: `从 URL 导入技能包 ${String(url).slice(0, 200)}：新增 ${pack.imported.length} 个，更新 ${pack.updated.length} 个` })
       return { ok: true, pack }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
@@ -1092,6 +1094,44 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('audit:list', () => readAudit(300))
+
+  // 结构化审计查询（设置页审计查看器）：筛选条件见 audit.ts AuditQuery
+  ipcMain.handle('audit:query', (_e, q: any) => {
+    return queryAudit({
+      kinds: Array.isArray(q?.kinds) ? q.kinds : undefined,
+      actors: Array.isArray(q?.actors) ? q.actors : undefined,
+      conns: Array.isArray(q?.conns) ? q.conns : undefined,
+      sessionId: q?.sessionId || undefined,
+      runId: q?.runId || undefined,
+      q: q?.q || undefined,
+      fromMs: typeof q?.fromMs === 'number' ? q.fromMs : undefined,
+      toMs: typeof q?.toMs === 'number' ? q.toMs : undefined,
+      approvedOnly: !!q?.approvedOnly,
+      errorsOnly: !!q?.errorsOnly,
+      limit: typeof q?.limit === 'number' ? q.limit : undefined,
+      offset: typeof q?.offset === 'number' ? q.offset : undefined
+    })
+  })
+
+  // ---------- 子代理任务面板（后台任务条 / 完整过程查看） ----------
+  ipcMain.handle('subagent:tasks', (_e, { sessionId }: { sessionId?: string }) => {
+    return listSubagentTasks(sessionId || undefined)
+  })
+  ipcMain.handle('subagent:stopTask', (_e, { id }: { id: string }) => {
+    const r = stopSubagentTask(String(id || ''))
+    return { ok: r.ok }
+  })
+  ipcMain.handle('subagent:audit', (_e, { runId }: { runId: string }) => {
+    const r = readRunAudit(String(runId || ''))
+    return { ok: true, entries: r.entries, file: r.file }
+  })
+
+  // 任务状态变化 → 渲染层任务条实时刷新
+  onSubtaskChange(({ sessionId, tasks }) => {
+    try {
+      win?.webContents.send('subagent:tasks', { sessionId, tasks })
+    } catch { /* 窗口可能正在关闭 */ }
+  })
 
   ipcMain.handle('app:info', () => ({
     secretsAvailable: secretsAvailable(),
