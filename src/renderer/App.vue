@@ -125,9 +125,10 @@ const archiveView = ref<{ id: string; name: string } | null>(null)
 const wbEverOpen = ref(false)
 watch(() => store.workbench, (v) => { if (v) wbEverOpen.value = true })
 
-// 切换会话：数据库工作台与终端面板自动隐藏（组件保活——重开恢复隐藏前的样子）
+// 切换会话：非聊天视图（数据库工作台/设置）与终端面板自动隐藏——点会话的意图就是去对话；
+// 组件均保活，重开恢复隐藏前的样子
 watch(() => store.currentId, () => {
-  if (store.view === 'db') store.view = 'chat'
+  if (store.view !== 'chat') store.view = 'chat'
   if (store.workbench) store.workbench = null
 })
 
