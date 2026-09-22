@@ -12,11 +12,12 @@
   --text: #e8ebf4;
   --text-dim: #8f96ac;
   --text-faint: #616880;
-  --accent: #4d7db3;
-  --accent-2: #4d7db3;
-  --accent-grad: #4d7db3;
-  --accent-dim: rgba(77, 125, 179, 0.16);
-  --accent-glow: rgba(77, 125, 179, 0.12);
+  --accent: #44719f;
+  --accent-2: #44719f;
+  /* 名字保留 -grad（历史引用 6 处），值已是纯色：蓝紫渐变已弃用 */
+  --accent-grad: #44719f;
+  --accent-dim: rgba(68, 113, 159, 0.18);
+  --accent-glow: rgba(68, 113, 159, 0.12);
   --green: #4ade80;
   --green-dim: rgba(74, 222, 128, 0.13);
   --yellow: #fbbf24;
