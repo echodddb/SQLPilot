@@ -71,8 +71,9 @@
       <ChatView v-if="store.view === 'chat'" style="flex: 1; min-height: 0" />
       <DbWorkbenchView v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
       <SettingsView v-if="store.view === 'settings'" style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
-      <!-- 底部工作台面板（SSH 终端）独立于上方视图，切设置页不断开终端 -->
-      <WorkbenchPanel v-if="store.workbench" @close="store.workbench = null" />
+      <!-- 底部工作台面板（SSH 终端）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
+           SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
+      <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench" @close="store.workbench = null" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
@@ -97,7 +98,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, provide, ref } from 'vue'
+import { computed, provide, ref, watch } from 'vue'
 import { store, curSession, init, setSessionMode, setSessionProvider, MODES, toPlain, createSessionInProject, bindSessionProject } from './store'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
@@ -119,6 +120,16 @@ const projectModal = ref(false)
 const projectEditorTarget = ref<any>(null)
 const sessionModal = ref<'new' | 'switch' | null>(null)
 const archiveView = ref<{ id: string; name: string } | null>(null)
+
+// 终端面板首次打开后常驻（v-if 只管挂载，v-show 管显隐）
+const wbEverOpen = ref(false)
+watch(() => store.workbench, (v) => { if (v) wbEverOpen.value = true })
+
+// 切换会话：数据库工作台与终端面板自动隐藏（组件保活——重开恢复隐藏前的样子）
+watch(() => store.currentId, () => {
+  if (store.view === 'db') store.view = 'chat'
+  if (store.workbench) store.workbench = null
+})
 
 const boundProject = computed(() => {
   const pid = curSession()?.meta.projectId
