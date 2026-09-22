@@ -224,6 +224,11 @@ watch(activeId, () => {
   if (sftpOpen.value && activeTerm.value) loadSftp()
 })
 
+// 面板重新显示（v-show 显隐，隐藏期间尺寸为 0）：恢复后重适配当前终端
+watch(() => store.workbench, (v) => {
+  if (v) nextTick(() => setTimeout(() => activeId.value && doFit(activeId.value), 60))
+})
+
 // ---------- SFTP ----------
 const sftpOpen = ref(true)
 const sftpEntries = ref<any[]>([])
