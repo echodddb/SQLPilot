@@ -17,7 +17,6 @@
           @click="newSessionFor(p.id)"
           @contextmenu.prevent="openProjectMenu($event, p)"
         >
-          <span>📁</span>
           <span class="name">{{ p.name }}</span>
           <span class="sub" v-if="curSession()?.meta.projectId === p.id">当前</span>
           <button class="icon-btn" title="编辑项目属性（数据库/服务器）" @click.stop="openProjectEditor(p)">✎</button>
@@ -31,8 +30,8 @@
       <div class="ctx-menu" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
         <div class="ctx-item" @click="ctxAction('edit')">✎　编辑项目属性</div>
         <div class="ctx-item" @click="ctxAction('new')">＋　新建会话</div>
-        <div class="ctx-item" @click="ctxAction('archive')">📦　查看归档</div>
-        <div class="ctx-item" @click="ctxAction('folder')">📂　在资源管理器中打开</div>
+        <div class="ctx-item" @click="ctxAction('archive')">查看归档</div>
+        <div class="ctx-item" @click="ctxAction('folder')">在资源管理器中打开</div>
         <div class="ctx-sep"></div>
         <div class="ctx-item danger" @click="ctxAction('delete')">🗑　删除项目</div>
       </div>
@@ -50,7 +49,7 @@
           @click="toggleGroup(g.key)"
         >
           <span class="chev">{{ collapsed.has(g.key) ? '▸' : '▾' }}</span>
-          <span>📁 {{ g.label }}</span>
+          <span>{{ g.label }}</span>
           <span v-if="g.ids.length" class="cnt">{{ g.ids.length }}</span>
         </div>
         <template v-if="!collapsed.has(g.key)">
@@ -65,7 +64,7 @@
             <span class="mode-dot" :class="store.sessions[id]?.meta.mode"></span>
             <span class="name">{{ store.sessions[id]?.meta.title || '会话' }}</span>
           <span v-if="store.sessions[id]?.running" class="spinner" style="width:10px;height:10px"></span>
-          <button class="icon-btn" :title="store.sessions[id]?.running ? '会话执行中，停止后才能归档' : '归档会话（总结对话到项目归档后移除）'" :disabled="store.sessions[id]?.running" @click.stop="removeSession(id)">📦</button>
+          <button class="icon-btn" :title="store.sessions[id]?.running ? '会话执行中，停止后才能归档' : '归档会话（总结对话到项目归档后移除）'" :disabled="store.sessions[id]?.running" @click.stop="removeSession(id)">▤</button>
           </div>
           <div v-if="!g.ids.length" class="session-item" style="pointer-events:none; opacity:.55">（暂无会话，点击项目名新建）</div>
         </template>
@@ -86,7 +85,7 @@
       <template v-for="g in groups" :key="g.type">
         <div class="conn-group-title">{{ g.label }}</div>
         <template v-for="c in g.items" :key="c.id">
-          <!-- 对象浏览在数据库工作台（顶栏 🗃 数据库）；侧边栏只做连接管理，点行进入工作台 -->
+          <!-- 对象浏览在数据库工作台；侧边栏只做连接管理，点行进入工作台 -->
           <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击进入数据库工作台`" @click="store.view = 'db'">
             <span>🗄</span>
             <span class="name">{{ c.name }}</span>

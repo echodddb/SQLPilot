@@ -14,7 +14,7 @@
         <button class="btn danger" @click="reply(false)">取消本轮</button>
         <span style="flex: 1"></span>
         <button class="pv-disable-link" title="以后不再弹预览（本次请求放行）；随时可用顶栏 👁 按钮重新开启" @click="disableAndSend">
-          不再预览（本次放行并关闭功能，之后可在 ⚙ 设置 → 通用 重新开启）
+          不再预览（本次放行并关闭功能，之后可在 设置 → 通用 重新开启）
         </button>
         <button class="btn primary" @click="reply(true)">发送</button>
       </div>

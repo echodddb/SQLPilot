@@ -9,7 +9,7 @@
         <button class="mini-btn" title="提交当前事务（Oracle 无自动提交，DML 需显式 COMMIT 生效）" :disabled="running" @click="runTx('COMMIT')">✓ 提交</button>
         <button class="mini-btn" title="回滚当前事务" :disabled="running" @click="runTx('ROLLBACK')">↩ 回滚</button>
       </template>
-      <button class="mini-btn" title="查看该连接的数据库信息" @click="emit('open-info', connId)">📊 信息</button>
+      <button class="mini-btn" title="查看该连接的数据库信息" @click="emit('open-info', connId)">信息</button>
       <button class="mini-btn" title="导出查询结果为 CSV（可选择列；重新执行查询取全量，上限 10 万行）" :disabled="!lastSql || !result?.columns?.length" @click="openExport">⬇ 导出</button>
       <span v-if="msg" class="qt-msg" :class="{ err: !ok }">{{ msg }}</span>
       <span style="flex: 1"></span>

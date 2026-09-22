@@ -1,7 +1,7 @@
 <template>
   <div class="modal-mask" @click.self="close">
     <div class="modal" style="width:860px; height:80vh; display:flex; flex-direction:column">
-      <h3 style="margin:0 0 8px">🤖 子代理完整过程 <span style="font-size:12px; color:var(--text-dim); font-weight:normal">{{ title }}</span></h3>
+      <h3 style="margin:0 0 8px">子代理完整过程 <span style="font-size:12px; color:var(--text-dim); font-weight:normal">{{ title }}</span></h3>
 
       <div style="flex:1; overflow:auto; border:1px solid var(--border); border-radius:6px; padding:8px; font-size:12px">
         <div v-if="!entries.length" style="color:var(--text-dim); padding:20px; text-align:center">

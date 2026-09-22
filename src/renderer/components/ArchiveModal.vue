@@ -1,14 +1,14 @@
 <template>
   <div class="modal-mask" @click.self="$emit('close')">
     <div class="modal" style="width: 720px; max-width: 94vw; display: flex; flex-direction: column; max-height: 85vh">
-      <h3>📦 项目归档 <span class="badge blue">{{ project }}</span></h3>
+      <h3> 项目归档 <span class="badge blue">{{ project }}</span></h3>
       <div style="font-size: 12px; color: var(--text-dim); margin: 4px 0 8px">
         归档会话的总结（按时间倒序展示为原文顺序）；该项目下会话的提示词自动携带最近部分作为任务背景。
       </div>
       <div v-if="loading" style="padding: 30px; text-align: center; color: var(--text-faint)">读取中…</div>
       <pre v-else-if="content" class="arc-body">{{ content }}</pre>
       <div v-else style="padding: 30px; text-align: center; color: var(--text-faint)">
-        该项目还没有归档。<br />归档入口：会话输入框"📦 归档对话"或侧边栏会话行的 📦。
+        该项目还没有归档。<br />归档入口：会话输入框" 归档对话"或侧边栏会话行的 。
       </div>
       <div class="actions">
         <span style="flex: 1"></span>

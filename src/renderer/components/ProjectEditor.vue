@@ -1,7 +1,7 @@
 <template>
   <div class="modal-mask" @click.self="$emit('close')">
     <div class="modal" style="width: 680px">
-      <h3>📁 项目属性 — {{ form.name }}</h3>
+      <h3> 项目属性 — {{ form.name }}</h3>
 
       <div class="frow">
         <div class="fitem"><label>项目名称</label><input type="text" v-model="form.name" /></div>
@@ -39,7 +39,7 @@
       <div class="chip-list">
         <span v-if="!form.servers?.length" style="color:var(--text-faint); font-size:12px">未挂载服务器</span>
         <span v-for="s in form.servers" :key="s.id" class="chip">
-          🖥 {{ s.name }} <span class="chip-sub">{{ s.user }}@{{ s.host }}:{{ s.port }}{{ s.tag ? ` · ${s.tag}` : '' }}</span>
+           {{ s.name }} <span class="chip-sub">{{ s.user }}@{{ s.host }}:{{ s.port }}{{ s.tag ? ` · ${s.tag}` : '' }}</span>
           <button class="icon-btn" style="padding:0 2px" title="编辑" @click="editServer(s)">✎</button>
           <button class="icon-btn" style="padding:0 2px" title="移除" @click="removeServer(s)">✕</button>
         </span>
