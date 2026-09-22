@@ -14,17 +14,25 @@ import { modelContextK } from './catalog'
 import { metaGet, metaKeys, metaSet } from '../meta'
 import { getAdapter } from '../db/manager'
 import { readConnMemory, readGlobalMemory, readProjectArchive, readProjectMemory } from '../memory'
+import { launchSubagent, listSubagentsForPrompt, resolveSubagent } from './subagent'
+import { stopSubtasksOfSession } from './subtask-registry'
 
 export type AgentEvent =
   | { type: 'text'; sessionId: string; text: string }
   | { type: 'reasoning'; sessionId: string; text: string }
-  | { type: 'tool-start'; sessionId: string; tool: string; args: string }
-  | { type: 'tool-end'; sessionId: string; tool: string; ok: boolean; result: string }
+  | { type: 'tool-start'; sessionId: string; tool: string; args: string; toolCallId?: string }
+  | { type: 'tool-end'; sessionId: string; tool: string; ok: boolean; result: string; toolCallId?: string }
   | { type: 'session-updated'; sessionId: string; meta: SessionMeta }
   | { type: 'done'; sessionId: string; note?: string }
   | { type: 'error'; sessionId: string; error: string }
   /** 会话上下文占用：est=下次请求估算 tokens，windowK=模型窗口(K)，usage=最近一次真实计量（有则带） */
   | { type: 'context'; sessionId: string; est: number; windowK: number; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }
+  /** 子代理生命周期（subId = 对应 agent_spawn 的 toolCallId，渲染层据此挂到工具卡片） */
+  | { type: 'sub-start'; sessionId: string; subId: string; agentType: string; description: string }
+  | { type: 'sub-activity'; sessionId: string; subId: string; note: string }
+  | { type: 'sub-end'; sessionId: string; subId: string; ok: boolean; summary: string; status: 'completed' | 'stopped' | 'failed' | 'exhausted' }
+  | { type: 'notice'; sessionId: string; text: string }
+  | { type: 'sub-tasks'; sessionId: string; tasks: { id: string; agentType: string; description: string; status: string; startedAt: number; summary?: string; runFile?: string }[] }
 
 export interface RunDeps {
   emit: (ev: AgentEvent) => void
@@ -54,6 +62,8 @@ interface SessionState extends SessionMeta {
   lastUsage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
   /** 被截断历史的抽取式摘要（随会话持久化，注入系统提示词） */
   contextSummary?: string
+  /** 后台子代理完成通知（随会话持久化；下一回合注入首条 user 消息，ZCode <task-notification> 的等价物） */
+  pendingNotices: string[]
 }
 
 const sessions = new Map<string, SessionState>()
@@ -82,6 +92,7 @@ export function loadPersistedSessions(): void {
           effort: (s.effort as ThinkingEffort) ?? null,
           messages: repairDanglingToolCalls(tr.kept),
           contextSummary: tr.dropped.length ? summarizeDropped(s.contextSummary, tr.dropped) : s.contextSummary,
+          pendingNotices: Array.isArray(s.pendingNotices) ? s.pendingNotices : [],
           running: false,
           sessionApproved: new Set(),
           cancelRequested: false,
@@ -107,7 +118,8 @@ export function persistSessions(): void {
         projectId: s.projectId,
         effort: s.effort,
         messages: s.messages,
-        contextSummary: s.contextSummary
+        contextSummary: s.contextSummary,
+        pendingNotices: s.pendingNotices
       }
     }
     writeFileAtomic(sessionsFile(), JSON.stringify(data))
@@ -141,7 +153,8 @@ export function getSession(id: string): SessionState {
       running: false,
       sessionApproved: new Set(),
       cancelRequested: false,
-      abortCtrl: null
+      abortCtrl: null,
+      pendingNotices: []
     }
     sessions.set(id, s)
   }
@@ -165,6 +178,7 @@ export function newSession(): SessionMeta {
 }
 
 export function deleteSession(id: string): void {
+  stopSubtasksOfSession(id)
   sessions.delete(id)
   persistSessionsSoon()
 }
@@ -198,6 +212,27 @@ export function cancelSession(id: string): void {
 }
 
 const MAX_ITERATIONS = 24
+
+/** 同批 agent_spawn 的并发上限：DB 侧防爆 + 避免确认弹窗风暴 */
+const MAX_CONCURRENT_SUBAGENTS = 3
+
+/** 该 toolCall 是否已有对应的 tool 消息（悬空修复与扇出去重共用） */
+function answered(messages: ChatMsg[], toolCallId: string): boolean {
+  return messages.some((m) => m.role === 'tool' && m.toolCallId === toolCallId)
+}
+
+/** 固定并发池：保持 items 顺序返回，单项失败不中断其余（失败在各自 promise 内部处理） */
+async function runPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) break
+      await fn(items[i])
+    }
+  })
+  await Promise.all(workers)
+}
 
 /** 粗略 token 估算：CJK 字符约 1.1 tok/字，其余约 3.8 字符/tok（够显示用，非精确计量） */
 export function estimateTokens(text: string): number {
@@ -514,6 +549,10 @@ function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, pro
     ? '\n可用技能（任务匹配时先用 read_skill 读取全文，然后严格遵循其步骤执行）：\n' + skills.map((s) => `- ${s.name}: ${s.description}`).join('\n') + '\n'
     : ''
 
+  const subagentLines = '\n可用子代理（agent_spawn 派生；子代理有独立上下文、看不到本会话历史，只在完成时返回最终报告，中间工具结果不占用本会话上下文）：\n' +
+    listSubagentsForPrompt().map((a) => `- ${a.name}: ${a.description}\n  工具面：${a.tools}`).join('\n') +
+    '\n使用要点：prompt 必须自包含（目标、连接名、期望输出）；大范围探索/多连接采集/日志排查优先派 explore（可同回合并行派多个）；写操作不要委托子代理，留在本会话执行。预计耗时长的后台采集（全库巡检/日志深扫）传 run_in_background=true：立即返回任务 id，本会话继续干别的，任务完成会有系统通知送达（含摘要与报告文件），需要结果时用 task_output(task_id, block) 收割、task_stop 停止；前台子代理超过 2 分钟也会自动转后台，流程相同。\n'
+
   const memParts: string[] = []
   if (facts?.globalMemory) memParts.push(`〔全局〕\n${facts.globalMemory}`)
   if (facts?.projectMemory && project) memParts.push(`〔当前项目「${project.name}」专属〕\n${facts.projectMemory}`)
@@ -533,7 +572,7 @@ function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, pro
 
 当前可用数据库连接：
 ${connLines}
-${projectBlock}${instrBlock}${serverLines}${skillLines}${memBlock}${archiveBlock}${summaryBlock}
+${projectBlock}${instrBlock}${serverLines}${skillLines}${subagentLines}${memBlock}${archiveBlock}${summaryBlock}
 工作规则：
 1. 所有数据库操作必须通过工具完成，并明确传 conn 参数（连接名，与上面列表一致）。
 2. 不确定表结构时，先用 db_list_tables / db_describe_table / db_get_ddl 探索，再写 SQL，禁止凭猜测写表名列名。
@@ -570,7 +609,14 @@ export async function runTurn(
   sess.cancelRequested = false
   sess.abortCtrl = new AbortController()
   try {
-    sess.messages.push({ role: 'user', content: text })
+    // 后台子代理完成通知：注入本回合首条 user 消息（随历史持久化，模型下次也能看到）
+    let textOut = text
+    if (sess.pendingNotices.length) {
+      const block = sess.pendingNotices.join('\n\n')
+      sess.pendingNotices = []
+      textOut = '<系统通知>（后台子代理的完成通报，供你知晓；如与用户诉求相关请主动汇报）\n' + block + '\n</系统通知>\n\n<用户消息>\n' + text + '\n</用户消息>'
+    }
+    sess.messages.push({ role: 'user', content: textOut })
     const windowK = modelContextK(provider)
 
     // 回合级事实采集（回合内循环复用）：连接版本后台刷新（不阻塞回合）+ 跨会话记忆
@@ -631,9 +677,12 @@ export async function runTurn(
 
       const cfg2 = loadConfig()
       const project2 = sess.projectId ? cfg2.projects.find((p) => p.id === sess.projectId) : undefined
+      const skills2 = listSkills().filter((s) => cfg2.skillsEnabled[s.id] !== false)
+      const mask2 = cfg2.maskPromptDetails !== false
       for (const tc of res.toolCalls) {
+        if (tc.name === 'agent_spawn') continue // 子代理派生在本批串行工具之后并发执行
         if (sess.cancelRequested) break
-        deps.emit({ type: 'tool-start', sessionId, tool: tc.name, args: tc.args })
+        deps.emit({ type: 'tool-start', sessionId, tool: tc.name, args: tc.args, toolCallId: tc.id })
 
         // 规划控制工具由会话层拦截处理（agent 自主进入/退出计划模式）
         if (tc.name === 'enter_plan_mode' || tc.name === 'exit_plan_mode') {
@@ -654,7 +703,7 @@ export async function runTurn(
               pr = { ok: true, result: JSON.stringify({ note: '计划已呈现给用户。请输出完整的最终计划（若尚未输出），然后结束本回合等待批准。不要继续调用工具。' }) }
             }
           }
-          deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: pr.ok, result: pr.result })
+          deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: pr.ok, result: pr.result, toolCallId: tc.id })
           sess.messages.push({ role: 'tool', content: pr.result, toolCallId: tc.id, toolName: tc.name })
           continue
         }
@@ -666,11 +715,75 @@ export async function runTurn(
           sessionApproved: sess.sessionApproved,
           requestApproval: (req) => deps.requestApproval(req, sessionId),
           project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,
-          servers: project2?.servers || []
+          servers: project2?.servers || [],
+          sessionId
         }
         const r = await executeTool(tc.name, tc.args, ctx)
-        deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: r.ok, result: r.result })
+        deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: r.ok, result: r.result, toolCallId: tc.id })
         sess.messages.push({ role: 'tool', content: r.result, toolCallId: tc.id, toolName: tc.name })
+      }
+
+      // ---------- 子代理并发扇出 ----------
+      // 同一批 agent_spawn 并行执行（上限 3）：多连接巡检/采集类扇出的核心收益；
+      // 其余工具已在上面的串行循环执行完，保证写操作的顺序性
+      const spawns = res.toolCalls.filter((tc) => tc.name === 'agent_spawn' && !answered(sess.messages, tc.id))
+      if (spawns.length && !sess.cancelRequested) {
+        const buildSystem = (mode: PermissionMode) => buildSystemPrompt(cfg2.connections, mode, project2, skills2, mask2, facts)
+        const spawnOne = async (tc: { id: string; args: string }): Promise<void> => {
+          deps.emit({ type: 'tool-start', sessionId, tool: 'agent_spawn', args: tc.args, toolCallId: tc.id })
+          let r: { ok: boolean; result: string }
+          try {
+            let a: any = {}
+            try {
+              a = JSON.parse(tc.args || '{}')
+            } catch {
+              a = {}
+            }
+            const profile = resolveSubagent(String(a.agent_type ?? ''))
+            const prompt = String(a.prompt ?? '').trim()
+            if (!profile) {
+              const available = listSubagentsForPrompt().map((x) => x.name).join(' / ')
+              r = { ok: false, result: JSON.stringify({ error: `未知子代理类型 "${a.agent_type}"，可用：${available}` }) }
+            } else if (!prompt) {
+              r = { ok: false, result: JSON.stringify({ error: 'prompt 不能为空：任务书必须自包含（目标、连接名、期望输出）' }) }
+            } else {
+              r = await launchSubagent({
+                sessionId,
+                subId: tc.id,
+                profile,
+                description: String(a.description ?? profile.name).slice(0, 60),
+                prompt,
+                background: a.run_in_background === true,
+                provider,
+                effort: sess.effort,
+                parentMode: sess.mode,
+                cancelSignal: sess.abortCtrl!.signal,
+                sessionApproved: sess.sessionApproved,
+                requestApproval: deps.requestApproval,
+                previewLlm: deps.previewLlm,
+                emit: deps.emit,
+                estimateTokens,
+                windowK,
+                buildSystem,
+                connections: cfg2.connections,
+                globalClientDir,
+                project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,
+                servers: project2?.servers || [],
+                onNotice: (text2) => {
+                  // 完成通知：立即 UI 提示 + 挂 pendingNotices 随下一回合注入模型
+                  sess.pendingNotices.push(text2)
+                  persistSessionsSoon()
+                  deps.emit({ type: 'notice', sessionId, text: text2 })
+                }
+              })
+            }
+          } catch (e: any) {
+            r = { ok: false, result: JSON.stringify({ status: 'failed', error: String(e?.message || e).slice(0, 500) }) }
+          }
+          deps.emit({ type: 'tool-end', sessionId, tool: 'agent_spawn', ok: r.ok, result: r.result, toolCallId: tc.id })
+          sess.messages.push({ role: 'tool', content: r.result, toolCallId: tc.id, toolName: 'agent_spawn' })
+        }
+        await runPool(spawns, MAX_CONCURRENT_SUBAGENTS, spawnOne)
       }
       if (sess.cancelRequested) {
         // 中断可能跳过本批部分 toolCall：必须补上取消结果，否则历史里留下悬空 tool_use，
@@ -678,7 +791,7 @@ export async function runTurn(
         for (const tc of res.toolCalls) {
           if (sess.messages.some((m) => m.role === 'tool' && m.toolCallId === tc.id)) continue
           const r = JSON.stringify({ error: '用户已停止任务，本工具未执行' })
-          deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: false, result: r })
+          deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: false, result: r, toolCallId: tc.id })
           sess.messages.push({ role: 'tool', content: r, toolCallId: tc.id, toolName: tc.name })
         }
         break
@@ -694,7 +807,7 @@ export async function runTurn(
       deps.emit({ type: 'done', sessionId, note: '已停止（当前任务被手动中断）' })
     } else {
       const msg = String(e?.message || e)
-      appendAudit({ kind: 'llm.error', detail: msg.slice(0, 500) })
+      appendAudit({ kind: 'llm.error', actor: 'agent', sessionId, detail: msg.slice(0, 500) })
       deps.emit({ type: 'error', sessionId, error: msg })
     }
   } finally {

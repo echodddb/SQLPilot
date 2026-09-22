@@ -33,6 +33,9 @@ export interface LlmUsage {
 }
 
 const HTTP_TIMEOUT_MS = 300_000
+/** 流空闲看门狗：SSE 连续无数据帧超过此时长判定为死流（VPN 断连/网关挂起），
+ *  提前中断并给出明确错误，而不是干等 HTTP 总超时 */
+const STREAM_IDLE_TIMEOUT_MS = 180_000
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '')
@@ -40,14 +43,25 @@ function trimSlash(s: string): string {
 
 // ---------- SSE 读取 ----------
 
-async function readSse(res: any, onData: (json: any) => void): Promise<void> {
+async function readSse(res: any, abort: AbortController | undefined, onData: (json: any) => void): Promise<void> {
   const reader = res.body.getReader()
-  const decoder = new TextDecoder('utf-8')
+  const decoder = new TextDecoder('utf8')
   let buf = ''
+  // 看门狗：任何数据帧都刷新活跃时间；空闲超时 abort 整个请求（reader.read 会随之抛错）
+  let lastFrame = Date.now()
+  let stalled = false
+  const idleTimer = setInterval(() => {
+    if (Date.now() - lastFrame > STREAM_IDLE_TIMEOUT_MS) {
+      stalled = true
+      abort?.abort()
+    }
+  }, 5_000)
+  idleTimer.unref?.()
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
+      lastFrame = Date.now()
       buf += decoder.decode(value, { stream: true })
       let idx: number
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -66,9 +80,12 @@ async function readSse(res: any, onData: (json: any) => void): Promise<void> {
         onData(json)
       }
     }
-  } catch (e) {
+  } catch (e: any) {
     try { await reader.cancel().catch(() => {}) } catch { /* 忽略 */ }
+    if (stalled) throw new Error(`LLM 流空闲超时（${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s 无数据），已中断`)
     throw e
+  } finally {
+    clearInterval(idleTimer)
   }
 }
 
@@ -160,7 +177,7 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
     const tcMap = new Map<number, { id: string; name: string; args: string }>()
     let stopReason: string | undefined
 
-    await readSse(res, (j: any) => {
+    await readSse(res, ctrl, (j: any) => {
       // 部分兼容网关以 {"error":...} 数据帧下发流中错误（如过载/截断），静默忽略会拿到半截内容
       if (j?.error) {
         throw new Error(`LLM 流中断: ${j.error?.message || JSON.stringify(j.error).slice(0, 300)}`)
@@ -292,7 +309,7 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
     let thinkingSig = ''
     let usage: LlmUsage | undefined
     const toolBlocks = new Map<number, { id: string; name: string; args: string }>()
-    await readSse(res, (j: any) => {
+    await readSse(res, ctrl, (j: any) => {
       const t = j?.type
       // Anthropic 流中错误帧（overload 等）：不处理会静默截断内容
       if (t === 'error') {

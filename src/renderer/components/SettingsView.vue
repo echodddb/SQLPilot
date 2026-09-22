@@ -151,13 +151,63 @@
       </div>
 
       <div class="card">
-        <h3>审计日志 <button class="btn ghost" style="font-size:12px; margin-left:8px" @click="loadAudit">刷新</button></h3>
-        <div class="desc">每次 SQL 执行 / 文件写入 / 工具调用 / 拦截记录（最近 300 条，完整日志在 userData/audit.log）</div>
-        <div v-for="(a, i) in audit" :key="i" class="audit-line">
-          <b>{{ a.ts?.replace('T', ' ').slice(0, 19) }}</b>　[{{ a.kind }}] {{ a.conn ? `@${a.conn} ` : '' }}{{ a.detail?.slice(0, 120) }}
-          <span v-if="a.error" style="color:var(--red)"> → {{ a.error }}</span>
+        <h3>审计日志 <span class="desc" style="font-weight:normal">结构化可查 · 共 {{ auditTotal }} 条匹配</span>
+          <button class="btn ghost" style="font-size:12px; margin-left:8px" @click="runAuditQuery">刷新</button>
+        </h3>
+        <div class="desc">字段规范与完整日志见 userData/audit.log（JSONL）；子代理记录可按 runId 关联 subagent-runs/ 下的完整过程</div>
+
+        <div class="audit-filters">
+          <select v-model="auditF.kind" @change="runAuditQuery">
+            <option value="">全部类型</option>
+            <option v-for="(label, k) in AUDIT_KINDS" :key="k" :value="k">{{ label }}</option>
+          </select>
+          <select v-model="auditF.actor" @change="runAuditQuery">
+            <option value="">全部来源</option>
+            <option v-for="(label, a) in AUDIT_ACTORS" :key="a" :value="a">{{ label }}</option>
+          </select>
+          <select v-model="auditF.conn" @change="runAuditQuery">
+            <option value="">全部连接</option>
+            <option v-for="c in (store.cfg?.connections || [])" :key="c.id" :value="c.name">{{ c.name }}</option>
+          </select>
+          <select v-model="auditF.range" @change="runAuditQuery">
+            <option value="">全部时间</option>
+            <option value="1d">近 24 小时</option>
+            <option value="7d">近 7 天</option>
+            <option value="today">今天</option>
+          </select>
+          <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-dim)">
+            <input type="checkbox" v-model="auditF.errorsOnly" @change="runAuditQuery" /> 只看失败
+          </label>
+          <input v-model="auditF.q" placeholder="搜索 SQL / 对象 / 错误…" style="flex:1; min-width:140px" @keyup.enter="runAuditQuery" />
+          <button class="btn" style="font-size:12px" @click="runAuditQuery">搜索</button>
         </div>
-        <div v-if="!audit.length" class="desc" style="text-align:center">暂无记录</div>
+
+        <div class="audit-table">
+          <div class="audit-row audit-head-row">
+            <span class="c-ts">时间</span><span class="c-kind">类型</span><span class="c-actor">来源</span><span class="c-conn">连接</span><span class="c-detail">操作</span><span class="c-meta">行/耗时</span><span class="c-st">状态</span>
+          </div>
+          <div v-for="(a, i) in audit" :key="i" class="audit-row" :class="{ open: auditOpen === i, err: !!a.error }" @click="auditOpen = auditOpen === i ? -1 : i">
+            <span class="c-ts">{{ a.ts?.replace('T', ' ').slice(5, 19) }}</span>
+            <span class="c-kind"><b :class="'k-' + (a.kind || '').replace('.', '-')">{{ AUDIT_KINDS[a.kind] || a.kind }}</b></span>
+            <span class="c-actor">{{ AUDIT_ACTORS[a.actor] || a.actor || '—' }}</span>
+            <span class="c-conn">{{ a.conn || '—' }}</span>
+            <span class="c-detail">{{ a.detail?.slice(0, 90) }}<em v-if="a.target"> · {{ a.target }}</em></span>
+            <span class="c-meta">{{ [a.rows != null ? `${a.rows}行` : '', a.ms != null ? `${a.ms}ms` : ''].filter(Boolean).join(' ') || '—' }}</span>
+            <span class="c-st" :style="{ color: a.approved === false ? 'var(--orange, #e6a23c)' : a.error ? 'var(--red)' : 'var(--green)' }">{{ a.approved === false ? '拦截' : a.error ? '✗' : '✓' }}</span>
+            <div v-if="auditOpen === i" class="audit-expand">
+              <template v-if="a.sql"><div class="lbl">SQL</div><pre>{{ a.sql }}</pre></template>
+              <template v-if="a.target"><div class="lbl">对象</div><div>{{ a.target }}</div></template>
+              <template v-if="a.error"><div class="lbl">错误</div><div style="color:var(--red)">{{ a.error }}</div></template>
+              <div class="lbl">明细</div>
+              <div style="white-space:pre-wrap">{{ a.detail }}</div>
+              <div v-if="a.runId" class="lbl">子代理运行 {{ a.runId }}（完整过程：工具卡片 → 🔍 查看完整过程）</div>
+            </div>
+          </div>
+        </div>
+        <div v-if="!audit.length" class="desc" style="text-align:center">无匹配记录</div>
+        <div v-if="auditHasMore" style="text-align:center; margin-top:8px">
+          <button class="btn ghost" style="font-size:12px" @click="loadMoreAudit">加载更多（已显示 {{ audit.length }} / {{ auditTotal }}）</button>
+        </div>
       </div>
     </div>
   </div>
@@ -235,7 +285,62 @@ watch(
 )
 
 async function loadAudit() {
-  audit.value = (await window.sqlpilot.getAudit()).slice().reverse()
+  await runAuditQuery()
+}
+
+// ---------- 结构化审计查询 ----------
+const AUDIT_KINDS: Record<string, string> = {
+  'sql.read': '读',
+  'sql.write': '写',
+  'tool': '工具',
+  'subagent': '子代理',
+  'conn': '连接',
+  'llm.error': 'LLM错误',
+  'ui.error': '界面错误'
+}
+const AUDIT_ACTORS: Record<string, string> = {
+  'agent': '主代理',
+  'sub:*': '子代理(全部)',
+  'human': '人工',
+  'app': '应用'
+}
+const auditF = ref<{ kind: string; actor: string; conn: string; range: string; q: string; errorsOnly: boolean }>({ kind: '', actor: '', conn: '', range: '', q: '', errorsOnly: false })
+const auditOpen = ref(-1)
+const auditTotal = ref(0)
+const auditHasMore = ref(false)
+const AUDIT_PAGE = 100
+
+async function runAuditQuery(reset = true): Promise<void> {
+  if (reset) {
+    audit.value = []
+    auditOpen.value = -1
+  }
+  const f = auditF.value
+  const now = Date.now()
+  let fromMs: number | undefined
+  if (f.range === '1d') fromMs = now - 24 * 3600_000
+  else if (f.range === '7d') fromMs = now - 7 * 24 * 3600_000
+  else if (f.range === 'today') {
+    const d = new Date()
+    fromMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  }
+  const r = await window.sqlpilot.auditQuery({
+    kinds: f.kind ? [f.kind] : undefined,
+    actors: f.actor ? [f.actor] : undefined,
+    conns: f.conn ? [f.conn] : undefined,
+    q: f.q.trim() || undefined,
+    fromMs,
+    errorsOnly: f.errorsOnly || undefined,
+    limit: AUDIT_PAGE,
+    offset: audit.value.length
+  })
+  audit.value = audit.value.concat(r.entries || [])
+  auditTotal.value = r.total
+  auditHasMore.value = r.hasMore
+}
+
+async function loadMoreAudit(): Promise<void> {
+  await runAuditQuery(false)
 }
 
 async function loadSkills() {
@@ -398,4 +503,27 @@ async function doImportUrl() {
 .privacy-cfg { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
 .privacy-item { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; line-height: 1.6; }
 .privacy-item em { color: var(--text-faint); font-style: normal; }
+
+/* 审计查看器 */
+.audit-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0; }
+.audit-filters select, .audit-filters input { border: 1px solid var(--border); background: var(--bg-card); color: var(--text); border-radius: 5px; font-size: 12px; padding: 3px 8px; font-family: inherit; }
+.audit-table { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; font-size: 12px; max-height: 480px; overflow-y: auto; }
+.audit-row { display: grid; grid-template-columns: 110px 62px 84px 90px 1fr 90px 36px; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: pointer; align-items: baseline; }
+.audit-row:hover { background: var(--bg-hover, rgba(128,128,128,.07)); }
+.audit-row.err .c-detail { color: var(--red); }
+.audit-head-row { position: sticky; top: 0; background: var(--bg-card); color: var(--text-dim); font-size: 11px; cursor: default; z-index: 1; }
+.c-ts { color: var(--text-faint); font-size: 11px; white-space: nowrap; }
+.c-kind b { font-weight: 500; font-size: 11px; padding: 1px 5px; border-radius: 3px; background: var(--border); color: var(--text-dim); }
+.c-kind .k-sql-write { background: #c53030; color: #fff; }
+.c-kind .k-sql-read { background: #2b6cb0; color: #fff; }
+.c-kind .k-subagent { background: #6b46c1; color: #fff; }
+.c-kind .k-llm-error, .c-kind .k-ui-error { background: #c05621; color: #fff; }
+.c-actor, .c-conn { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-detail em { color: var(--text-faint); font-style: normal; font-size: 11px; }
+.c-meta { color: var(--text-faint); font-size: 11px; white-space: nowrap; text-align: right; }
+.c-st { text-align: center; }
+.audit-expand { grid-column: 1 / -1; padding: 6px 0 4px; color: var(--text-dim); font-size: 12px; }
+.audit-expand .lbl { font-size: 11px; color: var(--text-faint); margin: 4px 0 2px; }
+.audit-expand pre { white-space: pre-wrap; word-break: break-all; background: var(--bg2, rgba(0,0,0,.15)); padding: 6px; border-radius: 4px; margin: 2px 0; max-height: 220px; overflow: auto; }
 </style>

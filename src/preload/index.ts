@@ -129,7 +129,17 @@ const api = {
   },
   // 其他
   getAudit: () => ipcRenderer.invoke('audit:list'),
+  auditQuery: (q: any) => ipcRenderer.invoke('audit:query', q),
   appInfo: () => ipcRenderer.invoke('app:info'),
+  // 子代理任务面板
+  subagentTasks: (sessionId?: string) => ipcRenderer.invoke('subagent:tasks', { sessionId }),
+  subagentStopTask: (id: string) => ipcRenderer.invoke('subagent:stopTask', { id }),
+  subagentAudit: (runId: string) => ipcRenderer.invoke('subagent:audit', { runId }),
+  onSubtasks: (cb: (p: { sessionId: string; tasks: any[] }) => void) => {
+    const l = (_e: any, p: any) => cb(p)
+    ipcRenderer.on('subagent:tasks', l)
+    return () => ipcRenderer.removeListener('subagent:tasks', l)
+  },
   // 事件订阅
   onAgentEvent: (cb: (ev: any) => void) => {
     const l = (_e: any, ev: any) => cb(ev)

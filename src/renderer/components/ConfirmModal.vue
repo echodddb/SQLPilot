@@ -5,6 +5,7 @@
 
       <div style="font-size:12.5px; color:var(--text-dim); line-height:1.8">
         目标连接：<b style="color:var(--text)">{{ req.conn }}</b>
+        <span v-if="req.origin"><br />执行者：<b style="color:var(--orange, #e6a23c)">「{{ req.origin }}」</b>（由子代理发起，权限不会超出本会话）</span>
         <span v-if="sessionLabel"><br />来自会话：<b style="color:var(--text)">{{ sessionLabel }}</b></span>
         <br />Agent 请求执行以下语句：
       </div>
