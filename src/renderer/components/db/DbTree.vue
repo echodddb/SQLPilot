@@ -26,8 +26,7 @@
             <div v-for="s in tree[c.id].schemas || []" :key="s">
               <div class="dbt-node schema" @click="toggleSchema(c.id, s)">
                 <span class="arrow">{{ tree[c.id].opened === s ? '▾' : '▸' }}</span>
-                <span>📂</span>
-                <span class="name">{{ s }}</span>
+                                <span class="name">{{ s }}</span>
                 <span class="sub" v-if="tree[c.id].tables[s]?.length">{{ tree[c.id].tables[s].length }}</span>
                 <button v-if="tree[c.id].opened === s" class="mini-btn" title="刷新对象列表（绕过缓存）"
                   @click.stop="refreshTables(c.id, s)">⟳</button>

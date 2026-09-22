@@ -200,7 +200,7 @@
               <template v-if="a.error"><div class="lbl">错误</div><div style="color:var(--red)">{{ a.error }}</div></template>
               <div class="lbl">明细</div>
               <div style="white-space:pre-wrap">{{ a.detail }}</div>
-              <div v-if="a.runId" class="lbl">子代理运行 {{ a.runId }}（完整过程：工具卡片 → 🔍 查看完整过程）</div>
+              <div v-if="a.runId" class="lbl">子代理运行 {{ a.runId }}（完整过程：工具卡片 → 查看完整过程）</div>
             </div>
           </div>
         </div>

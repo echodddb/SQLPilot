@@ -2,7 +2,6 @@
   <div class="tool-card" :class="tool.status">
     <div class="tool-head" @click="expanded = !expanded">
       <span class="arrow">{{ expanded ? '▾' : '▸' }}</span>
-      <span class="tool-icon">{{ ICONS[tool.name] || '🔧' }}</span>
       <span class="badge" :class="tool.name === 'db_write' ? 'red' : 'blue'">{{ tool.name }}</span>
       <span class="tool-sql">{{ summary }}</span>
       <span v-if="tool.status === 'running'" class="spinner"></span>
@@ -42,7 +41,7 @@
           </template>
         </template>
         <div style="margin-top:8px">
-          <button class="btn ghost" style="font-size:11.5px; padding:2px 10px" @click.stop="viewRun">🔍 查看完整过程（含每步 SQL）</button>
+          <button class="btn ghost" style="font-size:11.5px; padding:2px 10px" @click.stop="viewRun">查看完整过程（含每步 SQL）</button>
         </div>
       </template>
       <template v-else>
@@ -74,16 +73,6 @@ import { openSubRun } from '../store'
 
 const props = defineProps<{ tool: any }>()
 const expanded = ref(false)
-
-const ICONS: Record<string, string> = {
-  db_list_schemas: '📂',
-  db_list_tables: '🗂',
-  db_describe_table: '🧬',
-  db_get_ddl: '📄',
-  db_query: '🔍',
-  db_write: '✏️',
-  agent_spawn: '🤖'
-}
 
 const SUB_STATUS: Record<string, string> = {
   completed: '已完成',

@@ -3,7 +3,7 @@
     <div class="wb-drag" @mousedown="startVDrag" title="拖拽调整高度（双击收起/展开）" @dblclick="panelH = panelH > 60 ? 40 : 320"></div>
 
     <div class="wb-head">
-      <span class="wb-title">🖥 终端<span v-if="terms.length" class="wb-count">（{{ terms.length }}）</span></span>
+      <span class="wb-title">终端<span v-if="terms.length" class="wb-count">（{{ terms.length }}）</span></span>
       <span style="flex:1"></span>
       <button class="icon-btn" title="关闭面板" @click="$emit('close')">✕</button>
     </div>
@@ -13,7 +13,7 @@
         <div class="wb-side-title">服务器</div>
         <div v-if="!servers.length" class="wb-hint">项目未挂载服务器<br />右键项目 → 编辑属性</div>
         <div v-for="s in servers" :key="s.id" class="srv-item" :title="`${s.user}@${s.host}:${s.port}`" @click="openTerm(s)">
-          <span>🖥</span><span class="name">{{ s.name }}</span>
+          <span class="name">{{ s.name }}</span>
           <span v-if="s.tag" class="tag" :class="{ prod: s.tag === '生产' }">{{ s.tag }}</span>
         </div>
       </div>
@@ -25,7 +25,7 @@
             <button class="icon-btn" style="padding:0 3px; font-size:11px" @click.stop="closeTerm(t.id)">✕</button>
           </div>
           <span style="flex:1"></span>
-          <button class="wb-mini" :class="{ on: sftpOpen }" title="SFTP 文件浏览器" @click="toggleSftp">📁 文件</button>
+          <button class="wb-mini" :class="{ on: sftpOpen }" title="SFTP 文件浏览器" @click="toggleSftp">文件</button>
         </div>
         <div class="term-host" ref="hostEl">
           <div v-for="t in terms" :key="t.id" v-show="t.id === activeId" :ref="setPaneRef(t.id)"></div>
@@ -53,7 +53,7 @@
             @click="f.isDir && enterDir(f.name)"
             @dblclick="!f.isDir && sftpDownloadFile(f.name)"
           >
-            <span>{{ f.isDir ? '📂' : '📄' }}</span>
+            <span>{{ f.isDir ? '▸' : '' }}</span>
             <span class="name">{{ f.name }}</span>
             <span class="size">{{ f.isDir ? '' : fmtSize(f.size) }}</span>
           </div>

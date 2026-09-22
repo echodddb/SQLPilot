@@ -27,7 +27,7 @@
           :title="`${boundProject.rootPath}（点击切换项目）`"
           style="cursor: pointer"
           @click="openSessionModal('switch')"
-        >📁 {{ boundProject.name }}</span>
+        >{{ boundProject.name }}</span>
         <span
           v-else
           class="badge yellow"
@@ -57,7 +57,7 @@
           :class="{ 'term-active': store.view === 'db' }"
           title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；再点返回对话）"
           @click="store.view = store.view === 'db' ? 'chat' : 'db'">
-          🗃 数据库
+          数据库
         </button>
 
         <button

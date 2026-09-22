@@ -1,7 +1,7 @@
 <template>
   <div class="modal-mask" @click.self="$emit('close')">
     <div class="modal" style="width: 520px">
-      <h3>📁 新建项目</h3>
+      <h3> 新建项目</h3>
 
       <div class="form-row">
         <div>

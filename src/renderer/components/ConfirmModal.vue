@@ -1,7 +1,7 @@
 <template>
   <div class="modal-mask">
     <div class="modal" style="width:640px">
-      <h3>⚠️ 写操作确认 <span class="badge" :class="riskClass">{{ req.kind }} · 风险{{ req.risk }}</span></h3>
+      <h3>写操作确认 <span class="badge" :class="riskClass">{{ req.kind }} · 风险{{ req.risk }}</span></h3>
 
       <div style="font-size:12.5px; color:var(--text-dim); line-height:1.8">
         目标连接：<b style="color:var(--text)">{{ req.conn }}</b>

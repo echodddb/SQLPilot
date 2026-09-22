@@ -8,7 +8,7 @@
       </div>
 
       <div v-for="p in projects" :key="p.id" class="proj-pick" @click="$emit('pick', p.id)" :title="p.rootPath">
-        <span>📁</span>
+        <span></span>
         <span class="pname">{{ p.name }}</span>
         <span class="ppath">{{ p.rootPath }}</span>
         <span class="pgo">→</span>

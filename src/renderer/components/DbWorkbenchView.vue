@@ -73,7 +73,7 @@ interface WbTab {
   activateSeq: number
 }
 
-const KIND_ICON: Record<WbTab['kind'], string> = { query: '📝', table: '▣', info: '📊' }
+const KIND_ICON: Record<WbTab['kind'], string> = { query: '▸', table: '▣', info: '◇' }
 
 const tabs = ref<WbTab[]>([])
 const activeKey = ref('')

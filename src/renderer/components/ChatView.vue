@@ -13,7 +13,7 @@
         </div>
         <div v-if="!curSession().msgs.length" class="empty-state">
           <div class="big">◆</div>
-          <b>SQLPilot 就绪</b> — 资深 DBA 助手，直接操作您配置的数据库
+          <b>SQLPilot</b> — 数据库操作、巡检与变更助手
           <div class="step" v-if="!store.cfg?.providers?.length">
             <b>第 1 步</b>　点击右上角 <b>⚙ 设置</b> 选择厂商和模型（DeepSeek / GLM / Kimi / Claude…）
           </div>
@@ -21,7 +21,7 @@
             <b>可选</b>　需要操作数据库时，左侧 <b>＋</b> 添加连接（Oracle 11g/19c、OB MySQL 租户、MySQL）；纯文件/技能任务无需连接
           </div>
           <div class="step">
-            <b>试试</b>　"帮我在项目里写一份周巡检报告模板" · "看看这个库有哪些业务表" · 切到<b>计划模式</b>让它先出方案再动手
+            <b>示例</b>　查看某个库的表结构 · 多库巡检 · 复杂变更先切<b>计划模式</b>出方案再执行
           </div>
         </div>
 
@@ -32,16 +32,16 @@
           <template v-else-if="m.role === 'reasoning'">
             <div v-if="m.collapsed">
               <button class="reasoning-toggle show" title="展开思考过程" @click="toggleReasoning(m)">
-                <span class="chev">▸</span>💭 思考过程（{{ m.text.length }} 字）<span class="op">展开</span>
+                <span class="chev">▸</span>思考过程（{{ m.text.length }} 字）<span class="op">展开</span>
               </button>
             </div>
             <template v-else>
               <div v-if="answerStarted(idx) || m.settled">
                 <button class="reasoning-toggle" title="收起思考过程" @click="toggleReasoning(m)">
-                  <span class="chev">▾</span>💭 思考过程<span class="op">收起</span>
+                  <span class="chev">▾</span>思考过程<span class="op">收起</span>
                 </button>
               </div>
-              <div class="content" v-if="m.text">💭 {{ m.text }}</div>
+              <div class="content" v-if="m.text">{{ m.text }}</div>
             </template>
           </template>
           <template v-else-if="m.role === 'error'">
@@ -62,8 +62,8 @@
     <div class="chat-input-wrap">
       <div class="chat-input">
         <div class="quick-bar">
-          <button class="quick-btn" :class="{ on: store.workbench === 'terminal' }" title="SSH 终端（当前会话项目的服务器）" @click="store.workbench = store.workbench === 'terminal' ? null : 'terminal'">🖥 终端</button>
-          <button class="quick-btn" :class="{ on: store.view === 'db' }" title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；顶栏 🗃 数据库同款入口）" @click="store.view = store.view === 'db' ? 'chat' : 'db'">🗃 数据库</button>
+          <button class="quick-btn" :class="{ on: store.workbench === 'terminal' }" title="SSH 终端（当前会话项目的服务器）" @click="store.workbench = store.workbench === 'terminal' ? null : 'terminal'">终端</button>
+          <button class="quick-btn" :class="{ on: store.view === 'db' }" title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；顶栏数据库同款入口）" @click="store.view = store.view === 'db' ? 'chat' : 'db'">数据库</button>
         </div>
         <textarea
           v-model="store.drafts[store.currentId]"
@@ -78,7 +78,7 @@
               class="ctx-badge"
               :class="ctxLevel"
               :title="ctxTitle"
-            >📊 {{ fmtTok(curSession().ctx!.est) }}/{{ curSession().ctx!.windowK }}K · {{ ctxPct }}%</span>
+            >{{ fmtTok(curSession().ctx!.est) }}/{{ curSession().ctx!.windowK }}K · {{ ctxPct }}%</span>
             <select
               class="effort-select"
               :value="curSession().meta.effort ?? ''"
@@ -97,8 +97,8 @@
           <span>
             <button v-if="curSession().running" class="btn danger" style="margin-right:6px" @click="stop">■ 停止</button>
             <button class="btn ghost" style="margin-right:6px" @click="onArchiveClick" :disabled="curSession().running || !!store.archiveProgress" :title="store.archiveProgress ? store.archiveProgress.note : '总结当前对话归档到项目（该项目其他会话可读）后清空本会话'">
-              <template v-if="store.archiveProgress">⟳ 归档中…</template>
-              <template v-else>📦 归档对话</template>
+              <template v-if="store.archiveProgress">归档中…</template>
+              <template v-else>归档对话</template>
             </button>
             <button class="btn primary" @click="send" :disabled="curSession().running || !store.drafts[store.currentId]?.trim()">发送</button>
           </span>

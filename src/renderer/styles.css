@@ -12,11 +12,11 @@
   --text: #e8ebf4;
   --text-dim: #8f96ac;
   --text-faint: #616880;
-  --accent: #6a8dff;
-  --accent-2: #9d7cff;
-  --accent-grad: linear-gradient(135deg, #6a8dff, #9d7cff);
-  --accent-dim: rgba(106, 141, 255, 0.14);
-  --accent-glow: rgba(106, 141, 255, 0.25);
+  --accent: #4d7db3;
+  --accent-2: #4d7db3;
+  --accent-grad: #4d7db3;
+  --accent-dim: rgba(77, 125, 179, 0.16);
+  --accent-glow: rgba(77, 125, 179, 0.12);
   --green: #4ade80;
   --green-dim: rgba(74, 222, 128, 0.13);
   --yellow: #fbbf24;
@@ -42,11 +42,11 @@ html[data-theme='light'] {
   --text: #1f2433;
   --text-dim: #667088;
   --text-faint: #9aa2b8;
-  --accent: #4f6ef7;
-  --accent-2: #8b5cf6;
-  --accent-grad: linear-gradient(135deg, #4f6ef7, #8b5cf6);
-  --accent-dim: rgba(79, 110, 247, 0.09);
-  --accent-glow: rgba(79, 110, 247, 0.18);
+  --accent: #2f6398;
+  --accent-2: #2f6398;
+  --accent-grad: #2f6398;
+  --accent-dim: rgba(47, 99, 152, 0.08);
+  --accent-glow: rgba(47, 99, 152, 0.10);
   --green: #16a34a;
   --green-dim: rgba(22, 163, 74, 0.1);
   --yellow: #b45309;
@@ -135,7 +135,7 @@ body {
   white-space: nowrap;
 }
 .mode-group button:hover { color: var(--text); }
-.mode-group button.active { background: var(--accent); color: #fff; box-shadow: 0 1px 6px var(--accent-glow); }
+.mode-group button.active { background: var(--accent); color: #fff; }
 .mode-group button.active.ok { background: var(--green); box-shadow: 0 1px 6px var(--green-dim); }
 .mode-group button.active.plan { background: var(--purple); box-shadow: 0 1px 6px rgba(157, 124, 252, 0.3); }
 .mode-group button.active.warn { background: var(--yellow); color: #3d2c00; box-shadow: 0 1px 6px var(--yellow-dim); }
@@ -163,9 +163,9 @@ body {
   border: none;
   color: #fff;
   font-weight: 600;
-  box-shadow: 0 2px 8px var(--accent-glow);
+
 }
-.btn.primary:hover { filter: brightness(1.1); box-shadow: 0 3px 12px var(--accent-glow); }
+.btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { background: var(--red); border: none; color: #fff; }
 .btn.danger:hover { filter: brightness(1.08); }
 .btn.ghost { background: transparent; border-color: transparent; }
