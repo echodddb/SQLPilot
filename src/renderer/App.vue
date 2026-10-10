@@ -1,19 +1,20 @@
 <template>
   <div class="layout" v-if="store.ready && curSession()">
-    <Sidebar />
+    <ModuleNav />
+    <Sidebar v-if="store.module === 'agent'" />
     <div class="main-area">
       <div class="topbar">
         <span class="logo">◆ SQLPilot</span>
 
         <span
-          v-if="boundProject"
+          v-if="store.module === 'agent' && boundProject"
           class="badge blue"
           :title="`${boundProject.rootPath}（点击切换项目）`"
           style="cursor: pointer"
           @click="openSessionModal('switch')"
         >{{ boundProject.name }}</span>
         <span
-          v-else
+          v-else-if="store.module === 'agent'"
           class="badge yellow"
           title="会话必须挂在一个项目下，点击选择"
           style="cursor: pointer"
@@ -24,13 +25,13 @@
 
         <!-- 未配置厂商时给一个明确 CTA，替代不可用的空下拉 -->
         <button
-          v-if="!(store.cfg.providers || []).length"
+          v-if="store.module === 'agent' && !(store.cfg.providers || []).length"
           class="btn primary"
           title="先配置模型厂商（API Key / 型号），会话才能发起"
           @click="store.view = 'settings'"
         >配置模型 →</button>
         <select
-          v-else
+          v-else-if="store.module === 'agent'"
           :value="curSession().meta.providerId || store.cfg.activeProviderId || ''"
           style="min-width: 190px"
           title="当前会话使用的模型（各会话可不同）"
@@ -45,6 +46,7 @@
         </button>
 
         <button
+          v-if="store.module === 'agent'"
           class="btn ghost"
           :class="{ 'term-active': store.view === 'db' }"
           title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；再点返回对话）"
@@ -61,17 +63,20 @@
 
       <!-- 数据库工作台用 v-show 保活：切到聊天/设置再回来，查询窗口/表数据 tab 不丢 -->
       <!-- 三主视图统一 v-show 保活：切换回来时聊天滚动位置 / 工作台 tab / 设置表单草稿都不丢 -->
-      <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
-           改由宿主 div 承担 v-show 与布局，子组件只管内容 -->
-      <div v-show="store.view === 'chat'" class="chat-view-host">
-        <ChatView />
-      </div>
+      <template v-if="store.module === 'agent'">
+        <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
+             改由宿主 div 承担 v-show 与布局，子组件只管内容 -->
+        <div v-show="store.view === 'chat'" class="chat-view-host">
+          <ChatView />
+        </div>
       <DbWorkbenchView v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
       <SettingsView v-show="store.view === 'settings'" style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
            SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
-      <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" />
-      <ResourcesPanel v-if="resEverOpen" v-show="store.workbench === 'resources'" @close="store.workbench = null" />
+        <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" />
+        <ResourcesPanel v-if="resEverOpen" v-show="store.workbench === 'resources'" @close="store.workbench = null" />
+      </template>
+      <ReportView v-else style="flex: 1; min-height: 0" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
@@ -100,6 +105,8 @@
 import { computed, provide, ref, watch } from 'vue'
 import { store, curSession, init, setSessionProvider, toPlain, createSessionInProject, bindSessionProject } from './store'
 import Sidebar from './components/Sidebar.vue'
+import ModuleNav from './components/ModuleNav.vue'
+import ReportView from './components/ReportView.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsView from './components/SettingsView.vue'
 import DbWorkbenchView from './components/DbWorkbenchView.vue'
@@ -136,6 +143,13 @@ watch(() => store.workbench, (v) => {
 // 组件均保活，重开恢复隐藏前的样子
 watch(() => store.currentId, () => {
   if (store.view !== 'chat') store.view = 'chat'
+  if (store.workbench) store.workbench = null
+})
+
+// 切换一级模块：收起底部工作台面板（终端/资源属于 AI 助手模块的会话上下文）。
+// view 保留——切回 AI 助手时回到离开前的工作台/设置页；确认/预览弹窗不收，
+// 后台任务与审批跨模块仍可响应
+watch(() => store.module, () => {
   if (store.workbench) store.workbench = null
 })
 

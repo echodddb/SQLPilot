@@ -67,6 +67,8 @@ export function toPlain<T>(v: T): T {
 
 export const store = reactive({
   ready: false,
+  /** 一级功能模块：AI 助手（对话/工作台/终端）/ 巡检报告（规划中） */
+  module: 'agent' as 'agent' | 'report',
   view: 'chat' as 'chat' | 'db' | 'settings',
   cfg: null as any,
   sessions: {} as Record<string, UiSession>,
