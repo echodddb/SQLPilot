@@ -115,9 +115,14 @@ if (!gotLock) {
 
   app.on('will-quit', (e) => {
     e.preventDefault()
+    // 总超时兜底：shutdown 里的连接关闭若挂住（如 MySQL 半开连接），
+    // 应用将永远退不出去——5 秒后强制退出
+    const forceExit = setTimeout(() => app.exit(0), 5_000)
+    forceExit.unref?.()
     shutdown()
       .catch(() => {})
       .finally(() => {
+        clearTimeout(forceExit)
         app.exit(0)
       })
   })

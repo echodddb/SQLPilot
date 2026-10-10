@@ -437,15 +437,17 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('term:input', (_e, { termId, data }: { termId: string; data: string }) => {
-    shellInput(termId, data)
+    // 渲染层可控输入钳制：termId/长度限制，防异常渲染层写超长数据到 shell
+    shellInput(String(termId ?? ''), String(data ?? '').slice(0, 8192))
     return { ok: true }
   })
 
   ipcMain.handle('term:resize', (_e, { termId, cols, rows }: { termId: string; cols: number; rows: number }) => {
-    shellResize(termId, cols, rows)
+    const c = Math.min(Math.max(Number(cols) || 80, 2), 500)
+    const r = Math.min(Math.max(Number(rows) || 24, 2), 300)
+    shellResize(String(termId ?? ''), c, r)
     return { ok: true }
   })
-
   ipcMain.handle('term:close', (_e, { termId }: { termId: string }) => {
     closeShell(termId)
     return { ok: true }

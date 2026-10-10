@@ -22,7 +22,15 @@ export function configPath(): string {
   return path.join(app.getPath('userData'), 'config.json')
 }
 
+/**
+ * 内存缓存：loadConfig 是几乎每个 IPC handler 的热路径，此前每次同步读盘 +
+ * 逐 provider DPAPI 解密。saveConfig 时同步刷新；调用方持有同一引用做
+ * load→mutate→save 的惯用法不受影响（save 前缓存与磁盘可能短暂不一致，与原行为等价）。
+ */
+let cachedConfig: AppConfig | null = null
+
 export function loadConfig(): AppConfig {
+  if (cachedConfig) return cachedConfig
   let cfg: AppConfig
   try {
     const raw = fs.readFileSync(configPath(), 'utf8')
@@ -48,6 +56,7 @@ export function loadConfig(): AppConfig {
   for (const p of cfg.providers) {
     if (!p.apiKey) p.apiKey = getPassword(providerKey(p.id))
   }
+  cachedConfig = cfg
   return cfg
 }
 
@@ -67,6 +76,7 @@ export function saveConfig(cfg: AppConfig): void {
     ? { ...cfg, providers: cfg.providers.map((p) => ({ ...p, apiKey: '' })) }
     : cfg
   writeFileAtomic(configPath(), JSON.stringify(onDisk, null, 2))
+  cachedConfig = cfg
   if (encrypted) {
     for (const p of cfg.providers) {
       if (p.apiKey) setPassword(providerKey(p.id), p.apiKey)
