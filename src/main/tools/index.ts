@@ -30,14 +30,21 @@ export interface ApprovalRequest {
   origin?: string
 }
 
-export type ApprovalDecision = 'once' | 'session' | 'deny'
+/** 用户在确认弹窗可选的决定：once 仅此次 / session 本会话同类放行 / yolo 提权到完全放开 / deny 拒绝 */
+export type ApprovalDecision = 'once' | 'session' | 'yolo' | 'deny'
+
+/** 归一化后的审批结果：decision 已脱离弹窗选项语义；reason = 用户拒绝时附带的反馈（回传模型调整方案） */
+export interface ApprovalOutcome {
+  decision: 'approved' | 'denied' | 'session' | 'yolo'
+  reason?: string
+}
 
 export interface ToolContext {
   connections: ConnProfile[]
   globalClientDir?: string
   mode: PermissionMode
   sessionApproved: Set<string>
-  requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>
+  requestApproval: (req: ApprovalRequest) => Promise<ApprovalOutcome>
   /** 当前会话绑定的项目（未绑定为 undefined，fs 工具不可用） */
   project?: { id: string; name: string; rootPath: string }
   /** 项目挂载的 SSH 服务器（server_* 工具用） */
@@ -390,23 +397,28 @@ async function gateWrite(
     appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: `${where}拒绝`, ...sqlField })
     return JSON.stringify({ error: `当前为${where}，写操作被拒绝。` })
   }
-  const decision = await requestApprovalIfNeeded(ctx, req)
-  if (decision === 'denied') {
-    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: '用户拒绝', ...sqlField })
-    return JSON.stringify({ error: '用户拒绝了该操作' })
+  const outcome = await requestApprovalIfNeeded(ctx, req)
+  if (outcome.decision === 'denied') {
+    const reason = outcome.reason?.trim()
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: reason ? `用户拒绝：${reason.slice(0, 300)}` : '用户拒绝', ...sqlField })
+    const feedback = reason
+      ? `用户拒绝了该操作，反馈：${reason}。请根据反馈调整方案后再继续；未经用户明确要求，不要原样重试。`
+      : '用户拒绝了该操作。请询问用户希望如何调整，不要原样重试。'
+    return JSON.stringify({ error: feedback })
   }
-  if (decision === 'session') ctx.sessionApproved.add(approvalKey(req))
+  if (outcome.decision === 'session') ctx.sessionApproved.add(approvalKey(req))
+  // yolo：会话模式切换由审批应答方（ipc 层）完成，这里视同本次放行
   if (!skipSuccessAudit) {
     appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: true, ...sqlField })
   }
   return null
 }
 
-function requestApprovalIfNeeded(ctx: ToolContext, req: ApprovalRequest): Promise<'approved' | 'denied' | 'session'> {
+function requestApprovalIfNeeded(ctx: ToolContext, req: ApprovalRequest): Promise<ApprovalOutcome> {
   // session 模式：同类写操作（同工具+同类别+同目标）首次确认后本会话放行；高危(risk3)每次都确认。yolo 全放行。
   const confirm = ctx.mode === 'yolo' ? false : ctx.mode === 'confirm' ? true : req.risk >= 3 ? true : !ctx.sessionApproved.has(approvalKey(req))
-  if (!confirm) return Promise.resolve('approved')
-  return ctx.requestApproval(req).then((d) => (d === 'deny' ? 'denied' : d === 'session' ? 'session' : 'approved'))
+  if (!confirm) return Promise.resolve({ decision: 'approved' })
+  return ctx.requestApproval(req)
 }
 
 export async function executeTool(name: string, argsJson: string, ctx: ToolContext): Promise<{ ok: boolean; result: string }> {

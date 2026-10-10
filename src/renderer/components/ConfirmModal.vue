@@ -16,9 +16,21 @@
         （队列中还有 {{ queueLength - 1 }} 个确认请求等待处理）
       </div>
 
+      <input
+        v-model="feedback"
+        class="feedback-input"
+        placeholder="拒绝原因（可选，仅点「拒绝」时生效）：填了会反馈给 AI 调整方案，如“改用 DELETE 加 WHERE 分批”"
+        @keydown.enter.prevent="onFeedbackEnter"
+      />
+
       <div class="actions">
         <button class="btn danger" @click="reply('deny')">拒绝</button>
         <span style="flex:1"></span>
+        <button
+          class="btn danger-outline"
+          title="本会话切换为完全放开模式：本次放行，后续所有操作（含高危）自动执行、不再弹窗。仅在信任当前任务时使用"
+          @click="reply('yolo')"
+        >完全放开</button>
         <button class="btn" @click="reply('session')">本会话均允许此类操作</button>
         <button class="btn primary" @click="reply('once')">仅此次允许</button>
       </div>
@@ -27,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { store } from '../store'
 
 const req = computed(() => store.confirmQueue[0])
@@ -40,9 +52,47 @@ const sessionLabel = computed(() => {
   return s ? s.meta.title : ''
 })
 
+// 拒绝时的可选反馈：随 deny 回传主进程，注入工具结果让模型按反馈调整方案
+const feedback = ref('')
+
+// 输入法组词时的 Enter 只确认候选词，不触发拒绝（同聊天输入框的处理）
+function onFeedbackEnter(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return
+  reply('deny')
+}
+
 async function reply(decision: string) {
   const id = req.value.requestId
   store.confirmQueue = store.confirmQueue.filter((c) => c.requestId !== id)
-  await window.sqlpilot.replyConfirm(id, decision)
+  const reason = decision === 'deny' ? (feedback.value.trim() || undefined) : undefined
+  feedback.value = ''
+  await window.sqlpilot.replyConfirm(id, decision, reason)
 }
 </script>
+
+<style scoped>
+.feedback-input {
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+}
+.feedback-input:focus {
+  outline: none;
+  border-color: var(--red);
+}
+/* 一键提权（切换完全放开）：红描边弱底色，与主操作（仅此次允许）区分开 */
+.btn.danger-outline {
+  background: var(--red-dim);
+  border-color: var(--red);
+  color: var(--red);
+}
+.btn.danger-outline:hover {
+  filter: brightness(1.1);
+}
+</style>

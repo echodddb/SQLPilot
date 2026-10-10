@@ -114,38 +114,6 @@ body {
 
 .topbar .spacer { flex: 1; }
 
-/* ============ 权限模式分段控件 ============ */
-.mode-group {
-  display: flex;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 99px;
-  padding: 3px;
-  gap: 2px;
-}
-.mode-group button {
-  padding: 5px 13px;
-  border: none;
-  border-radius: 99px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 12.5px;
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.18s ease;
-  white-space: nowrap;
-}
-.mode-group button:hover { color: var(--text); }
-.mode-group button.active { background: var(--accent); color: #fff; }
-.mode-group button.active.ok { background: var(--green); box-shadow: 0 1px 6px var(--green-dim); }
-.mode-group button.active.plan { background: var(--purple); box-shadow: 0 1px 6px rgba(157, 124, 252, 0.3); }
-.mode-group button.active.warn { background: var(--yellow); color: #3d2c00; box-shadow: 0 1px 6px var(--yellow-dim); }
-.mode-group button.active.danger { background: var(--red); box-shadow: 0 1px 6px var(--red-dim); animation: pulse-danger 2s infinite; }
-@keyframes pulse-danger {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.4); }
-  50% { box-shadow: 0 0 0 5px rgba(248, 113, 113, 0); }
-}
-
 /* ============ 通用控件 ============ */
 .btn {
   padding: 7px 15px;

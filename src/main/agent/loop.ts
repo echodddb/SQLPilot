@@ -4,11 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { callLlm } from './llm'
 import { TOOLS, executeTool } from '../tools'
-import type { ApprovalDecision, ApprovalRequest, ToolContext } from '../tools'
-import type { ChatMsg, ConnProfile, PermissionMode, ProjectConfig, ProviderConfig, ThinkingEffort } from '../types'
+import type { ApprovalOutcome, ApprovalRequest, ToolContext } from '../tools'
+import type { ChatMsg, ConnProfile, PermissionMode, ProjectConfig, ProviderConfig, SshServer, ThinkingEffort } from '../types'
 import { appendAudit } from '../audit'
 import { listSkills } from '../skills'
-import { loadConfig } from '../config'
+import { loadConfig, projectServers } from '../config'
 import { writeFileAtomic } from '../atomic'
 import { modelContextK } from './catalog'
 import { metaGet, metaKeys, metaSet } from '../meta'
@@ -37,7 +37,7 @@ export type AgentEvent =
 export interface RunDeps {
   emit: (ev: AgentEvent) => void
   /** sessionId 用于把写操作确认归属到具体会话（多会话并发时互不影响） */
-  requestApproval: (req: ApprovalRequest, sessionId: string) => Promise<ApprovalDecision>
+  requestApproval: (req: ApprovalRequest, sessionId: string) => Promise<ApprovalOutcome>
   /** LLM 发送前预览：返回 false 表示用户取消该次请求（主进程按配置决定是否启用） */
   previewLlm?: (url: string, body: any) => Promise<boolean>
 }
@@ -50,6 +50,8 @@ export interface SessionMeta {
   projectId: string | null
   /** 会话级思考级别（null = 沿用提供商默认） */
   effort: ThinkingEffort | null
+  /** 进入计划模式前的用户模式（批准计划后恢复它，避免 yolo 被 enter_plan_mode 静默覆盖后丢级） */
+  prePlanMode?: PermissionMode | null
 }
 
 interface SessionState extends SessionMeta {
@@ -90,6 +92,7 @@ export function loadPersistedSessions(): void {
           providerId: s.providerId ?? null,
           projectId: s.projectId ?? null,
           effort: (s.effort as ThinkingEffort) ?? null,
+          prePlanMode: (s.prePlanMode as PermissionMode) ?? null,
           messages: repairDanglingToolCalls(tr.kept),
           contextSummary: tr.dropped.length ? summarizeDropped(s.contextSummary, tr.dropped) : s.contextSummary,
           pendingNotices: Array.isArray(s.pendingNotices) ? s.pendingNotices : [],
@@ -117,6 +120,7 @@ export function persistSessions(): void {
         providerId: s.providerId,
         projectId: s.projectId,
         effort: s.effort,
+        prePlanMode: s.prePlanMode ?? null,
         messages: s.messages,
         contextSummary: s.contextSummary,
         pendingNotices: s.pendingNotices
@@ -149,6 +153,7 @@ export function getSession(id: string): SessionState {
       providerId: null,
       projectId: null,
       effort: null,
+      prePlanMode: null,
       messages: [],
       running: false,
       sessionApproved: new Set(),
@@ -162,7 +167,7 @@ export function getSession(id: string): SessionState {
 }
 
 function metaOf(s: SessionState): SessionMeta {
-  return { id: s.id, title: s.title, mode: s.mode, providerId: s.providerId, projectId: s.projectId, effort: s.effort }
+  return { id: s.id, title: s.title, mode: s.mode, providerId: s.providerId, projectId: s.projectId, effort: s.effort, prePlanMode: s.prePlanMode ?? null }
 }
 
 /** 会话元信息（渲染层列表用） */
@@ -184,13 +189,18 @@ export function deleteSession(id: string): void {
 }
 
 /** 更新会话元数据（模式/模型/项目/思考级别/标题） */
-export function updateSession(id: string, patch: Partial<Pick<SessionState, 'title' | 'mode' | 'providerId' | 'projectId' | 'effort'>>): SessionMeta {
+export function updateSession(id: string, patch: Partial<Pick<SessionState, 'title' | 'mode' | 'providerId' | 'projectId' | 'effort' | 'prePlanMode'>>): SessionMeta {
   const s = getSession(id)
   if (patch.title !== undefined) s.title = patch.title
-  if (patch.mode !== undefined) s.mode = patch.mode
+  if (patch.mode !== undefined) {
+    s.mode = patch.mode
+    // 切出计划模式即作废恢复点（批准恢复/手动切换都走这里，prePlanMode 一次性消费）
+    if (patch.mode !== 'plan') s.prePlanMode = null
+  }
   if (patch.providerId !== undefined) s.providerId = patch.providerId
   if (patch.projectId !== undefined) s.projectId = patch.projectId
   if (patch.effort !== undefined) s.effort = patch.effort
+  if (patch.prePlanMode !== undefined) s.prePlanMode = patch.prePlanMode
   persistSessionsSoon()
   return metaOf(s)
 }
@@ -500,7 +510,7 @@ function nowLine(): string {
   return `当前时间：${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}（周${week}）${pad(d.getHours())} 时${tz ? `（时区 ${tz}）` : ''}。相对时间（今天/昨天/近 7 天/本月）以此为基准；需要精确时刻时用数据库时间函数（SYSDATE/CURRENT_DATE/NOW()）核实。`
 }
 
-function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, project: ProjectConfig | undefined, skills: { name: string; description: string }[], mask = false, facts?: PromptFacts): string {
+function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, project: ProjectConfig | undefined, skills: { name: string; description: string }[], mask = false, facts?: PromptFacts, srvs?: SshServer[]): string {
   // 连接分两组：关联本项目的优先，其余全局连接仍可用；每条连接可带版本标注与归属记忆
   const projConns = project ? connections.filter((c) => c.projectId === project.id) : []
   const otherConns = connections.filter((c) => !project || c.projectId !== project.id)
@@ -526,9 +536,10 @@ function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, pro
   }
 
   // 脱敏：服务器只发名称/标签/备注（按名称寻址），不发 user@host:port
-  const serverLines = project?.servers?.length
+  const srvList = srvs || []
+  const serverLines = srvList.length
     ? '\n项目挂载的远程服务器（按名称寻址，server_run/server_read_file/server_tail 操作；执行命令前先说明影响，注意 tag 标记）：\n' +
-      project.servers.map((s) => (mask
+      srvList.map((s) => (mask
         ? `- ${s.name} [${s.tag || '未标记'}]${s.note ? `（${s.note}）` : ''}`
         : `- ${s.name} [${s.tag || '未标记'}]: ${s.user}@${s.host}:${s.port}${s.note ? `（${s.note}）` : ''}`
       )).join('\n') + '\n'
@@ -640,7 +651,7 @@ export async function runTurn(
     // 双上限截断（条数 + token 预算）：预算必须扣除系统提示词与工具定义的实际占用
     // （指令文件/记忆/归档/摘要都在系统提示词里），否则小窗口模型会预算内超窗被 API 拒绝。
     // 系统提示词用截断前的旧摘要估算，截断后摘要至多多 3500 字符，余量足以覆盖
-    const systemPreview = buildSystemPrompt(cfg0.connections, sess.mode, proj0, listSkills().filter((s) => cfg0.skillsEnabled[s.id] !== false), cfg0.maskPromptDetails !== false, facts)
+    const systemPreview = buildSystemPrompt(cfg0.connections, sess.mode, proj0, listSkills().filter((s) => cfg0.skillsEnabled[s.id] !== false), cfg0.maskPromptDetails !== false, facts, projectServers(cfg0, proj0))
     const overhead = estimateTokens(systemPreview) + estimateTokens(JSON.stringify(TOOLS))
     const msgBudget = Math.max(4096, Math.floor(windowK * 1024 * 0.8) - overhead)
     const tr = trimHistory(sess.messages, msgBudget)
@@ -652,7 +663,7 @@ export async function runTurn(
       const cfg = loadConfig()
       const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
       const skills = listSkills().filter((s) => cfg.skillsEnabled[s.id] !== false)
-      const system = buildSystemPrompt(cfg.connections, sess.mode, project, skills, cfg.maskPromptDetails !== false, facts)
+      const system = buildSystemPrompt(cfg.connections, sess.mode, project, skills, cfg.maskPromptDetails !== false, facts, projectServers(cfg, project))
       const est = estimateContextTokens(system, sess.messages)
       // 先发估算（请求前徽标即可更新），响应带回真实计量后再补发一次
       deps.emit({ type: 'context', sessionId, est, windowK, usage: sess.lastUsage })
@@ -691,6 +702,9 @@ export async function runTurn(
             if (sess.mode === 'plan') {
               pr = { ok: false, result: JSON.stringify({ error: '已在计划模式中，继续探索并最终用 exit_plan_mode 提交计划' }) }
             } else {
+              // 记录计划前模式：批准计划后恢复（ZCode prePlanMode 的等价物）——
+              // 否则用户显式选择的会话放开/完全放开会被自动规划静默降级且无法找回
+              sess.prePlanMode = sess.mode
               sess.mode = 'plan'
               persistSessionsSoon()
               deps.emit({ type: 'session-updated', sessionId, meta: metaOf(sess) })
@@ -715,7 +729,7 @@ export async function runTurn(
           sessionApproved: sess.sessionApproved,
           requestApproval: (req) => deps.requestApproval(req, sessionId),
           project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,
-          servers: project2?.servers || [],
+          servers: projectServers(cfg2, project2),
           sessionId
         }
         const r = await executeTool(tc.name, tc.args, ctx)
@@ -728,7 +742,7 @@ export async function runTurn(
       // 其余工具已在上面的串行循环执行完，保证写操作的顺序性
       const spawns = res.toolCalls.filter((tc) => tc.name === 'agent_spawn' && !answered(sess.messages, tc.id))
       if (spawns.length && !sess.cancelRequested) {
-        const buildSystem = (mode: PermissionMode) => buildSystemPrompt(cfg2.connections, mode, project2, skills2, mask2, facts)
+        const buildSystem = (mode: PermissionMode) => buildSystemPrompt(cfg2.connections, mode, project2, skills2, mask2, facts, projectServers(cfg2, project2))
         const spawnOne = async (tc: { id: string; args: string }): Promise<void> => {
           deps.emit({ type: 'tool-start', sessionId, tool: 'agent_spawn', args: tc.args, toolCallId: tc.id })
           let r: { ok: boolean; result: string }
@@ -768,7 +782,7 @@ export async function runTurn(
                 connections: cfg2.connections,
                 globalClientDir,
                 project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,
-                servers: project2?.servers || [],
+                servers: projectServers(cfg2, project2),
                 onNotice: (text2) => {
                   // 完成通知：立即 UI 提示 + 挂 pendingNotices 随下一回合注入模型
                   sess.pendingNotices.push(text2)

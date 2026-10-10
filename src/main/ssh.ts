@@ -226,3 +226,13 @@ export async function closeAll(): Promise<void> {
   }
   pool.clear()
 }
+
+/** 删除全局服务器时调用：断开其池化连接。交互 shell 挂在同一 client 上，
+ *  连接断开会触发 stream close → 前端 onExit 清理，无需单独追踪归属 */
+export function dropServer(serverId: string): void {
+  const e = pool.get(serverId)
+  if (e) {
+    pool.delete(serverId)
+    try { e.client.end() } catch { /* 忽略 */ }
+  }
+}

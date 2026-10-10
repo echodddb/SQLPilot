@@ -5,7 +5,7 @@ import { loadConfig, saveConfig } from './config'
 import { setPassword, deletePassword, getPassword, secretsAvailable } from './secrets'
 import { readAudit, appendAudit, queryAudit } from './audit'
 import { getAdapter, dropAdapter, closeAll } from './db/manager'
-import { testServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, sftpList, sftpDownload, sftpUpload } from './ssh'
+import { testServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, sftpList, sftpDownload, sftpUpload } from './ssh'
 import { classifySql } from './db/guard'
 import { OracleAdapter } from './db/oracle'
 import { MySqlAdapter } from './db/mysql'
@@ -20,12 +20,13 @@ import { listSkills, saveSkill, deleteSkill, importSkill, importSkillPack, impor
 import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
 import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
-import type { ApprovalDecision, ApprovalRequest } from './tools'
+import type { ApprovalOutcome, ApprovalDecision, ApprovalRequest } from './tools'
 import { listSubagentTasks, onSubtaskChange, stopSubagentTask } from './agent/subtask-registry'
 import { readRunAudit } from './agent/subagent-audit'
+import { getSysResources } from './sysinfo'
 
 let win: BrowserWindow | null = null
-const pendingApprovals = new Map<string, { resolve: (d: ApprovalDecision) => void; sessionId: string }>()
+const pendingApprovals = new Map<string, { resolve: (o: ApprovalOutcome) => void; sessionId: string }>()
 let approvalSeq = 0
 // LLM 发送前预览（按会话归属，停止/退出时兜底取消）
 const pendingPreviews = new Map<string, { resolve: (ok: boolean) => void; sessionId: string }>()
@@ -71,7 +72,7 @@ function emit(ev: AgentEvent): void {
   }
 }
 
-function requestApproval(req: ApprovalRequest, sessionId: string): Promise<ApprovalDecision> {
+function requestApproval(req: ApprovalRequest, sessionId: string): Promise<ApprovalOutcome> {
   const requestId = `apr_${++approvalSeq}`
   return new Promise((resolve) => {
     pendingApprovals.set(requestId, { resolve, sessionId })
@@ -85,7 +86,7 @@ function requestApproval(req: ApprovalRequest, sessionId: string): Promise<Appro
       const p = pendingApprovals.get(requestId)
       if (p) {
         pendingApprovals.delete(requestId)
-        p.resolve('deny')
+        p.resolve({ decision: 'denied', reason: '确认超时（5 分钟未响应），已按拒绝处理' })
         win?.webContents.send('agent:confirm:expired', { requestId })
       }
     }, 5 * 60_000)
@@ -309,7 +310,7 @@ export function registerIpc(): void {
     // 只拒绝本会话挂起的确认与预览，不影响其他并发会话
     for (const [requestId, p] of pendingApprovals) {
       if (p.sessionId !== sessionId) continue
-      p.resolve('deny')
+      p.resolve({ decision: 'denied', reason: '用户已停止任务' })
       pendingApprovals.delete(requestId)
       win?.webContents.send('agent:confirm:expired', { requestId })
     }
@@ -329,33 +330,23 @@ export function registerIpc(): void {
     return { ok: true, path: r.filePaths[0] }
   })
 
-  ipcMain.handle('project:save', (_e, { project, serverPasswords }: { project: ProjectConfig; serverPasswords?: Record<string, string> }) => {
-    // 同项目服务器名唯一（agent 按名称寻址）
-    const names = (project.servers || []).map((s) => s.name.trim())
-    if (new Set(names).size !== names.length) {
-      return { ok: false, error: '同一项目内服务器名称不能重复（agent 按名称寻址）' }
-    }
+  ipcMain.handle('project:save', (_e, { project }: { project: ProjectConfig }) => {
     const cfg = loadConfig()
+    // 服务器全局注册后项目只存引用：剔除旧渲染层可能回传的内联定义，以 serverIds 为准
+    const clean: ProjectConfig = { ...project }
+    delete clean.servers
     const idx = cfg.projects.findIndex((p) => p.id === project.id)
-    if (idx >= 0) cfg.projects[idx] = project
-    else cfg.projects.push(project)
+    if (idx >= 0) cfg.projects[idx] = clean
+    else cfg.projects.push(clean)
     saveConfig(cfg)
-    // 服务器密码单独走 DPAPI 加密；空密码 = 保持已存
-    for (const s of project.servers || []) {
-      const pw = serverPasswords?.[s.id]
-      if (pw) setPassword(`server:${s.id}`, pw)
-    }
     return { ok: true }
   })
 
   ipcMain.handle('project:delete', (_e, { id }: { id: string }) => {
     const cfg = loadConfig()
-    const proj = cfg.projects.find((p) => p.id === id)
     cfg.projects = cfg.projects.filter((p) => p.id !== id)
+    // 服务器是全局资产：删项目只解除引用，不删服务器与密码
     saveConfig(cfg)
-    for (const s of proj?.servers || []) {
-      deletePassword(`server:${s.id}`)
-    }
     // 解除会话上的绑定
     for (const s of listSessions()) {
       if (s.projectId === id) updateSession(s.id, { projectId: null })
@@ -363,7 +354,52 @@ export function registerIpc(): void {
     return { ok: true }
   })
 
-  // ---------- SSH 服务器 ----------
+  // ---------- SSH 服务器（全局注册表：侧栏管理，项目经 serverIds 引用） ----------
+  ipcMain.handle('server:save', (_e, { server, password }: { server: any; password?: string }) => {
+    const name = String(server?.name || '').trim()
+    if (!name || !server?.host || !server?.user) return { ok: false, error: '名称、主机、用户名必填' }
+    const cfg = loadConfig()
+    // 全局名称唯一：agent 按名称寻址，重名跨项目也会产生歧义
+    if (cfg.servers.some((s) => s.name === name && s.id !== server.id)) {
+      return { ok: false, error: `服务器名「${name}」已存在（agent 按名称寻址，全局不能重名）` }
+    }
+    const clean = {
+      id: String(server.id),
+      name,
+      host: String(server.host).trim(),
+      port: Number(server.port) || 22,
+      user: String(server.user).trim(),
+      tag: server.tag ? String(server.tag) : undefined,
+      note: server.note ? String(server.note) : undefined
+    }
+    const idx = cfg.servers.findIndex((s) => s.id === clean.id)
+    const prev = idx >= 0 ? cfg.servers[idx] : null
+    if (idx >= 0) cfg.servers[idx] = clean
+    else cfg.servers.push(clean)
+    saveConfig(cfg)
+    // 密码单独走 DPAPI；空密码 = 保持已存。只有连接参数（主机/端口/账号）变化才断开
+    // 池化连接——改备注/标签不应杀掉用户开着的终端
+    if (password) setPassword(`server:${clean.id}`, password)
+    if (!prev || prev.host !== clean.host || prev.port !== clean.port || prev.user !== clean.user) {
+      dropServer(clean.id)
+    }
+    return { ok: true }
+  })
+
+  ipcMain.handle('server:delete', (_e, { id }: { id: string }) => {
+    const cfg = loadConfig()
+    if (!cfg.servers.some((s) => s.id === id)) return { ok: true }
+    cfg.servers = cfg.servers.filter((s) => s.id !== id)
+    // 所有项目解除对该服务器的引用
+    for (const p of cfg.projects) {
+      if (Array.isArray(p.serverIds)) p.serverIds = p.serverIds.filter((x) => x !== id)
+    }
+    saveConfig(cfg)
+    deletePassword(`server:${id}`)
+    dropServer(id)
+    return { ok: true }
+  })
+
   ipcMain.handle('server:test', async (_e, { server, password }: { server: any; password?: string }) => {
     try {
       const label = await testServer(server, password || undefined)
@@ -374,15 +410,11 @@ export function registerIpc(): void {
   })
 
   // ---------- 交互式 SSH 终端 ----------
-  const currentProject = () => {
-    const cfg = loadConfig()
-    return cfg.projects
-  }
 
   ipcMain.handle('term:open', async (_e, { termId, serverId }: { termId: string; serverId: string }) => {
-    const proj = currentProject().find((p) => p.servers?.some((s) => s.id === serverId))
-    const server = proj?.servers?.find((s) => s.id === serverId)
-    if (!server) return { ok: false, error: '服务器不存在（可能在其他项目或已删除）' }
+    // 全局注册表查找：终端不限于当前项目引用的服务器（侧栏可直达任意全局服务器）
+    const server = loadConfig().servers.find((s) => s.id === serverId)
+    if (!server) return { ok: false, error: '服务器不存在（可能已删除）' }
     try {
       await openShell(
         termId,
@@ -420,13 +452,8 @@ export function registerIpc(): void {
   })
 
   // ---------- SFTP 文件浏览器 ----------
-  const findServer = (serverId: string) => {
-    for (const p of loadConfig().projects) {
-      const s = p.servers?.find((x) => x.id === serverId)
-      if (s) return s
-    }
-    return null
-  }
+  // 服务器全局注册后按全局清单查找（终端/SFTP 不要求项目引用，侧栏直达的服务器也要能用）
+  const findServer = (serverId: string) => loadConfig().servers.find((x) => x.id === serverId) || null
 
   ipcMain.handle('sftp:list', async (_e, { serverId, path: p }: { serverId: string; path: string }) => {
     const s = findServer(serverId)
@@ -1059,6 +1086,9 @@ export function registerIpc(): void {
   })
 
   // ---------- 剪贴板 / 外部链接 ----------
+  // 本机资源（资源面板 2s 轮询；CPU 占用为两次请求的差分，首次返回 null）
+  ipcMain.handle('sys:resources', () => getSysResources())
+
   ipcMain.handle('clipboard:write', (_e, { text }: { text: string }) => {
     clipboard.writeText(String(text ?? ''))
     return { ok: true }
@@ -1074,13 +1104,52 @@ export function registerIpc(): void {
     return { ok: true }
   })
 
-  ipcMain.handle('confirm:reply', (_e, { requestId, decision }: { requestId: string; decision: ApprovalDecision }) => {
+  ipcMain.handle('confirm:reply', (_e, { requestId, decision, reason }: { requestId: string; decision: ApprovalDecision; reason?: string }) => {
     const p = pendingApprovals.get(requestId)
-    if (p) {
-      pendingApprovals.delete(requestId)
-      p.resolve(decision)
+    if (!p) return { ok: true }
+    pendingApprovals.delete(requestId)
+    // 归一化并 fail-closed：未知决定按拒绝兜底
+    let outcome: ApprovalOutcome
+    if (decision === 'once') {
+      outcome = { decision: 'approved' }
+    } else if (decision === 'session') {
+      outcome = { decision: 'session' }
+    } else if (decision === 'yolo') {
+      // 一键提权（ZCode fullAccess 选项的等价物）：本次放行 + 本会话切换完全放开。
+      // 弹窗里点击即显式确认，不再二次询问；审计留痕并广播给所有已渲染的会话
+      const meta = updateSession(p.sessionId, { mode: 'yolo' })
+      emit({ type: 'session-updated', sessionId: p.sessionId, meta })
+      appendAudit({ kind: 'tool', actor: 'human', sessionId: p.sessionId, mode: 'yolo', detail: '审批弹窗一键提权：本会话切换为完全放开模式' })
+      outcome = { decision: 'yolo' }
+    } else {
+      outcome = { decision: 'denied', reason: reason?.trim() || undefined }
     }
+    p.resolve(outcome)
     return { ok: true }
+  })
+
+  // ---------- 应用级确认/提示 ----------
+  // 替代渲染层 window.confirm/alert：原生同步对话框会模态锁死整个窗口，
+  // 弹出瞬间若窗口失焦（如切到别的程序），小对话框被压在后面"看不见却锁死输入"。
+  // showMessageBox 带 parent：模态且强制浮在主窗口上方，异步不阻塞渲染线程。
+  ipcMain.handle('ui:confirm', (_e, { message, detail, danger }: { message: string; detail?: string; danger?: boolean }) => {
+    const opts = {
+      type: (danger ? 'warning' : 'question') as 'warning' | 'question',
+      buttons: ['取消', '确定'],
+      defaultId: 0, // 危险确认默认聚焦"取消"，防回车误触
+      cancelId: 0,
+      noLink: true,
+      message: String(message || '确认？'),
+      detail: detail ? String(detail) : undefined
+    }
+    if (win && !win.isDestroyed()) return dialog.showMessageBox(win, opts).then((r) => r.response === 1)
+    return dialog.showMessageBox(opts).then((r) => r.response === 1)
+  })
+
+  ipcMain.handle('ui:alert', (_e, { message, detail }: { message: string; detail?: string }) => {
+    const opts = { type: 'warning' as const, buttons: ['确定'], message: String(message || ''), detail: detail ? String(detail) : undefined }
+    if (win && !win.isDestroyed()) return dialog.showMessageBox(win, opts).then(() => true)
+    return dialog.showMessageBox(opts).then(() => true)
   })
 
   // ---------- LLM 发送前预览回复 ----------
@@ -1141,7 +1210,7 @@ export function registerIpc(): void {
 
 export async function shutdown(): Promise<void> {
   for (const [id, p] of pendingApprovals) {
-    p.resolve('deny')
+    p.resolve({ decision: 'denied' })
     pendingApprovals.delete(id)
   }
   for (const [id, p] of pendingPreviews) {

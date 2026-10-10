@@ -356,8 +356,8 @@ async function saveProvider() {
     if (!p.baseUrl) p.baseUrl = v.baseUrl
     if (!p.model && v.models.length) p.model = v.models[0].id
   }
-  if (!p.name || !p.baseUrl || !p.model) { alert('名称、Base URL、模型均必填'); return }
-  if (!p.id && !p.apiKey) { alert('请填写 API Key'); return }
+  if (!p.name || !p.baseUrl || !p.model) { window.sqlpilot.uiAlert('名称、Base URL、模型均必填'); return }
+  if (!p.id && !p.apiKey) { window.sqlpilot.uiAlert('请填写 API Key'); return }
   if (!p.id) p.id = `p_${Date.now()}`
   if (!p.contextK || p.contextK <= 0) p.contextK = undefined
   // 空 Key = 沿用已存（主进程对空值不覆盖 secrets；渲染层拿到的是掩码，没有明文可回填）
@@ -370,7 +370,7 @@ async function saveProvider() {
     // 重新拉取掩码配置，避免刚输入的明文 Key 常驻渲染层状态
     store.cfg = await window.sqlpilot.getConfig()
   } catch (e: any) {
-    alert('保存失败：' + (e?.message || e))
+    window.sqlpilot.uiAlert('保存失败：' + (e?.message || e))
     return
   }
   resetForm()
@@ -382,7 +382,7 @@ async function setActive(id: string) {
 }
 
 async function delProvider(p: any) {
-  if (!window.confirm(`删除提供商「${p.name}」？`)) return
+  if (!(await window.sqlpilot.uiConfirm(`删除提供商「${p.name}」？`, undefined, true))) return
   store.cfg.providers = store.cfg.providers.filter((x: any) => x.id !== p.id)
   if (store.cfg.activeProviderId === p.id) store.cfg.activeProviderId = store.cfg.providers[0]?.id || null
   await window.sqlpilot.setConfig(toPlain(store.cfg))
@@ -427,14 +427,14 @@ async function toggleSkill(s: any, enabled: boolean) {
 }
 
 async function delSkill(s: any) {
-  if (!window.confirm(`删除技能「${s.name}」？`)) return
+  if (!(await window.sqlpilot.uiConfirm(`删除技能「${s.name}」？`, undefined, true))) return
   await window.sqlpilot.deleteSkill(s.id)
   await loadSkills()
 }
 
 async function saveSkillEditor() {
   const e = skillEditor.value
-  if (!e.name || !e.content?.trim()) { alert('名称和内容必填'); return }
+  if (!e.name || !e.content?.trim()) { window.sqlpilot.uiAlert('名称和内容必填'); return }
   await window.sqlpilot.saveSkill({ id: e.id || undefined, name: e.name, description: e.description || '', content: e.content })
   skillEditor.value = null
   await loadSkills()

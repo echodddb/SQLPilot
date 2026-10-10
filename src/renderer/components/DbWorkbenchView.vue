@@ -93,7 +93,7 @@ function tabTitle(t: WbTab): string {
 function newQuery(connId?: string) {
   const cid = connId || tabs.value.find((t) => t.kind === 'query')?.connId || (store.cfg?.connections || [])[0]?.id || ''
   if (!cid) {
-    alert('请先在左侧"数据库连接"区添加一个连接')
+    window.sqlpilot.uiAlert('请先在左侧"数据库连接"区添加一个连接')
     return
   }
   tabSeq++

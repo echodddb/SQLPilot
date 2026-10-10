@@ -117,12 +117,19 @@ function startSftpDrag(e: MouseEvent) {
   document.addEventListener('mouseup', up)
 }
 
-// ---------- 服务器列表（当前会话项目的挂载服务器） ----------
+// ---------- 服务器列表（当前会话项目引用的全局服务器） ----------
 const project = computed(() => {
   const pid = curSession()?.meta.projectId
   return pid ? (store.cfg?.projects || []).find((p: any) => p.id === pid) : null
 })
-const servers = computed(() => project.value?.servers || [])
+const servers = computed(() => {
+  const ids = project.value?.serverIds
+  if (Array.isArray(ids)) {
+    const set = new Set(ids as string[])
+    return (store.cfg?.servers || []).filter((s: any) => set.has(s.id))
+  }
+  return project.value?.servers || []
+})
 
 // ---------- 终端 ----------
 interface TermTab { id: string; name: string; term: Terminal; fit: FitAddon; serverId: string; sftpPath: string }
@@ -167,7 +174,7 @@ async function openTerm(s: any) {
   const r = await window.sqlpilot.termOpen(id, s.id)
   if (!r.ok) {
     // 连接失败不留死标签页
-    alert(`连接 ${s.name} 失败：${r.error || '未知错误'}`)
+    window.sqlpilot.uiAlert(`连接 ${s.name} 失败：${r.error || '未知错误'}`)
     closeTerm(id)
     return
   }
@@ -183,6 +190,16 @@ function closeTerm(id: string) {
   paneEls.delete(id)
   if (activeId.value === id) activeId.value = terms.value[terms.value.length - 1]?.id || ''
 }
+
+// 侧栏服务器区点击：打开终端面板并直达该服务器的 shell（消费后清空，防重复打开）。
+// immediate 覆盖"先设 pending、面板首次挂载"的顺序——否则 watch 注册前的事件丢失；
+// 必须放在 terms/openTerm 声明之后：immediate 回调同步执行，放前面会踩 terms 的 TDZ。
+// 全局服务器未必被当前项目引用，但 shell 只按 server.id 连接，允许直接打开
+watch(() => store.pendingTermServer, (s) => {
+  if (!s) return
+  store.pendingTermServer = null
+  openTerm(s)
+}, { immediate: true })
 
 function doFit(id: string) {
   const t = terms.value.find((x) => x.id === id)
@@ -276,7 +293,7 @@ async function sftpDownloadFile(name: string) {
   if (r.ok && r.local) {
     await window.sqlpilot.showInFolder(r.local)
   } else if (r.error) {
-    alert('下载失败：' + r.error)
+    window.sqlpilot.uiAlert('下载失败：' + r.error)
   }
 }
 
@@ -284,7 +301,7 @@ async function sftpUploadFiles() {
   if (!activeTerm.value) return
   const r = await window.sqlpilot.sftpUpload(activeTerm.value.serverId, sftpPath.value || '.')
   if (r.ok) await loadSftp()
-  else if (r.error) alert('上传失败：' + r.error)
+  else if (r.error) window.sqlpilot.uiAlert('上传失败：' + r.error)
 }
 
 function fmtSize(n: number): string {

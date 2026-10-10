@@ -151,10 +151,10 @@ async function doTest() {
 }
 
 async function doSave() {
-  if (!form.name || !form.host || !form.user) { alert('名称、主机、用户名为必填'); return }
-  if (form.type === 'oracle' && !form.serviceName) { alert('Oracle 需要填写服务名'); return }
+  if (!form.name || !form.host || !form.user) { window.sqlpilot.uiAlert('名称、主机、用户名为必填'); return }
+  if (form.type === 'oracle' && !form.serviceName) { window.sqlpilot.uiAlert('Oracle 需要填写服务名'); return }
   const r = await window.sqlpilot.saveConn({ ...form, projectId: form.projectId || null }, password.value || undefined)
-  if (!r.ok) { alert(r.error || '保存失败'); return }
+  if (!r.ok) { window.sqlpilot.uiAlert(r.error || '保存失败'); return }
   store.cfg = await window.sqlpilot.getConfig()
   if (store.tree[form.id]) store.tree[form.id].schemas = undefined
   emit('close')

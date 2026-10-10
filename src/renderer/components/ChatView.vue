@@ -52,7 +52,7 @@
             <ToolCard v-for="(t, i) in m.tools" :key="i" :tool="t" />
             <div v-if="isPlanTarget(idx)" class="plan-actions">
               <button class="btn primary" @click="approvePlan">✓ 批准并执行此计划</button>
-              <span class="hint">批准后本会话切换为"确认执行"模式开始执行</span>
+              <span class="hint">批准后开始执行；权限模式恢复为计划前的设置（无记录则为确认执行）</span>
             </div>
           </template>
         </div>
@@ -73,6 +73,15 @@
         ></textarea>
         <div class="row">
           <span class="hint">
+            <select
+              class="effort-select mode-select"
+              :class="modeClass"
+              :value="curSession().meta.mode"
+              title="当前会话的权限模式（各会话独立）：计划=只读探索出方案 · 只读=仅查询 · 确认执行=写操作逐次确认 · 会话放开=普通写自动高危仍确认 · 完全放开=全部自动"
+              @change="onModeChange"
+            >
+              <option v-for="m in MODES" :key="m.key" :value="m.key">权限 · {{ m.label }}</option>
+            </select>
             <span
               v-if="curSession().ctx"
               class="ctx-badge"
@@ -111,7 +120,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort, archiveAndClear } from '../store'
+import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort, setSessionMode, MODES, archiveAndClear } from '../store'
 import ToolCard from './ToolCard.vue'
 import SubagentRunModal from './SubagentRunModal.vue'
 
@@ -124,6 +133,18 @@ async function onArchiveClick() {
 async function onEffortChange(e: Event) {
   await setSessionEffort((e.target as HTMLSelectElement).value)
 }
+
+async function onModeChange(e: Event) {
+  const sel = e.target as HTMLSelectElement
+  // 切会话放开/完全放开的确认弹窗被取消时回退显示，避免下拉框显示与实际模式不一致
+  if (!(await setSessionMode(sel.value))) sel.value = curSession().meta.mode
+}
+
+// 权限模式下拉的配色（沿用模式按钮时代的语义色：计划紫/只读绿/会话放开黄/完全放开红）
+const modeClass = computed(() => {
+  const m = curSession().meta.mode
+  return m === 'readonly' ? 'mode-ok' : m === 'plan' ? 'mode-plan' : m === 'session' ? 'mode-warn' : m === 'yolo' ? 'mode-danger' : ''
+})
 
 // 计划模式：最后一条有内容的助手消息 = 待批准的计划
 function isPlanTarget(idx: number): boolean {
@@ -388,6 +409,11 @@ watch(msgSignature, async () => {
   color: var(--text-dim);
   cursor: pointer;
 }
+/* 权限模式下拉：当前模式的语义色（选中项文字着色，一眼可辨危险程度） */
+.mode-select.mode-ok { color: var(--green); }
+.mode-select.mode-plan { color: var(--purple); }
+.mode-select.mode-warn { color: var(--yellow); }
+.mode-select.mode-danger { color: var(--red); font-weight: 700; }
 .plan-actions {
   display: flex;
   align-items: center;

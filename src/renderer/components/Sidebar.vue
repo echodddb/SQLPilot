@@ -98,8 +98,29 @@
       </template>
     </div>
 
+    <div class="side-head" style="margin-top: 4px">
+      <span>服务器</span>
+      <button class="icon-btn" title="添加 SSH 服务器（全局注册，项目按需引用）" @click="openServerModal()">＋</button>
+    </div>
+
+    <div class="conn-list">
+      <div v-if="!store.cfg.servers?.length" class="side-empty">
+        还没有服务器。<br />点击右上角 <b>＋</b> 添加（SSH 密码认证，<br />密码 DPAPI 加密存储），项目里可按需引用。
+      </div>
+      <div v-for="s in store.cfg.servers" :key="s.id" class="conn-item" :title="`${s.user}@${s.host}:${s.port}\n点击打开 SSH 终端面板`" @click="openTerm(s)">
+        <span>🖥</span>
+        <span class="name">{{ s.name }}</span>
+        <span v-if="s.tag" class="sub" :class="{ rw: s.tag === '生产' }">{{ s.tag }}</span>
+        <button class="icon-btn" title="编辑" @click.stop="openServerModal(s)">✎</button>
+        <button class="icon-btn" title="删除（所有项目的引用一并解除）" @click.stop="removeServer(s)">✕</button>
+      </div>
+    </div>
+
     <div class="side-foot">
-      <span><span class="dot"></span>SQLPilot v0.1</span>
+      <span style="display:flex; align-items:center; gap:8px">
+        <span><span class="dot"></span>SQLPilot v0.1</span>
+        <button class="foot-btn" :class="{ on: store.workbench === 'resources' }" title="本机资源面板（CPU / 内存 / 磁盘，每 2 秒刷新）" @click="store.workbench = store.workbench === 'resources' ? null : 'resources'">📊 资源</button>
+      </span>
       <span>{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
     </div>
   </div>
@@ -112,6 +133,7 @@ import { store, curSession, removeSession, createSessionInProject, TYPE_LABELS }
 const openConnModal = inject<(c?: any) => void>('openConnModal')!
 const openProjectModal = inject<() => void>('openProjectModal')!
 const openSessionModal = inject<(mode: 'new' | 'switch') => void>('openSessionModal')!
+const openServerModal = inject<(s?: any) => void>('openServerModal')!
 const openProjectEditor = inject<(p: any) => void>('openProjectEditor')!
 const openArchiveView = inject<(p: any) => void>('openArchiveView')!
 
@@ -223,14 +245,27 @@ async function newSessionFor(projectId: string) {
 }
 
 async function removeConn(c: any) {
-  if (!window.confirm(`删除连接「${c.name}」？（已保存的密码将一并删除）`)) return
+  if (!(await window.sqlpilot.uiConfirm(`删除连接「${c.name}」？`, '已保存的密码将一并删除', true))) return
   await window.sqlpilot.deleteConn(c.id)
   store.cfg = await window.sqlpilot.getConfig()
 }
 
 async function removeProject(p: any) {
-  if (!window.confirm(`删除项目「${p.name}」？（只解除引用，不删除磁盘文件；关联会话需要重新选择项目）`)) return
+  if (!(await window.sqlpilot.uiConfirm(`删除项目「${p.name}」？`, '只解除引用，不删除磁盘文件；关联会话需要重新选择项目（挂载的服务器为全局资产，不受影响）', true))) return
   await window.sqlpilot.deleteProject(p.id)
+  store.cfg = await window.sqlpilot.getConfig()
+}
+
+// ---------- 全局服务器 ----------
+function openTerm(s: any) {
+  // 直达该服务器的 shell；若当前会话项目未引用它，面板里仍可从列表手动打开其他服务器
+  store.pendingTermServer = s
+  store.workbench = 'terminal'
+}
+
+async function removeServer(s: any) {
+  if (!(await window.sqlpilot.uiConfirm(`删除服务器「${s.name}」？`, `${s.user}@${s.host}:${s.port}\n所有项目对该服务器的引用将一并解除，已保存的密码一并删除`, true))) return
+  await window.sqlpilot.deleteServer(s.id)
   store.cfg = await window.sqlpilot.getConfig()
 }
 </script>
@@ -305,4 +340,17 @@ async function removeProject(p: any) {
 .ctx-item:hover { background: var(--bg-card-hover); }
 .ctx-item.danger { color: var(--red); }
 .ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+/* 底栏资源按钮：与版本号同排的小号轻量按钮 */
+.foot-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-faint);
+  border-radius: 7px;
+  font-size: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.foot-btn:hover { color: var(--accent); border-color: var(--accent); }
+.foot-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
 </style>

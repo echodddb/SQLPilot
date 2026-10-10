@@ -191,10 +191,10 @@ async function doExport() {
       msg.value = `✓ 已导出 ${r.rows ?? 0} 行 → ${r.path}${r.truncated ? '（达到 10 万行上限，已截断）' : ''}`
       if (r.path) await window.sqlpilot.showInFolder(r.path)
     } else if (!r.canceled) {
-      alert('导出失败：' + (r.error || '未知错误'))
+      window.sqlpilot.uiAlert('导出失败：' + (r.error || '未知错误'))
     }
   } catch (e: any) {
-    alert('导出失败：' + String(e?.message || e))
+    window.sqlpilot.uiAlert('导出失败：' + String(e?.message || e))
   } finally {
     exporting.value = false
   }

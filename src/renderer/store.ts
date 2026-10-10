@@ -43,6 +43,8 @@ export interface SessionMeta {
   providerId: string | null
   projectId: string | null
   effort: string | null
+  /** 进入计划模式前的模式（批准计划后恢复；null = 无恢复点，批准后回落确认执行） */
+  prePlanMode?: string | null
 }
 
 export interface UiSession {
@@ -81,7 +83,9 @@ export const store = reactive({
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
   drafts: {} as Record<string, string>,
   /** 底部工作台面板：SSH 终端（数据库相关窗口都在数据库工作台视图里） */
-  workbench: null as 'terminal' | null,
+  workbench: null as 'terminal' | 'resources' | null,
+  /** 侧栏服务器点击 → 终端面板打开该服务器的 shell（WorkbenchPanel 消费后清空） */
+  pendingTermServer: null as any,
   /** 子代理完整过程查看弹窗（审计 JSONL 实时读取） */
   subRun: null as { runId: string; title: string } | null
 })
@@ -349,16 +353,16 @@ export async function removeSession(id: string): Promise<void> {
   const pid = store.sessions[id]?.meta.projectId
   const projName = (store.cfg?.projects || []).find((p: any) => p.id === pid)?.name
   const arch = projName ? `对话内容将总结归档到项目「${projName}」，供该项目其他会话参考；` : '该会话未绑定项目，内容不会归档；'
-  if (!window.confirm(`归档会话「${title}」？\n${arch}会话将从列表移除。`)) return
+  if (!(await window.sqlpilot.uiConfirm(`归档会话「${title}」？`, `${arch}会话将从列表移除。`, true))) return
   const r = await window.sqlpilot.archiveSession(id, true)
   if (!r.ok) {
-    window.alert(r.error || '归档失败')
+    await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
   if (store.currentId === id) store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
-  if (!r.archived) window.alert(r.note || '会话内容未归档')
+  if (!r.archived) await window.sqlpilot.uiAlert(r.note || '会话内容未归档')
   else pushNotice(`会话「${title}」${r.note}${r.preview ? `：${r.preview}…` : ''}`)
 }
 
@@ -366,25 +370,32 @@ export async function removeSession(id: string): Promise<void> {
 export async function archiveAndClear(): Promise<void> {
   const s = curSession()
   if (!s) return
-  if (s.msgs.length && !window.confirm('归档当前对话？\n内容将总结归档到项目后清空本会话，可重新开始。')) return
+  if (s.msgs.length && !(await window.sqlpilot.uiConfirm('归档当前对话？', '内容将总结归档到项目后清空本会话，可重新开始。'))) return
   const r = await window.sqlpilot.archiveSession(store.currentId, false)
   if (!r.ok) {
-    window.alert(r.error || '归档失败')
+    await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
   s.msgs = []
   pushNotice(`${r.note}${r.preview ? `：${r.preview}…` : ''}`)
 }
 
-export async function setSessionMode(mode: string): Promise<void> {
+/** 切换当前会话权限模式；返回是否真的切换（会话放开/完全放开的确认被取消时返回 false，下拉框据此回退显示） */
+export async function setSessionMode(mode: string): Promise<boolean> {
   const s = curSession()
-  if (!s || s.meta.mode === mode) return
+  if (!s || s.meta.mode === mode) return true
   if (mode === 'yolo' || mode === 'session') {
     const label = mode === 'yolo' ? '完全放开（所有操作自动执行，含高危）' : '会话放开（普通写操作本会话自动执行）'
-    if (!window.confirm(`确认将本会话切换到「${label}」？（仅影响当前会话）`)) return
+    if (!(await window.sqlpilot.uiConfirm(`确认将本会话切换到「${label}」？`, '仅影响当前会话；切换后无需再逐次确认写操作', mode === 'yolo'))) {
+      const cur = MODES.find((m) => m.key === s.meta.mode)
+      pushNotice(`已取消切换，本会话仍为「${cur?.label || s.meta.mode}」模式`)
+      return false
+    }
   }
   s.meta.mode = mode
+  s.meta.prePlanMode = null
   await window.sqlpilot.updateSession(store.currentId, { mode })
+  return true
 }
 
 export async function setSessionProvider(providerId: string): Promise<void> {
@@ -409,12 +420,16 @@ export async function bindSessionProject(projectId: string | null): Promise<void
   await window.sqlpilot.updateSession(store.currentId, { projectId })
 }
 
-/** 计划模式：批准最后一版计划并切到确认执行模式开始执行 */
+/** 计划模式：批准最后一版计划并恢复计划前的权限模式开始执行。
+ *  计划前是会话放开/完全放开时恢复原选择（用户的显式选择不该被自动规划降级）；
+ *  其余情况（只读/无记录）回落到确认执行——批准计划本身就是执行意图 */
 export async function approvePlan(): Promise<void> {
   const s = curSession()
   if (!s || s.meta.mode !== 'plan') return
-  s.meta.mode = 'confirm'
-  await window.sqlpilot.updateSession(store.currentId, { mode: 'confirm' })
+  const target = s.meta.prePlanMode === 'session' || s.meta.prePlanMode === 'yolo' ? s.meta.prePlanMode : 'confirm'
+  s.meta.mode = target
+  s.meta.prePlanMode = null
+  await window.sqlpilot.updateSession(store.currentId, { mode: target })
   await sendMessage('批准以上计划，请严格按计划开始执行。')
 }
 

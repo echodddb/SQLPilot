@@ -26,9 +26,11 @@ declare global {
       getHistory(sessionId: string): Promise<{ ok: boolean; messages: any[] }>
       stopChat(sessionId: string): Promise<{ ok: boolean }>
       pickFolder(): Promise<{ ok: boolean; path?: string }>
-      saveProject(project: any, serverPasswords?: Record<string, string>): Promise<{ ok: boolean; error?: string }>
+      saveProject(project: any): Promise<{ ok: boolean; error?: string }>
       deleteProject(id: string): Promise<{ ok: boolean }>
       testServer(server: any, password?: string): Promise<{ ok: boolean; label?: string; error?: string }>
+      saveServer(server: any, password?: string): Promise<{ ok: boolean; error?: string }>
+      deleteServer(id: string): Promise<{ ok: boolean }>
       termOpen(termId: string, serverId: string): Promise<{ ok: boolean; error?: string }>
       termInput(termId: string, data: string): Promise<{ ok: boolean }>
       termResize(termId: string, cols: number, rows: number): Promise<{ ok: boolean }>
@@ -58,9 +60,18 @@ declare global {
       importSkillUrl(url: string): Promise<{ ok: boolean; pack?: SkillPackResult; error?: string }>
       testProvider(provider: any, apiKey?: string): Promise<{ ok: boolean; label?: string; error?: string }>
       writeClipboard(text: string): Promise<{ ok: boolean }>
+      sysResources(): Promise<{
+        cpu: { model: string; cores: number; usagePct: number | null; perCore: number[] }
+        mem: { totalBytes: number; freeBytes: number; usedPct: number }
+        disks: { drive: string; totalBytes: number; freeBytes: number; usedPct: number }[]
+        app: { rssBytes: number; cpuPct: number | null }
+        sys: { hostname: string; platform: string; uptimeSec: number }
+      }>
       openExternal(url: string): Promise<{ ok: boolean }>
       openFolder(p: string): Promise<{ ok: boolean }>
-      replyConfirm(requestId: string, decision: string): Promise<{ ok: boolean }>
+      replyConfirm(requestId: string, decision: string, reason?: string): Promise<{ ok: boolean }>
+      uiConfirm(message: string, detail?: string, danger?: boolean): Promise<boolean>
+      uiAlert(message: string, detail?: string): Promise<boolean>
       replyLlmPreview(requestId: string, ok: boolean): Promise<{ ok: boolean }>
       onLlmPreview(cb: (p: { requestId: string; sessionId?: string; url: string; body: any }) => void): () => void
       onLlmPreviewExpired(cb: (p: { requestId: string }) => void): () => void

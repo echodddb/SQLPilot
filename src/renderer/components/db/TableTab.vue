@@ -184,7 +184,7 @@ async function loadData(p: number) {
   // 有暂存修改时翻页/过滤/排序/刷新都先确认；确认放弃后必须清空——
   // 暂存以行下标为键，新页同下标已是不同的行，保留会把修改（和保存时的 UPDATE）落到错误的行上
   const pending = Object.keys(edits).length
-  if (pending && !window.confirm(`当前页有 ${pending} 处未保存的修改，放弃并继续？`)) return
+  if (pending && !(await window.sqlpilot.uiConfirm(`当前页有 ${pending} 处未保存的修改，放弃并继续？`, undefined, true))) return
   if (pending) discardEdits()
   editing.value = null
   page.value = p
@@ -358,7 +358,7 @@ async function saveGridEdits() {
   const list = Object.entries(edits).map(([key, e]) => ({ key, ...e }))
   if (!list.length || !edit.value || !result.value) return
   if (edit.value.keyMode === 'rowid' && !result.value.rids?.length) {
-    alert('本页数据没有行标识（可能是视图），不可保存，请改用查询窗口修改')
+    window.sqlpilot.uiAlert('本页数据没有行标识（可能是视图），不可保存，请改用查询窗口修改')
     return
   }
   editState.value = 'saving'
@@ -382,24 +382,24 @@ async function saveGridEdits() {
         editState.value = 'uncommitted'
         editMsg.value = `已应用 ${r.applied ?? 0} 处修改（未提交）`
         if (r.conflicts?.length) {
-          alert(`${r.conflicts.length} 处修改未生效（目标行已被他人修改或删除），其余已应用未提交，可 ↩ 回滚后重试`)
+          window.sqlpilot.uiAlert(`${r.conflicts.length} 处修改未生效（目标行已被他人修改或删除），其余已应用未提交，可 ↩ 回滚后重试`)
         }
       } else {
         // MySQL：整批一个事务，有冲突已全部回滚；无冲突已提交
         editState.value = ''
         if (r.conflicts?.length) {
-          alert(`${r.conflicts.length} 处修改未生效（目标行已被他人修改或删除），本批已整体回滚`)
+          window.sqlpilot.uiAlert(`${r.conflicts.length} 处修改未生效（目标行已被他人修改或删除），本批已整体回滚`)
         } else {
           loadData(page.value) // 已提交：刷新显示库端规范值
         }
       }
     } else {
       editState.value = ''
-      alert('保存失败：' + (r.error || '未知错误'))
+      window.sqlpilot.uiAlert('保存失败：' + (r.error || '未知错误'))
     }
   } catch (e: any) {
     editState.value = ''
-    alert('保存失败：' + String(e?.message || e))
+    window.sqlpilot.uiAlert('保存失败：' + String(e?.message || e))
   }
 }
 
@@ -413,7 +413,7 @@ async function runGridTx(stmt: 'COMMIT' | 'ROLLBACK') {
     editMsg.value = stmt === 'COMMIT' ? '已提交' : '已回滚'
     loadData(page.value)
   } else {
-    alert((stmt === 'COMMIT' ? '提交' : '回滚') + '失败：' + (r.error || '未知错误'))
+    window.sqlpilot.uiAlert((stmt === 'COMMIT' ? '提交' : '回滚') + '失败：' + (r.error || '未知错误'))
   }
 }
 

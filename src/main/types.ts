@@ -65,7 +65,9 @@ export interface ProjectConfig {
   rootPath: string
   /** 项目说明（注入系统提示词，如注意事项） */
   description?: string
-  /** 挂载的 SSH 服务器 */
+  /** 引用的全局服务器 id（servers 全局注册后项目只存引用） */
+  serverIds?: string[]
+  /** @deprecated 旧版内联服务器定义：loadConfig 迁移为全局注册表 + serverIds，仅兼容读取 */
   servers?: SshServer[]
 }
 
@@ -77,6 +79,8 @@ export interface AppConfig {
   mode: PermissionMode
   /** 项目列表 */
   projects: ProjectConfig[]
+  /** 全局 SSH 服务器注册表（项目经 serverIds 引用；密码 DPAPI 加密存 secrets，键 server:<id>） */
+  servers: SshServer[]
   /** 技能启用状态（技能本体在 userData/skills/） */
   skillsEnabled: Record<string, boolean>
   /** Oracle Instant Client 目录（全局默认，连接 11g 时需要） */

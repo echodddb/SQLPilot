@@ -51,11 +51,12 @@ const api = {
   stopChat: (sessionId: string) => ipcRenderer.invoke('chat:stop', { sessionId }),
   // 项目
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
-  saveProject: (project: any, serverPasswords?: Record<string, string>) =>
-    ipcRenderer.invoke('project:save', { project: plain(project), serverPasswords: plain(serverPasswords || {}) }),
+  saveProject: (project: any) => ipcRenderer.invoke('project:save', { project: plain(project) }),
   deleteProject: (id: string) => ipcRenderer.invoke('project:delete', { id }),
   // SSH 服务器
   testServer: (server: any, password?: string) => ipcRenderer.invoke('server:test', { server: plain(server), password }),
+  saveServer: (server: any, password?: string) => ipcRenderer.invoke('server:save', { server: plain(server), password }),
+  deleteServer: (id: string) => ipcRenderer.invoke('server:delete', { id }),
   // 交互式 SSH 终端
   termOpen: (termId: string, serverId: string) => ipcRenderer.invoke('term:open', { termId, serverId }),
   termInput: (termId: string, data: string) => ipcRenderer.invoke('term:input', { termId, data }),
@@ -111,10 +112,15 @@ const api = {
   testProvider: (provider: any, apiKey?: string) => ipcRenderer.invoke('provider:test', { provider: plain(provider), apiKey }),
   // 剪贴板与外链
   writeClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', { text }),
+  // 本机资源（资源面板轮询）
+  sysResources: () => ipcRenderer.invoke('sys:resources'),
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', { url }),
   openFolder: (p: string) => ipcRenderer.invoke('shell:openFolder', { p }),
-  // 权限确认
-  replyConfirm: (requestId: string, decision: string) => ipcRenderer.invoke('confirm:reply', { requestId, decision }),
+  // 权限确认（reason = 拒绝时附带的用户反馈，回传给模型调整方案）
+  replyConfirm: (requestId: string, decision: string, reason?: string) => ipcRenderer.invoke('confirm:reply', { requestId, decision, reason }),
+  // 应用级确认/提示（替代 window.confirm/alert 的主进程对话框，不会模态锁死窗口）
+  uiConfirm: (message: string, detail?: string, danger?: boolean) => ipcRenderer.invoke('ui:confirm', { message, detail, danger }),
+  uiAlert: (message: string, detail?: string) => ipcRenderer.invoke('ui:alert', { message, detail }),
   // LLM 发送前预览
   replyLlmPreview: (requestId: string, ok: boolean) => ipcRenderer.invoke('llm:preview:reply', { requestId, ok }),
   onLlmPreview: (cb: (p: any) => void) => {
