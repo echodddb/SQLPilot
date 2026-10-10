@@ -55,6 +55,8 @@ export interface ToolContext {
   sessionId?: string
   /** 子代理运行 id（审计结构化字段，关联 subagent-runs/<runId>.jsonl） */
   runId?: string
+  /** 会话停止信号：长耗时工具（命令/查询/传输）监听它实现可中断 */
+  signal?: AbortSignal
 }
 
 /** 工具侧审计公共字段：发起者/会话/子代理运行 id/权限模式/工具名（见 audit.ts 格式规范） */
@@ -66,6 +68,20 @@ function auditBase(ctx: ToolContext, tool: string): { actor: string; sessionId?:
     mode: ctx.mode,
     tool
   }
+}
+
+/**
+ * 可中止等待：signal 触发时立即返回 undefined（调用方按"用户中止"处理），
+ * 原 Promise 的结果/异常仍由 Promise.race 正常订阅，不产生未处理拒绝。
+ * 语义提醒：数据库/SFTP 侧操作无法真正回滚，中止只保证 agent 循环不再等待。
+ */
+function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+  if (!signal) return p
+  if (signal.aborted) return Promise.resolve(undefined)
+  return Promise.race([
+    p,
+    new Promise<undefined>((r) => signal.addEventListener('abort', () => r(undefined), { once: true }))
+  ])
 }
 
 const MAX_ROWS = 500
@@ -592,6 +608,12 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         })
         let out = ''
         let err = ''
+        let aborted = false
+        const onAbort = () => {
+          aborted = true
+          if (child.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'])
+        }
+        ctx.signal?.addEventListener('abort', onAbort, { once: true })
         let timedOut = false
         const cap = (s: string, chunk: Buffer) => {
           const t = s + chunk.toString('utf8')
@@ -606,7 +628,9 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         }, timeoutMs)
         child.on('close', (code) => {
           clearTimeout(timer)
+          ctx.signal?.removeEventListener('abort', onAbort)
           resolve({
+            aborted,
             exitCode: code,
             timedOut,
             stdout: out.slice(0, 8000),
@@ -619,7 +643,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
           resolve({ exitCode: -1, error: String(e?.message || e) })
         })
       })
-      return { ok: !result.error && result.exitCode === 0 && !result.timedOut, result: JSON.stringify(result) }
+      return { ok: !result.error && result.exitCode === 0 && !result.timedOut && !result.aborted, result: JSON.stringify(result) }
     }
 
     if (name === 'fs_delete') {
@@ -687,12 +711,13 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         )
         if (gated) return { ok: false, result: gated }
         const timeoutMs = Math.min(Math.max(Number(args.timeoutMs) || 60_000, 5_000), 300_000)
-        const r = await ssh.execCommand(server, command, timeoutMs)
-        return { ok: r.exitCode === 0 && !r.timedOut, result: JSON.stringify(r) }
+        const r = await ssh.execCommand(server, command, timeoutMs, undefined, ctx.signal)
+        return { ok: r.exitCode === 0 && !r.timedOut && !r.aborted, result: JSON.stringify(r) }
       }
 
       if (name === 'server_read_file') {
-        const r = await ssh.readFile(server, String(args.path ?? ''))
+        const r = await raceAbort(ssh.readFile(server, String(args.path ?? '')), ctx.signal)
+        if (!r) return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，文件读取未完成' }) }
         audit({ kind: 'tool', conn: server.name, target: `${server.name}:${args.path}`, detail: `server_read_file ${args.path}` })
         return { ok: true, result: JSON.stringify(r) }
       }
@@ -732,7 +757,8 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         const remotePath = String(args.remotePath ?? '')
         const localRel = String(args.localPath ?? '')
         const localAbs = safeProjectPath(ctx.project.rootPath, localRel)
-        await ssh.getFile(server, remotePath, localAbs)
+        const got = await raceAbort(ssh.getFile(server, remotePath, localAbs), ctx.signal)
+        if (!got) return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，下载未完成（本地文件可能不完整）' }) }
         audit({ kind: 'tool', conn: server.name, target: `${remotePath} → ${localRel}`, detail: `server_get_file ${remotePath} → ${localRel}` })
         return { ok: true, result: JSON.stringify({ remotePath, savedTo: localRel }) }
       }
@@ -777,7 +803,11 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         audit({ kind: 'sql.read', conn: profile.name, detail: '只读通道拦截', sql, error: `拦截: ${v.reason || v.kind}` })
         return { ok: false, result: JSON.stringify({ error: `只读通道拦截该语句（${v.kind}）: ${v.reason || '仅允许 SELECT/EXPLAIN/SHOW 类语句'}。如确需执行写操作请使用 db_write 工具。` }) }
       }
-      const r = await adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS)
+      const r = await raceAbort(adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS), ctx.signal)
+      if (!r) {
+        audit({ kind: 'sql.read', conn: profile.name, detail: 'db_query 被用户中止', sql, error: '用户中止' })
+        return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，查询执行结果未知（语句可能仍在服务端执行至超时）' }) }
+      }
       const out = fmtQueryResult(r)
       audit({ kind: 'sql.read', conn: profile.name, detail: 'db_query 执行', sql, rows: r.rowCount, ms: r.ms })
       return { ok: true, result: JSON.stringify(out) }
@@ -791,7 +821,11 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       }
       const gated = await gateWrite(ctx, { tool: 'db_write', conn: profile.name, sql, kind: v.kind, risk: v.risk }, profile.name, sql, true)
       if (gated) return { ok: false, result: gated }
-      const r = await adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS)
+      const r = await raceAbort(adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS), ctx.signal)
+      if (!r) {
+        audit({ kind: 'sql.write', conn: profile.name, detail: 'db_write 被用户中止（结果未知）', sql, error: '用户中止' })
+        return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，写操作执行结果未知：语句可能已生效、也可能未生效。如需确认请稍后只读查询核实，不要盲目重试。' }) }
+      }
       const committed = (await adapter.commit?.()) !== false
       // agent 执行了 DDL：该连接的元数据缓存全部失效
       if (v.kind === 'ddl') metaDropConn(profile.id)

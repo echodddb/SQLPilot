@@ -110,6 +110,8 @@ export interface SubagentRunInput {
   /** 继承父会话的思考级别 */
   effort: ThinkingEffort | null
   parentMode: PermissionMode
+  /** 父会话权限的实时读取（loop 注入闭包）：父会话中途降级时子代理立即跟随，消除快照竞态 */
+  getParentMode?: () => PermissionMode
   /** 停止信号（父会话停止或 task_stop；launchSubagent 会代理成任务级控制器） */
   cancelSignal: AbortSignal
   /** 共享父会话的放行集合："本会话均允许"对子代理生效，不重复弹窗 */
@@ -185,6 +187,11 @@ export async function runSubagent(input: SubagentRunInput): Promise<{ ok: boolea
   let status: ChildStatus = 'exhausted'
   let note = ''
 
+  // 权限实时钳制：explore 强制只读；plan 视为只读；其余跟随父会话当前模式（而非派生时的快照）
+  const liveChildMode = (): PermissionMode => {
+    const m = input.getParentMode ? input.getParentMode() : input.parentMode
+    return input.profile.forceReadonly || m === 'plan' ? 'readonly' : m
+  }
   const ctx: ToolContext = {
     connections: input.connections,
     globalClientDir: input.globalClientDir,
@@ -196,7 +203,8 @@ export async function runSubagent(input: SubagentRunInput): Promise<{ ok: boolea
     servers: input.servers,
     origin: `sub:${input.profile.name}`,
     sessionId: input.sessionId,
-    runId: input.subId
+    runId: input.subId,
+    signal: childAbort.signal
   }
 
   try {
@@ -234,6 +242,7 @@ export async function runSubagent(input: SubagentRunInput): Promise<{ ok: boolea
           continue
         }
         const t0 = Date.now()
+        ctx.mode = liveChildMode() // 每次工具调用前刷新：父会话降级立即生效
         const r = await executeTool(tc.name, tc.args, ctx)
         const ms = Date.now() - t0
         toolUse++

@@ -81,9 +81,11 @@ export interface ExecResult {
   stdout: string
   stderr: string
   timedOut: boolean
+  /** 用户中止（会话停止）：stream 已关闭，远端进程可能仍在运行 */
+  aborted?: boolean
 }
 
-export async function execCommand(server: SshServer, command: string, timeoutMs = 60_000, passwordOverride?: string): Promise<ExecResult> {
+export async function execCommand(server: SshServer, command: string, timeoutMs = 60_000, passwordOverride?: string, signal?: AbortSignal): Promise<ExecResult> {
   const c = await getClient(server, passwordOverride)
   return new Promise<ExecResult>((resolve, reject) => {
     c.exec(command, (err, stream) => {
@@ -91,6 +93,7 @@ export async function execCommand(server: SshServer, command: string, timeoutMs 
       let out = ''
       let er = ''
       let timedOut = false
+      let aborted = false
       const cap = (s: string, chunk: Buffer) => (s + chunk.toString('utf8')).slice(-64_000)
       stream.on('data', (d: Buffer) => { out = cap(out, d) })
       stream.stderr.on('data', (d: Buffer) => { er = cap(er, d) })
@@ -98,9 +101,18 @@ export async function execCommand(server: SshServer, command: string, timeoutMs 
         timedOut = true
         stream.close()
       }, timeoutMs)
+      const onAbort = () => {
+        aborted = true
+        stream.close()
+      }
+      if (signal) {
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+      }
       stream.on('close', (code: number | null) => {
         clearTimeout(timer)
-        resolve({ exitCode: code, stdout: out.slice(0, 8000), stderr: er.slice(0, 8000), timedOut })
+        signal?.removeEventListener('abort', onAbort)
+        resolve({ exitCode: code, stdout: out.slice(0, 8000), stderr: er.slice(0, 8000), timedOut, aborted })
       })
     })
   })

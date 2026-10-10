@@ -10,12 +10,12 @@ import { appendAudit } from '../audit'
 import { listSkills } from '../skills'
 import { loadConfig, projectServers } from '../config'
 import { writeFileAtomic } from '../atomic'
+import { stopSubtasksOfSession } from './subtask-registry'
 import { modelContextK } from './catalog'
 import { metaGet, metaKeys, metaSet } from '../meta'
 import { getAdapter } from '../db/manager'
 import { readConnMemory, readGlobalMemory, readProjectArchive, readProjectMemory } from '../memory'
 import { launchSubagent, listSubagentsForPrompt, resolveSubagent } from './subagent'
-import { stopSubtasksOfSession } from './subtask-registry'
 
 export type AgentEvent =
   | { type: 'text'; sessionId: string; text: string }
@@ -183,6 +183,8 @@ export function newSession(): SessionMeta {
 }
 
 export function deleteSession(id: string): void {
+  // 后台子代理不随会话删除而继续：删除即级联中止，防写权限任务脱离归属继续跑
+  stopSubtasksOfSession(id)
   stopSubtasksOfSession(id)
   sessions.delete(id)
   persistSessionsSoon()
@@ -207,6 +209,10 @@ export function updateSession(id: string, patch: Partial<Pick<SessionState, 'tit
 
 export function resetSession(id: string): void {
   const s = getSession(id)
+  // 先停再清：进行中的回合（LLM 流 + 工具）与后台子代理全部中止，
+  // 否则带写权限的 general 子代理会在会话清空后继续执行，通知/确认弹窗归属错乱
+  cancelSession(id)
+  stopSubtasksOfSession(id)
   s.messages = []
   s.contextSummary = undefined
   s.sessionApproved.clear()
@@ -730,7 +736,8 @@ export async function runTurn(
           requestApproval: (req) => deps.requestApproval(req, sessionId),
           project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,
           servers: projectServers(cfg2, project2),
-          sessionId
+          sessionId,
+          signal: sess.abortCtrl?.signal
         }
         const r = await executeTool(tc.name, tc.args, ctx)
         deps.emit({ type: 'tool-end', sessionId, tool: tc.name, ok: r.ok, result: r.result, toolCallId: tc.id })
@@ -771,6 +778,9 @@ export async function runTurn(
                 provider,
                 effort: sess.effort,
                 parentMode: sess.mode,
+                // 权限实时取值：父会话运行中降级（如 yolo → plan）时，已派生的子代理立即跟随，
+                // 消除快照竞态（子代理以旧权限继续执行写操作）
+                getParentMode: () => sess.mode,
                 cancelSignal: sess.abortCtrl!.signal,
                 sessionApproved: sess.sessionApproved,
                 requestApproval: deps.requestApproval,
