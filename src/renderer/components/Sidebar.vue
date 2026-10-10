@@ -134,11 +134,16 @@
           </svg>
           <span class="rf-val" :class="lvl(memPct)">{{ memPct == null ? '—' : memPct + '%' }}</span>
         </div>
+        <div v-for="d in disks" :key="d.drive" class="rf-row" :title="diskTitle(d)">
+          <span class="rf-label rf-drive">{{ d.drive }}</span>
+          <div class="rf-bar"><div class="rf-fill" :class="lvl(d.usedPct)" :style="{ width: Math.min(100, d.usedPct) + '%' }"></div></div>
+          <span class="rf-val" :class="lvl(d.usedPct)">{{ d.usedPct }}%</span>
+        </div>
       </template>
-      <div class="rf-meta">
+      <div class="rf-meta" :class="{ collapsed: !resOpen }" :title="collapsedTitle">
         <span class="rf-brand"><span class="dot"></span>SQLPilot v0.1</span>
-        <span v-if="!resOpen" class="rf-val" :class="lvl(lastCpu)" title="CPU 占用（点 ▤ 展开资源监控）">{{ lastCpu == null ? '' : lastCpu + '%' }}</span>
-        <span class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
+        <span v-if="!resOpen && lastCpu != null" class="rf-val" :class="lvl(lastCpu)">{{ lastCpu }}%</span>
+        <span v-if="resOpen" class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
         <button class="rf-toggle" :title="resOpen ? '收起资源监控' : '展开资源监控'" @click="resOpen = !resOpen">{{ resOpen ? '−' : '▤' }}</button>
       </div>
     </div>
@@ -164,6 +169,7 @@ const lastCpu = ref<number | null>(null)
 const memPct = ref<number | null>(null)
 const cpuTitle = ref('CPU 占用率（3 秒采样窗口）')
 const memTitle = ref('内存占用')
+const disks = ref<{ drive: string; totalBytes: number; freeBytes: number; usedPct: number }[]>([])
 let resTimer: ReturnType<typeof setInterval> | null = null
 const HIST = 40
 
@@ -188,10 +194,17 @@ async function pollRes(): Promise<void> {
       cpuHist.value = [...cpuHist.value, r.cpu.usagePct].slice(-HIST)
     }
     cpuTitle.value = `CPU ${r.cpu.model} · ${r.cpu.cores} 线程 · 近 ${HIST} 个采样点`
-    const d = r.disks[0]
-    memTitle.value = `内存已用 ${fmtGB(r.mem.totalBytes - r.mem.freeBytes)} / ${fmtGB(r.mem.totalBytes)} GB${d ? ` · ${d.drive} 剩余 ${fmtGB(d.freeBytes)} GB` : ''}`
+    disks.value = (r.disks || []).slice(0, 5)
+    memTitle.value = `内存已用 ${fmtGB(r.mem.totalBytes - r.mem.freeBytes)} / ${fmtGB(r.mem.totalBytes)} GB`
   } catch { /* 主进程忙时跳过本轮 */ }
 }
+function diskTitle(d: { drive: string; totalBytes: number; freeBytes: number; usedPct: number }): string {
+  return `${d.drive} 共 ${fmtGB(d.totalBytes)} GB · 剩余 ${fmtGB(d.freeBytes)} GB · 已用 ${d.usedPct}%`
+}
+const collapsedTitle = computed(() =>
+  `SQLPilot v0.1 · CPU ${lastCpu.value == null ? '—' : lastCpu.value + '%'} · 内存 ${memPct.value == null ? '—' : memPct.value + '%'} · ${store.secretsAvailable ? '密钥 DPAPI 加密' : 'DPAPI 不可用'} · 点 ▤ 展开资源监控`
+)
+
 function syncResTimer(): void {
   if (resOpen.value && !resTimer) {
     pollRes()
@@ -422,7 +435,7 @@ async function removeServer(s: any) {
 .foot-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
 
 /* ---- 底部资源迷你监控 ---- */
-.res-foot { border-top: 1px solid var(--border); padding: 8px 12px 6px; font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
+.res-foot { border-top: 1px solid var(--border); padding: 8px 12px 6px; font-size: 11px; color: var(--text-faint); flex-shrink: 0; margin-top: auto; /* 恒贴侧栏底部：吸收上方全部剩余空间（收起/展开都不悬浮） */ }
 .rf-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
 .rf-label { width: 26px; font-size: 10.5px; letter-spacing: 1px; color: var(--text-faint); flex-shrink: 0; }
 .rf-spark { flex: 1; height: 20px; min-width: 0; }
@@ -440,5 +453,19 @@ async function removeServer(s: any) {
   border-radius: 6px; width: 22px; height: 20px; cursor: pointer; font-size: 12px; line-height: 1;
 }
 .rf-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+/* 磁盘微型条形（存量指标用条形而非趋势线） */
+.rf-drive { font-family: var(--mono); font-weight: 700; letter-spacing: 0; text-align: left; }
+.rf-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-card-hover); overflow: hidden; }
+.rf-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+.rf-fill.ok { background: var(--accent); opacity: 0.7; }
+.rf-fill.warn { background: var(--yellow); }
+.rf-fill.danger { background: var(--red); }
+/* 收起态：整个区域压到最底、高度最小化（一行 10.5px 字 + 24px 总高） */
+.res-foot:not(:has(.rf-row)) { padding: 3px 10px; }
+.rf-meta.collapsed { margin-top: 0; gap: 6px; min-height: 0; }
+.rf-meta.collapsed .rf-brand { font-size: 10.5px; }
+.rf-meta.collapsed .rf-toggle { width: 20px; height: 18px; font-size: 11px; }
+.rf-meta.collapsed .rf-val { width: auto; font-size: 10px; }
+
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 5px; }
 </style>
