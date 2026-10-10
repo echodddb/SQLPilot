@@ -140,11 +140,15 @@
           <span class="rf-val" :class="lvl(d.usedPct)">{{ d.usedPct }}%</span>
         </div>
       </template>
-      <div class="rf-meta" :class="{ collapsed: !resOpen }" :title="collapsedTitle">
+      <div class="rf-meta" :title="collapsedTitle">
         <span class="rf-brand"><span class="dot"></span>SQLPilot v0.1</span>
-        <span v-if="!resOpen && lastCpu != null" class="rf-val" :class="lvl(lastCpu)">{{ lastCpu }}%</span>
+        <span v-if="!resOpen" class="rf-mini" title="CPU / 内存占用（点 ▤ 展开趋势图）">
+          <span class="rf-val" :class="lvl(lastCpu)">{{ lastCpu == null ? '—' : lastCpu + '%' }}</span>
+          <span class="rf-sep">/</span>
+          <span class="rf-val mem" :class="lvl(memPct)">{{ memPct == null ? '—' : memPct + '%' }}</span>
+        </span>
         <span class="rf-flex"></span>
-        <span v-if="resOpen" class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
+        <span class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
         <button class="rf-toggle" :title="resOpen ? '收起资源监控' : '展开资源监控'" @click="resOpen = !resOpen">{{ resOpen ? '−' : '▤' }}</button>
       </div>
     </div>
@@ -463,10 +467,14 @@ async function removeServer(s: any) {
 .rf-fill.danger { background: var(--red); }
 /* 收起态：整个区域压到最底、高度最小化（一行 10.5px 字 + 24px 总高） */
 .res-foot:not(:has(.rf-row)) { padding: 3px 12px; }
-.rf-meta.collapsed { margin-top: 0; gap: 6px; min-height: 0; }
-/* 字号与按钮尺寸全态统一：收起只压 padding，不缩内容——展开/收起切换无跳动 */
-.rf-meta.collapsed .rf-val { width: auto; }
+/* 收起态仅由 .res-foot 的垂直 padding 压高度；两端位置由 flex spacer 锚定，
+   收起态单独收窄 gap 防止单行内容（品牌+CPU/内存+DPAPI+按钮）在 272px 侧栏内溢出换行 */
+.res-foot:not(:has(.rf-row)) .rf-meta { gap: 4px; }
 .rf-flex { flex: 1; }
+.rf-mini { display: flex; align-items: center; gap: 2px; font-family: var(--mono); }
+.rf-mini .rf-val { width: auto; }
+.rf-mini .rf-sep { color: var(--text-faint); font-size: 10px; }
+.rf-mini .rf-val.mem { color: var(--green); }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 5px; }
 </style>
