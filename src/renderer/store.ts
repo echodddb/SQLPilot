@@ -69,7 +69,9 @@ export const store = reactive({
   ready: false,
   /** 一级功能模块：AI 助手（对话/工作台/终端）/ 巡检报告（规划中） */
   module: 'agent' as 'agent' | 'report',
-  view: 'chat' as 'chat' | 'db' | 'settings',
+  view: 'chat' as 'chat' | 'db',
+  /** 设置浮窗（横切关注点，不占主视图轨道；对话/工作台保持原样在浮窗下方） */
+  settingsOpen: false,
   cfg: null as any,
   sessions: {} as Record<string, UiSession>,
   sessionOrder: [] as string[],

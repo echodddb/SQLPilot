@@ -15,7 +15,7 @@
           <div class="big">◆</div>
           <b>SQLPilot</b> — 数据库操作、巡检与变更助手
           <div class="step" v-if="!store.cfg?.providers?.length">
-            <b>第 1 步</b>　点击右上角 <b>⚙ 设置</b> 选择厂商和模型（DeepSeek / GLM / Kimi / Claude…）
+            <b>第 1 步</b>　点击左下角 <b>⚙ 设置</b> 选择厂商和模型（DeepSeek / GLM / Kimi / Claude…）
           </div>
           <div class="step" v-if="!store.cfg?.connections?.length">
             <b>可选</b>　需要操作数据库时，左侧「数据库连接」标题行的 <b>＋</b> 添加连接（Oracle 11g/19c、OB MySQL 租户、MySQL）；纯文件/技能任务无需连接

@@ -1,6 +1,11 @@
 <template>
-  <div class="settings-wrap">
-    <div class="settings-inner">
+  <div class="modal-mask" @click.self="$emit('close')">
+    <div class="modal settings-modal">
+      <div class="sm-head">
+        <b>设置</b>
+        <button class="icon-btn" title="关闭设置" @click="$emit('close')">✕</button>
+      </div>
+      <div class="settings-inner">
       <div class="card">
         <h3>大模型提供商</h3>
         <div class="desc">
@@ -211,10 +216,12 @@
       </div>
     </div>
   </div>
+</div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+const emit = defineEmits<{ (e: 'close'): void }>()
 import { store, MODES, toPlain, pushNotice } from '../store'
 import { VENDOR_CATALOG } from '../../main/agent/catalog'
 

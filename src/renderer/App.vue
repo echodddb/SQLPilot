@@ -28,7 +28,7 @@
           v-if="store.module === 'agent' && !(store.cfg.providers || []).length"
           class="btn primary"
           title="先配置模型厂商（API Key / 型号），会话才能发起"
-          @click="store.view = 'settings'"
+          @click="store.settingsOpen = true"
         >配置模型 →</button>
         <select
           v-else-if="store.module === 'agent'"
@@ -41,10 +41,6 @@
           <option v-for="p in store.cfg.providers" :key="p.id" :value="p.id">{{ p.name }}（{{ p.model }}）</option>
         </select>
 
-        <button class="theme-toggle" :title="theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'" @click="toggleTheme">
-          {{ theme === 'dark' ? '☀️' : '🌙' }}
-        </button>
-
         <button
           v-if="store.module === 'agent'"
           class="btn ghost"
@@ -54,11 +50,7 @@
           数据库
         </button>
 
-        <button
-          class="btn ghost"
-          @click="store.view = store.view === 'settings' ? 'chat' : 'settings'" title="设置">
-          ⚙ 设置
-        </button>
+
       </div>
 
       <!-- 数据库工作台用 v-show 保活：切到聊天/设置再回来，查询窗口/表数据 tab 不丢 -->
@@ -70,7 +62,7 @@
           <ChatView />
         </div>
       <DbWorkbenchView v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
-      <SettingsView v-show="store.view === 'settings'" style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
+
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
            SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
         <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" />
@@ -81,6 +73,7 @@
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
     <ServerManager v-if="serverModal" :server="serverModalEditing" @close="serverModal = false; serverModalEditing = null" />
+    <SettingsView v-if="store.settingsOpen" @close="store.settingsOpen = false" />
     <ConfirmModal v-if="store.confirmQueue.length" />
     <PreviewModal v-if="store.previewQueue.length" />
     <ArchiveModal v-if="archiveView" :project-id="archiveView.id" :project="archiveView.name" @close="archiveView = null" />
@@ -144,6 +137,7 @@ watch(() => store.workbench, (v) => {
 watch(() => store.currentId, () => {
   if (store.view !== 'chat') store.view = 'chat'
   if (store.workbench) store.workbench = null
+  if (store.settingsOpen) store.settingsOpen = false
 })
 
 // 切换一级模块：收起底部工作台面板（终端/资源属于 AI 助手模块的会话上下文）。
@@ -151,6 +145,7 @@ watch(() => store.currentId, () => {
 // 后台任务与审批跨模块仍可响应
 watch(() => store.module, () => {
   if (store.workbench) store.workbench = null
+  if (store.settingsOpen) store.settingsOpen = false
 })
 
 const boundProject = computed(() => {
@@ -181,6 +176,8 @@ function openConnModal(editing: any = null) {
 function closeConnModal() {
   connModal.value = false
 }
+// 主题状态注入 ModuleNav（底部工具组用）
+provide('themeState', { theme, toggle: toggleTheme })
 provide('openConnModal', openConnModal)
 // 服务器全局注册表的编辑弹窗（侧栏/项目编辑器共用）
 function openServerModalFn(server: any = null) {

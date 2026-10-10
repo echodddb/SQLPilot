@@ -542,8 +542,11 @@ option { background: var(--bg-card); color: var(--text); }
 }
 
 /* ============ 设置页 ============ */
-.settings-wrap { flex: 1; overflow-y: auto; }
-.settings-inner { max-width: 880px; margin: 0 auto; padding: 26px; }
+/* 设置浮窗：横切关注点不占主视图轨道，主内容（对话/工作台）在遮罩下方保持原样 */
+.settings-modal { width: 940px; max-width: 94vw; height: min(86vh, 840px); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.settings-modal .sm-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.settings-modal .sm-head b { font-size: 14px; }
+.settings-modal .settings-inner { flex: 1; overflow-y: auto; padding: 20px 24px 26px; }
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);

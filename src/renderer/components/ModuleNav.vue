@@ -11,11 +11,36 @@
       <span class="mn-icon">{{ m.icon }}</span>
       <span class="mn-label">{{ m.label }}</span>
     </button>
+
+    <span style="flex:1"></span>
+
+    <!-- 底部：全局工具（非模块）——与上方模块入口明确分区 -->
+    <button
+      class="mn-item mn-tool"
+      :title="theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'"
+      @click="toggleTheme()"
+    >
+      <span class="mn-icon">{{ theme === 'dark' ? '☀' : '☾' }}</span>
+      <span class="mn-label">主题</span>
+    </button>
+    <button
+      class="mn-item mn-tool"
+      :class="{ active: store.settingsOpen }"
+      title="设置（模型厂商 / 连接 / 审计 / 技能 / 通用）"
+      @click="store.settingsOpen = !store.settingsOpen"
+    >
+      <span class="mn-icon">⚙</span>
+      <span class="mn-label">设置</span>
+    </button>
   </nav>
 </template>
 
 <script setup lang="ts">
+import { inject } from 'vue'
 import { store } from '../store'
+
+// 主题状态与切换由 App.vue 持有（applyTheme/setConfig 在那侧），此处仅注入使用
+const { theme, toggle: toggleTheme } = inject<{ theme: { value: 'dark' | 'light' }; toggle: () => void }>('themeState')!
 
 /** 一级功能模块：只做导航切换，模块内容渲染在 App.vue 按 module 分发 */
 const modules = [
