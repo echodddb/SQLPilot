@@ -87,7 +87,7 @@ export const store = reactive({
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
   drafts: {} as Record<string, string>,
   /** 底部工作台面板：SSH 终端（数据库相关窗口都在数据库工作台视图里） */
-  workbench: null as 'terminal' | 'resources' | null,
+  workbench: null as 'terminal' | null,
   /** 侧栏服务器点击 → 终端面板打开该服务器的 shell（WorkbenchPanel 消费后清空） */
   pendingTermServer: null as any,
   /** 子代理完整过程查看弹窗（审计 JSONL 实时读取） */

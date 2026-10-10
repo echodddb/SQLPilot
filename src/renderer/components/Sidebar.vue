@@ -117,18 +117,36 @@
       </div>
     </div>
 
-    <div class="side-foot">
-      <span style="display:flex; align-items:center; gap:8px">
-        <span><span class="dot"></span>SQLPilot v0.1</span>
-        <button class="foot-btn" :class="{ on: store.workbench === 'resources' }" title="本机资源面板（CPU / 内存 / 磁盘，每 2 秒刷新）" @click="store.workbench = store.workbench === 'resources' ? null : 'resources'">📊 资源</button>
-      </span>
-      <span>{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
+    <!-- 底部：本机资源迷你监控常驻（CPU/内存 sparkline，3s 采样；− 收起为单行） -->
+    <div class="res-foot">
+      <template v-if="resOpen">
+        <div class="rf-row" :title="cpuTitle">
+          <span class="rf-label">CPU</span>
+          <svg class="rf-spark" viewBox="0 0 100 22" preserveAspectRatio="none">
+            <polyline :points="spark(cpuHist)" />
+          </svg>
+          <span class="rf-val" :class="lvl(lastCpu)">{{ lastCpu == null ? '—' : lastCpu + '%' }}</span>
+        </div>
+        <div class="rf-row" :title="memTitle">
+          <span class="rf-label">内存</span>
+          <svg class="rf-spark" viewBox="0 0 100 22" preserveAspectRatio="none">
+            <polyline class="mem" :points="spark(memHist)" />
+          </svg>
+          <span class="rf-val" :class="lvl(memPct)">{{ memPct == null ? '—' : memPct + '%' }}</span>
+        </div>
+      </template>
+      <div class="rf-meta">
+        <span class="rf-brand"><span class="dot"></span>SQLPilot v0.1</span>
+        <span v-if="!resOpen" class="rf-val" :class="lvl(lastCpu)" title="CPU 占用（点 ▤ 展开资源监控）">{{ lastCpu == null ? '' : lastCpu + '%' }}</span>
+        <span class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
+        <button class="rf-toggle" :title="resOpen ? '收起资源监控' : '展开资源监控'" @click="resOpen = !resOpen">{{ resOpen ? '−' : '▤' }}</button>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, inject, reactive, watch } from 'vue'
+import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
 import { store, curSession, removeSession, createSessionInProject, TYPE_LABELS } from '../store'
 
 const openConnModal = inject<(c?: any) => void>('openConnModal')!
@@ -137,6 +155,54 @@ const openSessionModal = inject<(mode: 'new' | 'switch') => void>('openSessionMo
 const openServerModal = inject<(s?: any) => void>('openServerModal')!
 const openProjectEditor = inject<(p: any) => void>('openProjectEditor')!
 const openArchiveView = inject<(p: any) => void>('openArchiveView')!
+
+// ---------- 本机资源迷你监控（默认展开；收起即停表） ----------
+const resOpen = ref(true)
+const cpuHist = ref<number[]>([])
+const memHist = ref<number[]>([])
+const lastCpu = ref<number | null>(null)
+const memPct = ref<number | null>(null)
+const cpuTitle = ref('CPU 占用率（3 秒采样窗口）')
+const memTitle = ref('内存占用')
+let resTimer: ReturnType<typeof setInterval> | null = null
+const HIST = 40
+
+/** 历史序列 → sparkline points（0..100 × 0..22 视区） */
+function spark(hist: number[]): string {
+  if (hist.length < 2) return ''
+  return hist.map((v, i) => `${((i / (hist.length - 1)) * 100).toFixed(1)},${(21 - (Math.min(100, v) / 100) * 19).toFixed(1)}`).join(' ')
+}
+function lvl(v: number | null): string {
+  return v == null ? '' : v > 90 ? 'danger' : v > 70 ? 'warn' : 'ok'
+}
+function fmtGB(bytes: number): string {
+  return (bytes / 1024 ** 3).toFixed(bytes > 100 * 1024 ** 3 ? 0 : 1)
+}
+async function pollRes(): Promise<void> {
+  try {
+    const r = await window.sqlpilot.sysResources()
+    memPct.value = r.mem.usedPct
+    memHist.value = [...memHist.value, r.mem.usedPct].slice(-HIST)
+    if (r.cpu.usagePct != null) {
+      lastCpu.value = r.cpu.usagePct
+      cpuHist.value = [...cpuHist.value, r.cpu.usagePct].slice(-HIST)
+    }
+    cpuTitle.value = `CPU ${r.cpu.model} · ${r.cpu.cores} 线程 · 近 ${HIST} 个采样点`
+    const d = r.disks[0]
+    memTitle.value = `内存已用 ${fmtGB(r.mem.totalBytes - r.mem.freeBytes)} / ${fmtGB(r.mem.totalBytes)} GB${d ? ` · ${d.drive} 剩余 ${fmtGB(d.freeBytes)} GB` : ''}`
+  } catch { /* 主进程忙时跳过本轮 */ }
+}
+function syncResTimer(): void {
+  if (resOpen.value && !resTimer) {
+    pollRes()
+    resTimer = setInterval(pollRes, 3_000)
+  } else if (!resOpen.value && resTimer) {
+    clearInterval(resTimer)
+    resTimer = null
+  }
+}
+watch(resOpen, syncResTimer, { immediate: true })
+onUnmounted(() => { if (resTimer) clearInterval(resTimer) })
 
 // 项目右键菜单
 const ctxMenu = reactive({ show: false, x: 0, y: 0, project: null as any })
@@ -354,4 +420,25 @@ async function removeServer(s: any) {
 }
 .foot-btn:hover { color: var(--accent); border-color: var(--accent); }
 .foot-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+
+/* ---- 底部资源迷你监控 ---- */
+.res-foot { border-top: 1px solid var(--border); padding: 8px 12px 6px; font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
+.rf-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.rf-label { width: 26px; font-size: 10.5px; letter-spacing: 1px; color: var(--text-faint); flex-shrink: 0; }
+.rf-spark { flex: 1; height: 20px; min-width: 0; }
+.rf-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.4; vector-effect: non-scaling-stroke; opacity: 0.85; }
+.rf-spark polyline.mem { stroke: var(--green); }
+.rf-val { width: 34px; text-align: right; font-family: var(--mono); font-size: 10.5px; flex-shrink: 0; }
+.rf-val.ok { color: var(--green); }
+.rf-val.warn { color: var(--yellow); }
+.rf-val.danger { color: var(--red); font-weight: 700; }
+.rf-meta { display: flex; align-items: center; gap: 8px; margin-top: 1px; }
+.rf-brand { display: flex; align-items: center; }
+.rf-dpapi { flex: 1; }
+.rf-toggle {
+  border: 1px solid var(--border); background: none; color: var(--text-faint);
+  border-radius: 6px; width: 22px; height: 20px; cursor: pointer; font-size: 12px; line-height: 1;
+}
+.rf-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 5px; }
 </style>
