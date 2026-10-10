@@ -18,7 +18,7 @@
             <b>第 1 步</b>　点击右上角 <b>⚙ 设置</b> 选择厂商和模型（DeepSeek / GLM / Kimi / Claude…）
           </div>
           <div class="step" v-if="!store.cfg?.connections?.length">
-            <b>可选</b>　需要操作数据库时，左侧 <b>＋</b> 添加连接（Oracle 11g/19c、OB MySQL 租户、MySQL）；纯文件/技能任务无需连接
+            <b>可选</b>　需要操作数据库时，左侧「数据库连接」标题行的 <b>＋</b> 添加连接（Oracle 11g/19c、OB MySQL 租户、MySQL）；纯文件/技能任务无需连接
           </div>
           <div class="step">
             <b>示例</b>　查看某个库的表结构 · 多库巡检 · 复杂变更先切<b>计划模式</b>出方案再执行
@@ -61,10 +61,7 @@
 
     <div class="chat-input-wrap">
       <div class="chat-input">
-        <div class="quick-bar">
-          <button class="quick-btn" :class="{ on: store.workbench === 'terminal' }" title="SSH 终端（当前会话项目的服务器）" @click="store.workbench = store.workbench === 'terminal' ? null : 'terminal'">终端</button>
-          <button class="quick-btn" :class="{ on: store.view === 'db' }" title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；顶栏数据库同款入口）" @click="store.view = store.view === 'db' ? 'chat' : 'db'">数据库</button>
-        </div>
+        <!-- 导航入口统一收顶栏与侧栏：composer 只保留与"发送"直接相关的控件，回收纵向空间 -->
         <textarea
           v-model="store.drafts[store.currentId]"
           placeholder="描述任务，如：查一下 LIS 库里最近一周的检验申请量，按天汇总"
@@ -80,7 +77,7 @@
               title="当前会话的权限模式（各会话独立）：计划=只读探索出方案 · 只读=仅查询 · 确认执行=写操作逐次确认 · 会话放开=普通写自动高危仍确认 · 完全放开=全部自动"
               @change="onModeChange"
             >
-              <option v-for="m in MODES" :key="m.key" :value="m.key">权限 · {{ m.label }}</option>
+              <option v-for="m in MODES" :key="m.key" :value="m.key">{{ m.label }}</option>
             </select>
             <span
               v-if="curSession().ctx"
@@ -433,13 +430,6 @@ watch(msgSignature, async () => {
 .ctx-badge.warn { background: var(--yellow-dim, rgba(200, 160, 40, 0.15)); color: var(--yellow); }
 .ctx-badge.danger { background: var(--red-dim); color: var(--red); font-weight: 700; }
 /* 输入框上方快捷按钮（终端/SQL/对象）：小号、轻量 */
-.quick-bar { display: flex; gap: 4px; margin-bottom: 6px; }
-.quick-btn {
-  border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim);
-  border-radius: 7px; font-size: 11px; padding: 2px 9px; cursor: pointer; font-family: inherit;
-}
-.quick-btn:hover { color: var(--accent); border-color: var(--accent); }
-.quick-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
 .subtask-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
   border: 1px dashed var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px;

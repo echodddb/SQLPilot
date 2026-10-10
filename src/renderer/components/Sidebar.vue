@@ -4,7 +4,8 @@
       <span>项目</span>
       <button class="icon-btn" title="新建项目（选择文件夹）" @click="openProjectModal()">＋</button>
     </div>
-    <div class="conn-list" style="flex: 0 1 auto; max-height: 150px;">
+    <!-- 项目是低频配置：固定紧凑区；会话才是高频实体，拿走全部弹性空间 -->
+    <div class="conn-list" style="flex: 0 0 auto; max-height: 132px;">
       <div v-if="!store.cfg?.projects?.length" class="side-empty" style="padding: 4px 16px 10px">
         无项目。会话必须挂在一个项目下——点击 <b>＋</b> 选择文件夹创建。
       </div>
@@ -76,9 +77,9 @@
       <button class="icon-btn" title="新增连接" @click="openConnModal()">＋</button>
     </div>
 
-    <div class="conn-list">
+    <div class="conn-list" style="flex: 0 1 auto; max-height: 200px;">
       <div v-if="!groups.length" class="side-empty">
-        还没有数据库连接。<br />点击右上角 <b>＋</b> 添加：<br />
+        还没有数据库连接。<br />点击本组标题行的 <b>＋</b> 添加：<br />
         Oracle 11g / 19c、OceanBase（MySQL 租户）、MySQL 均已支持。连接可按需关联到项目，不关联则全局可用。
       </div>
 
@@ -103,7 +104,7 @@
       <button class="icon-btn" title="添加 SSH 服务器（全局注册，项目按需引用）" @click="openServerModal()">＋</button>
     </div>
 
-    <div class="conn-list">
+    <div class="conn-list" style="flex: 0 1 auto; max-height: 160px;">
       <div v-if="!store.cfg.servers?.length" class="side-empty">
         还没有服务器。<br />点击右上角 <b>＋</b> 添加（SSH 密码认证，<br />密码 DPAPI 加密存储），项目里可按需引用。
       </div>

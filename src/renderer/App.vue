@@ -22,7 +22,15 @@
 
         <span class="spacer"></span>
 
+        <!-- 未配置厂商时给一个明确 CTA，替代不可用的空下拉 -->
+        <button
+          v-if="!(store.cfg.providers || []).length"
+          class="btn primary"
+          title="先配置模型厂商（API Key / 型号），会话才能发起"
+          @click="store.view = 'settings'"
+        >配置模型 →</button>
         <select
+          v-else
           :value="curSession().meta.providerId || store.cfg.activeProviderId || ''"
           style="min-width: 190px"
           title="当前会话使用的模型（各会话可不同）"
@@ -52,9 +60,14 @@
       </div>
 
       <!-- 数据库工作台用 v-show 保活：切到聊天/设置再回来，查询窗口/表数据 tab 不丢 -->
-      <ChatView v-if="store.view === 'chat'" style="flex: 1; min-height: 0" />
+      <!-- 三主视图统一 v-show 保活：切换回来时聊天滚动位置 / 工作台 tab / 设置表单草稿都不丢 -->
+      <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
+           改由宿主 div 承担 v-show 与布局，子组件只管内容 -->
+      <div v-show="store.view === 'chat'" class="chat-view-host">
+        <ChatView />
+      </div>
       <DbWorkbenchView v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
-      <SettingsView v-if="store.view === 'settings'" style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
+      <SettingsView v-show="store.view === 'settings'" style="flex: 1; min-height: 0; display: flex; flex-direction: column" />
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
            SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
       <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" />
