@@ -143,6 +143,7 @@
       <div class="rf-meta" :class="{ collapsed: !resOpen }" :title="collapsedTitle">
         <span class="rf-brand"><span class="dot"></span>SQLPilot v0.1</span>
         <span v-if="!resOpen && lastCpu != null" class="rf-val" :class="lvl(lastCpu)">{{ lastCpu }}%</span>
+        <span class="rf-flex"></span>
         <span v-if="resOpen" class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
         <button class="rf-toggle" :title="resOpen ? '收起资源监控' : '展开资源监控'" @click="resOpen = !resOpen">{{ resOpen ? '−' : '▤' }}</button>
       </div>
@@ -461,11 +462,11 @@ async function removeServer(s: any) {
 .rf-fill.warn { background: var(--yellow); }
 .rf-fill.danger { background: var(--red); }
 /* 收起态：整个区域压到最底、高度最小化（一行 10.5px 字 + 24px 总高） */
-.res-foot:not(:has(.rf-row)) { padding: 3px 10px; }
+.res-foot:not(:has(.rf-row)) { padding: 3px 12px; }
 .rf-meta.collapsed { margin-top: 0; gap: 6px; min-height: 0; }
-.rf-meta.collapsed .rf-brand { font-size: 10.5px; }
-.rf-meta.collapsed .rf-toggle { width: 20px; height: 18px; font-size: 11px; }
-.rf-meta.collapsed .rf-val { width: auto; font-size: 10px; }
+/* 字号与按钮尺寸全态统一：收起只压 padding，不缩内容——展开/收起切换无跳动 */
+.rf-meta.collapsed .rf-val { width: auto; }
+.rf-flex { flex: 1; }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 5px; }
 </style>
