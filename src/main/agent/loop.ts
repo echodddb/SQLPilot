@@ -193,9 +193,12 @@ export function deleteSession(id: string): void {
 /** 更新会话元数据（模式/模型/项目/思考级别/标题） */
 export function updateSession(id: string, patch: Partial<Pick<SessionState, 'title' | 'mode' | 'providerId' | 'projectId' | 'effort' | 'prePlanMode'>>): SessionMeta {
   const s = getSession(id)
-  // 运行中切换项目：同一回合的工具上下文（fs rootPath/服务器/连接面）会中途漂移，
-  // A 项目的放开权限会话切到 B 后半回合可能写 B 的目录——拒绝，先停止再切
-  if (patch.projectId !== undefined && patch.projectId !== s.projectId && s.running) {
+  // 运行中切换到另一项目：同一回合的工具上下文（fs rootPath/服务器/连接面）会中途漂移，
+  // A 项目的放开权限会话切到 B 后半回合可能写 B 的目录——拒绝，先停止再切。
+  // 解绑（null）不受此限：只有 project:delete 会传 null，且调用方已先 cancelSession——
+  // 若也拦截，cancelSession 只发 abort 信号（running 要等 runTurn finally 才清），
+  // 紧随的解绑会 throw 并使 ipc handler 崩溃
+  if (patch.projectId !== undefined && patch.projectId !== null && patch.projectId !== s.projectId && s.running) {
     throw new Error('会话执行中不能切换项目：请先停止任务再切换')
   }
   if (patch.title !== undefined) s.title = patch.title
