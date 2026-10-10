@@ -578,6 +578,15 @@ export function registerIpc(): void {
       const ident = `${quoteIdent(isOracle, s)}.${quoteIdent(isOracle, t)}`
       const cond = String(where || '').trim().replace(/^where\s+/i, '')
       const whereSql = cond ? ` WHERE ${cond}` : ''
+      // where 是渲染层可控的自由文本：必须过守门器（按只读 SELECT 分类），
+      // 防多语句 / INTO OUTFILE / 写子句借道本通道绕过门控（此前为裸拼，属旁路）
+      if (cond) {
+        const verdict = classifySql(`SELECT 1 WHERE ${cond}`)
+        if (!verdict.ok || verdict.kind !== "read") {
+          appendAudit({ kind: "sql.read", actor: "human", conn: profile.name, target: `${s}.${t}`, detail: "obj:data 筛选条件被守门器拒绝", sql: cond.slice(0, 2000), error: `拦截: ${verdict.reason || verdict.kind}` })
+          return { ok: false, error: `筛选条件被安全策略拒绝：${verdict.reason || "仅允许只读筛选条件"}` }
+        }
+      }
       const orderSql = orderBy ? ` ORDER BY ${quoteIdent(isOracle, orderBy)} ${orderDir === 'desc' ? 'DESC' : 'ASC'}` : ''
       const p = Math.min(Math.max(Number(page) || 1, 1), 1_000_000)
       const size = Math.min(Math.max(Number(pageSize) || 50, 10), 500)

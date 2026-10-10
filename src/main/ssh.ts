@@ -107,31 +107,31 @@ export async function execCommand(server: SshServer, command: string, timeoutMs 
 }
 
 export async function readFile(server: SshServer, remotePath: string, maxBytes = 2 * 1024 * 1024, passwordOverride?: string): Promise<{ size: number; content: string }> {
-  const c = await getClient(server, passwordOverride)
-  const sftp = await new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
-  const stat: any = await new Promise((resolve, reject) => sftp.stat(remotePath, (e: Error | null, st: any) => (e ? reject(e) : resolve(st))))
-  if (stat.size > maxBytes) throw new Error(`文件超过 ${Math.round(maxBytes / 1024)}KB，拒绝读取`)
-  const buf = await new Promise<Buffer>((resolve, reject) => sftp.readFile(remotePath, (e: Error | null, d: Buffer) => (e ? reject(e) : resolve(d))))
-  return { size: stat.size, content: buf.toString('utf8').slice(0, 20000) }
+  return withSftp(server, async (sftp) => {
+    const stat: any = await new Promise((resolve, reject) => sftp.stat(remotePath, (e: Error | null, st: any) => (e ? reject(e) : resolve(st))))
+    if (stat.size > maxBytes) throw new Error(`文件超过 ${Math.round(maxBytes / 1024)}KB，拒绝读取`)
+    const buf = await new Promise<Buffer>((resolve, reject) => sftp.readFile(remotePath, (e: Error | null, d: Buffer) => (e ? reject(e) : resolve(d))))
+    return { size: stat.size, content: buf.toString("utf8").slice(0, 20000) }
+  }, passwordOverride)
 }
 
 export async function writeFile(server: SshServer, remotePath: string, content: string, passwordOverride?: string): Promise<number> {
-  const c = await getClient(server, passwordOverride)
-  const sftp = await new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
-  await new Promise<void>((resolve, reject) =>
-    sftp.writeFile(remotePath, content, (e: Error | null) => (e ? reject(e) : resolve()))
-  )
-  return Buffer.byteLength(content)
+  return withSftp(server, async (sftp) => {
+    await new Promise<void>((resolve, reject) =>
+      sftp.writeFile(remotePath, content, (e: Error | null) => (e ? reject(e) : resolve()))
+    )
+    return Buffer.byteLength(content)
+  }, passwordOverride)
 }
 
 /** 远程文件下载到本地路径（项目内） */
 export async function getFile(server: SshServer, remotePath: string, localPath: string, passwordOverride?: string): Promise<void> {
-  const c = await getClient(server, passwordOverride)
-  const sftp = await new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
-  fs.mkdirSync(path.dirname(localPath), { recursive: true })
-  await new Promise<void>((resolve, reject) =>
-    sftp.fastGet(remotePath, localPath, (e: Error | null) => (e ? reject(e) : resolve()))
-  )
+  return withSftp(server, async (sftp) => {
+    fs.mkdirSync(path.dirname(localPath), { recursive: true })
+    await new Promise<void>((resolve, reject) =>
+      sftp.fastGet(remotePath, localPath, (e: Error | null) => (e ? reject(e) : resolve()))
+    )
+  }, passwordOverride)
 }
 
 // ---------- 交互式终端（xterm） ----------
@@ -181,21 +181,30 @@ export interface SftpEntry {
   mtime: number
 }
 
-async function getSftp(server: SshServer, passwordOverride?: string): Promise<any> {
+/**
+ * SFTP 子通道统一生命周期：用毕必关（finally end）。此前每次操作新开 channel 从不关闭，
+ * 反复浏览/下载会耗尽服务器 MaxSessions，后续 c.sftp() 永久挂起。
+ */
+async function withSftp<T>(server: SshServer, fn: (sftp: any) => Promise<T>, passwordOverride?: string): Promise<T> {
   const c = await getClient(server, passwordOverride)
-  return new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
+  const sftp = await new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
+  try {
+    return await fn(sftp)
+  } finally {
+    try { sftp.end() } catch { /* 连接可能已断 */ }
+  }
 }
 
 export async function sftpList(server: SshServer, remotePath: string, passwordOverride?: string): Promise<SftpEntry[]> {
-  const sftp = await getSftp(server, passwordOverride)
-  const list: any[] = await new Promise((resolve, reject) =>
-    sftp.readdir(remotePath, (e: Error | null, l: any[]) => (e ? reject(e) : resolve(l)))
-  )
+  const list: any[] = await withSftp(server, (sftp) =>
+    new Promise((resolve, reject) =>
+      sftp.readdir(remotePath, (e: Error | null, l: any[]) => (e ? reject(e) : resolve(l)))
+    ), passwordOverride)
   return list
     .map((f: any) => ({
       name: f.filename,
       // 目录取 S_IFDIR 位 + longname 首字母判断；不能用 mode 奇偶（可执行文件 0755 也是奇数）
-      isDir: ((f.attrs?.mode ?? 0) & 0o040000) !== 0 || !!f.longname?.startsWith('d'),
+      isDir: ((f.attrs?.mode ?? 0) & 0o040000) !== 0 || !!f.longname?.startsWith("d"),
       size: f.attrs?.size ?? 0,
       mtime: (f.attrs?.mtime ?? 0) * 1000
     }))
@@ -203,20 +212,20 @@ export async function sftpList(server: SshServer, remotePath: string, passwordOv
 }
 
 export async function sftpDownload(server: SshServer, remotePath: string, localPath: string, passwordOverride?: string): Promise<void> {
-  const c = await getClient(server, passwordOverride)
-  const sftp = await new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
-  fs.mkdirSync(path.dirname(localPath), { recursive: true })
-  await new Promise<void>((resolve, reject) =>
-    sftp.fastGet(remotePath, localPath, (e: Error | null) => (e ? reject(e) : resolve()))
-  )
+  return withSftp(server, async (sftp) => {
+    fs.mkdirSync(path.dirname(localPath), { recursive: true })
+    await new Promise<void>((resolve, reject) =>
+      sftp.fastGet(remotePath, localPath, (e: Error | null) => (e ? reject(e) : resolve()))
+    )
+  }, passwordOverride)
 }
 
 export async function sftpUpload(server: SshServer, localPath: string, remotePath: string, passwordOverride?: string): Promise<void> {
-  const c = await getClient(server, passwordOverride)
-  const sftp = await new Promise<any>((resolve, reject) => c.sftp((err, s) => (err ? reject(err) : resolve(s))))
-  await new Promise<void>((resolve, reject) =>
-    sftp.fastPut(localPath, remotePath, (e: Error | null) => (e ? reject(e) : resolve()))
-  )
+  return withSftp(server, async (sftp) => {
+    await new Promise<void>((resolve, reject) =>
+      sftp.fastPut(localPath, remotePath, (e: Error | null) => (e ? reject(e) : resolve()))
+    )
+  }, passwordOverride)
 }
 
 export async function closeAll(): Promise<void> {
