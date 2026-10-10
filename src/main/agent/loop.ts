@@ -8,7 +8,7 @@ import type { ApprovalOutcome, ApprovalRequest, ToolContext } from '../tools'
 import type { ChatMsg, ConnProfile, PermissionMode, ProjectConfig, ProviderConfig, SshServer, ThinkingEffort } from '../types'
 import { appendAudit } from '../audit'
 import { listSkills } from '../skills'
-import { loadConfig, projectServers } from '../config'
+import { loadConfig, projectServers, sessionConnections } from '../config'
 import { writeFileAtomic } from '../atomic'
 import { stopSubtasksOfSession } from './subtask-registry'
 import { modelContextK } from './catalog'
@@ -193,6 +193,11 @@ export function deleteSession(id: string): void {
 /** 更新会话元数据（模式/模型/项目/思考级别/标题） */
 export function updateSession(id: string, patch: Partial<Pick<SessionState, 'title' | 'mode' | 'providerId' | 'projectId' | 'effort' | 'prePlanMode'>>): SessionMeta {
   const s = getSession(id)
+  // 运行中切换项目：同一回合的工具上下文（fs rootPath/服务器/连接面）会中途漂移，
+  // A 项目的放开权限会话切到 B 后半回合可能写 B 的目录——拒绝，先停止再切
+  if (patch.projectId !== undefined && patch.projectId !== s.projectId && s.running) {
+    throw new Error('会话执行中不能切换项目：请先停止任务再切换')
+  }
   if (patch.title !== undefined) s.title = patch.title
   if (patch.mode !== undefined) {
     s.mode = patch.mode
@@ -517,7 +522,7 @@ function nowLine(): string {
 }
 
 function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, project: ProjectConfig | undefined, skills: { name: string; description: string }[], mask = false, facts?: PromptFacts, srvs?: SshServer[]): string {
-  // 连接分两组：关联本项目的优先，其余全局连接仍可用；每条连接可带版本标注与归属记忆
+  // 连接分两组：本项目关联的优先，未关联项目的全局连接仍可用（授权面已在上游收口）
   const projConns = project ? connections.filter((c) => c.projectId === project.id) : []
   const otherConns = connections.filter((c) => !project || c.projectId !== project.id)
   const lineOf = (c: ConnProfile, tag?: string) => {
@@ -529,7 +534,7 @@ function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, pro
   const connLines = connections.length
     ? [
         ...projConns.map((c) => lineOf(c, '本项目')),
-        ...otherConns.map((c) => lineOf(c, projConns.length ? '未关联' : undefined))
+        ...otherConns.map((c) => lineOf(c, projConns.length ? '全局' : undefined))
       ].join('\n')
     : '（当前未配置任何数据库连接：数据库类任务请提示用户先在左侧添加连接；文件读写（fs_*）与技能类任务可正常进行，无需数据库。）'
 
@@ -638,15 +643,17 @@ export async function runTurn(
 
     // 回合级事实采集（回合内循环复用）：连接版本后台刷新（不阻塞回合）+ 跨会话记忆
     const cfg0 = loadConfig()
-    kickVersionRefresh(cfg0.connections, globalClientDir)
     const proj0 = sess.projectId ? cfg0.projects.find((p) => p.id === sess.projectId) : undefined
+    // 连接授权面：本项目 + 全局（其他项目独占的连接对本会话 AI 不可见）
+    const conns0 = sessionConnections(cfg0, proj0)
+    kickVersionRefresh(conns0, globalClientDir)
     const connMemories: Record<string, string> = {}
-    for (const c of cfg0.connections) {
+    for (const c of conns0) {
       const m = readConnMemory(c.name)
       if (m) connMemories[c.name] = m
     }
     const facts: PromptFacts = {
-      versions: cachedVersions(cfg0.connections),
+      versions: cachedVersions(conns0),
       globalMemory: readGlobalMemory(),
       connMemories,
       projectMemory: proj0 ? readProjectMemory(proj0.name) : undefined,
@@ -657,7 +664,7 @@ export async function runTurn(
     // 双上限截断（条数 + token 预算）：预算必须扣除系统提示词与工具定义的实际占用
     // （指令文件/记忆/归档/摘要都在系统提示词里），否则小窗口模型会预算内超窗被 API 拒绝。
     // 系统提示词用截断前的旧摘要估算，截断后摘要至多多 3500 字符，余量足以覆盖
-    const systemPreview = buildSystemPrompt(cfg0.connections, sess.mode, proj0, listSkills().filter((s) => cfg0.skillsEnabled[s.id] !== false), cfg0.maskPromptDetails !== false, facts, projectServers(cfg0, proj0))
+    const systemPreview = buildSystemPrompt(conns0, sess.mode, proj0, listSkills().filter((s) => cfg0.skillsEnabled[s.id] !== false), cfg0.maskPromptDetails !== false, facts, projectServers(cfg0, proj0))
     const overhead = estimateTokens(systemPreview) + estimateTokens(JSON.stringify(TOOLS))
     const msgBudget = Math.max(4096, Math.floor(windowK * 1024 * 0.8) - overhead)
     const tr = trimHistory(sess.messages, msgBudget)
@@ -669,7 +676,7 @@ export async function runTurn(
       const cfg = loadConfig()
       const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
       const skills = listSkills().filter((s) => cfg.skillsEnabled[s.id] !== false)
-      const system = buildSystemPrompt(cfg.connections, sess.mode, project, skills, cfg.maskPromptDetails !== false, facts, projectServers(cfg, project))
+      const system = buildSystemPrompt(sessionConnections(cfg, project), sess.mode, project, skills, cfg.maskPromptDetails !== false, facts, projectServers(cfg, project))
       const est = estimateContextTokens(system, sess.messages)
       // 先发估算（请求前徽标即可更新），响应带回真实计量后再补发一次
       deps.emit({ type: 'context', sessionId, est, windowK, usage: sess.lastUsage })
@@ -729,7 +736,7 @@ export async function runTurn(
         }
 
         const ctx: ToolContext = {
-          connections: cfg2.connections,
+          connections: sessionConnections(cfg2, project2),
           globalClientDir,
           mode: sess.mode,
           sessionApproved: sess.sessionApproved,
@@ -789,7 +796,7 @@ export async function runTurn(
                 estimateTokens,
                 windowK,
                 buildSystem,
-                connections: cfg2.connections,
+                connections: sessionConnections(cfg2, project2),
                 globalClientDir,
                 project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,
                 servers: projectServers(cfg2, project2),

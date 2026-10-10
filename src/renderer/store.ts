@@ -418,8 +418,17 @@ export async function setSessionEffort(effort: string): Promise<void> {
 export async function bindSessionProject(projectId: string | null): Promise<void> {
   const s = curSession()
   if (!s) return
+  // 运行中切换会被主进程拒绝（同一回合工具上下文不能中途漂移）；先本地拦截给出直接提示
+  if (s.running && projectId !== null) {
+    window.sqlpilot.uiAlert('会话执行中不能切换项目：请先停止任务再切换')
+    return
+  }
+  const r = await window.sqlpilot.updateSession(store.currentId, { projectId })
+  if (!r.ok) {
+    window.sqlpilot.uiAlert((r as any).error || '切换项目失败')
+    return
+  }
   s.meta.projectId = projectId
-  await window.sqlpilot.updateSession(store.currentId, { projectId })
 }
 
 /** 计划模式：批准最后一版计划并恢复计划前的权限模式开始执行。

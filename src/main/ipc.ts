@@ -21,7 +21,7 @@ import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
 import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
 import type { ApprovalOutcome, ApprovalDecision, ApprovalRequest } from './tools'
-import { listSubagentTasks, onSubtaskChange, stopSubagentTask } from './agent/subtask-registry'
+import { listSubagentTasks, onSubtaskChange, stopSubagentTask, stopSubtasksOfSession } from './agent/subtask-registry'
 import { readRunAudit } from './agent/subagent-audit'
 import { getSysResources } from './sysinfo'
 
@@ -271,8 +271,19 @@ export function registerIpc(): void {
     return { ok: true, project: project.name, content: readProjectArchiveFull(project.name) || '' }
   })
   ipcMain.handle('session:update', (_e, { id, patch }: { id: string; patch: any }) => {
-    updateSession(id, patch)
-    return { ok: true, session: listSessions().find((s) => s.id === id) }
+    // 渲染层可控字段白名单：只透传会话元数据，防异常渲染层把任意字段注入会话状态
+    const p: Record<string, unknown> = {}
+    if (typeof patch?.title === 'string') p.title = patch.title
+    if (typeof patch?.mode === 'string' && ['plan', 'readonly', 'confirm', 'session', 'yolo'].includes(patch.mode)) p.mode = patch.mode
+    if (patch?.providerId === null || typeof patch?.providerId === 'string') p.providerId = patch.providerId
+    if (patch?.projectId === null || typeof patch?.projectId === 'string') p.projectId = patch.projectId
+    if (patch?.effort === null || typeof patch?.effort === 'string') p.effort = patch.effort
+    try {
+      updateSession(id, p)
+      return { ok: true, session: listSessions().find((s) => s.id === id) }
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) }
+    }
   })
 
   ipcMain.handle('chat:send', async (_e, { sessionId, text }: { sessionId: string; text: string }) => {
@@ -347,9 +358,13 @@ export function registerIpc(): void {
     cfg.projects = cfg.projects.filter((p) => p.id !== id)
     // 服务器是全局资产：删项目只解除引用，不删服务器与密码
     saveConfig(cfg)
-    // 解除会话上的绑定
+    // 该项目的会话：先停运行中回合与后台子代理（防写权限任务在归属消失后继续跑），再解绑
     for (const s of listSessions()) {
-      if (s.projectId === id) updateSession(s.id, { projectId: null })
+      if (s.projectId === id) {
+        cancelSession(s.id)
+        stopSubtasksOfSession(s.id)
+        updateSession(s.id, { projectId: null })
+      }
     }
     return { ok: true }
   })

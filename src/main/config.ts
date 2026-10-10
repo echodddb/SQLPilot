@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { AppConfig, ProjectConfig } from './types'
+import type { AppConfig, ConnProfile, ProjectConfig } from './types'
 import { setPassword, getPassword, secretsAvailable } from './secrets'
 import { writeFileAtomic } from './atomic'
 
@@ -58,6 +58,17 @@ export function loadConfig(): AppConfig {
   }
   cachedConfig = cfg
   return cfg
+}
+
+/**
+ * 会话可见连接：本项目关联的 + 未关联任何项目的全局连接。
+ * 与 projectServers 对称——"关联到项目"即授权边界，其他项目独占关联的连接对本会话的
+ * AI 不可见（工具解析与系统提示词双收口）。人工工作台（对象树/查询窗口）不受此限：
+ * 那是用户显式选择连接，不属于 AI 授权面。
+ */
+export function sessionConnections(cfg: AppConfig, project: ProjectConfig | undefined | null): ConnProfile[] {
+  if (!project) return cfg.connections.filter((c) => !c.projectId)
+  return cfg.connections.filter((c) => !c.projectId || c.projectId === project.id)
 }
 
 /** 项目的服务器解析：serverIds → 全局注册表；兜底兼容未迁移的内联定义（如外部手改配置） */
