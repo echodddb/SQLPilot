@@ -162,3 +162,23 @@ export function clearProjectArchive(project: string): void {
   const file = archiveFile(project)
   try { fs.writeFileSync(file, '', 'utf8') } catch { /* 无文件视为已空 */ }
 }
+
+/** LLM 增强总结完成后更新对应条目（按 ts+title 定位；找不到跳过） */
+export function updateArchiveEntry(project: string, ts: string, title: string, newSummary: string): boolean {
+  const entries = listProjectArchiveEntries(project)
+  const hit = entries.find((e) => e.ts === ts && e.title === title)
+  if (!hit) return false
+  hit.summary = newSummary.trim()
+  hit.raw = `## ${hit.ts} · ${hit.title}\n${hit.summary}`
+  const file = archiveFile(project)
+  fs.writeFileSync(file, entries.slice().reverse().map((e) => e.raw).join('\n\n') + '\n\n', 'utf8')
+  return true
+}
+
+/** 删除归档会话时清理对应 md 条目（best-effort：按 ts+title 定位，找不到跳过） */
+export function deleteArchiveEntryByHead(project: string, ts: string, title: string): void {
+  const entries = listProjectArchiveEntries(project)
+  const idx = entries.findIndex((e) => e.ts === ts && e.title === title)
+  if (idx < 0) return
+  deleteProjectArchiveEntry(project, idx, entries[idx].raw)
+}

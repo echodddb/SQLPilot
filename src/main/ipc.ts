@@ -11,11 +11,12 @@ import { OracleAdapter } from './db/oracle'
 import { MySqlAdapter } from './db/mysql'
 import {
   runTurn, resetSession, cancelSession, loadPersistedSessions, persistSessions,
-  getSession, listSessions, newSession, deleteSession, updateSession, summarizeDropped,
+  getSession, listSessions, listArchivedSessions, newSession, deleteSession, updateSession, summarizeDropped,
+  archiveSessionMark, archiveSummaryDone, unarchiveSession,
   type AgentEvent
 } from './agent/loop'
 import { callLlm } from './agent/llm'
-import { appendArchive, readProjectArchiveFull, listProjectArchiveEntries, deleteProjectArchiveEntry, clearProjectArchive } from './memory'
+import { appendArchive, readProjectArchiveFull, listProjectArchiveEntries, deleteProjectArchiveEntry, clearProjectArchive, updateArchiveEntry, deleteArchiveEntryByHead } from './memory'
 import { listSkills, saveSkill, deleteSkill, importSkill, importSkillPack, importSkillPackFromUrl, readSkill } from './skills'
 import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
@@ -217,53 +218,63 @@ export function registerIpc(): void {
     return { ok: true }
   })
   // 归档会话：总结对话内容写入项目归档（该项目其他会话的提示词会注入），
-  // remove=true 同时删除会话（原"删除会话"），false 只清空（原"清空对话"）。
-  // 总结走 LLM 需要数秒：每阶段向渲染层发 archive:progress 事件做前台提示
-  ipcMain.handle('session:archive', async (_e, { id, remove }: { id: string; remove: boolean }) => {
+  // ZCode time_archived 式瞬时归档：打标记 + 本地抽取摘要（毫秒级）立即返回，
+  // 消息保留（可恢复）；LLM 增强总结后台生成，完成后更新归档条目并广播刷新。
+  // remove 参数保留兼容但不再删除——归档语义就是"收起可恢复"，彻底删除走归档区 ✕
+  ipcMain.handle('session:archive', (_e, { id }: { id: string; remove?: boolean }) => {
     try {
       const cfg = loadConfig()
       const sess = getSession(id)
       if (sess.running) {
         return { ok: false, error: '会话正在执行任务，请先停止（或等它结束）再归档' }
       }
-      const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
-      let summary = ''
-      let note: string
       if (!sess.messages.length) {
-        note = '会话为空，未生成归档'
-      } else if (!project) {
-        note = '会话未绑定项目，内容未归档'
-      } else {
-        // LLM 总结（同样走发送前预览）；失败/取消回退本地抽取式摘要
-        const provider = resolveProvider(cfg, id)
-        if (provider) {
-          win?.webContents.send('archive:progress', { id, stage: 'summary', note: `正在用模型总结「${sess.title}」…` })
-          try {
-            const res = await callLlm(provider, ARCHIVE_SUMMARY_SYSTEM, sess.messages, [], {}, {
-              preview: (url, body) => previewLlmRequest(url, body, id)
-            })
-            summary = (res.content || '').trim()
-          } catch {
-            /* 模型不可用/预览取消：走本地回退 */
-          }
-        }
-        if (!summary) {
-          win?.webContents.send('archive:progress', { id, stage: 'summary', note: '模型总结不可用（失败或已在预览中取消），改用本地抽取摘要…' })
-          summary = summarizeDropped(undefined, sess.messages)
-        }
-        win?.webContents.send('archive:progress', { id, stage: 'save', note: `写入项目「${project.name}」归档…` })
-        appendArchive(project.name, sess.title, summary)
-        note = `已归档到项目「${project.name}」`
+        return { ok: false, error: '会话为空，无需归档' }
       }
-      if (remove) deleteSession(id)
-      else resetSession(id)
-      win?.webContents.send('archive:progress', { id, stage: 'done', note })
-      return { ok: true, archived: !!summary, note, preview: summary.slice(0, 160) }
+      const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
+      if (!project) {
+        return { ok: false, error: '会话未绑定项目，无法归档' }
+      }
+      // 1) 瞬时完成：本地抽取摘要（纯同步毫秒级）+ 打标记 + 写归档背景
+      const summary0 = summarizeDropped(undefined, sess.messages)
+      const ts = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const tsLabel = ts.getFullYear() + '-' + pad(ts.getMonth() + 1) + '-' + pad(ts.getDate()) + ' ' + pad(ts.getHours()) + ':' + pad(ts.getMinutes())
+      archiveSessionMark(id, summary0)
+      appendArchive(project.name, sess.title, summary0)
+      win?.webContents.send('archive:progress', { id, stage: 'done', note: '已归档到「' + project.name + '」（智能总结后台生成中）' })
+
+      // 2) 后台 LLM 增强总结：不阻塞归档；完成/失败都不影响已归档状态
+      const provider = resolveProvider(cfg, id)
+      if (provider) {
+        void (async () => {
+          try {
+            const res = await callLlm(provider, ARCHIVE_SUMMARY_SYSTEM, sess.messages, [], {})
+            const better = (res.content || '').trim()
+            if (better && sess.archivedAt) {
+              archiveSummaryDone(id, better)
+              updateArchiveEntry(project.name, tsLabel, sess.title, better)
+              win?.webContents.send('archive:updated', { projectId: project.id })
+            }
+          } catch {
+            archiveSummaryDone(id, summary0) // 保持本地抽取版
+          }
+        })()
+      } else {
+        archiveSummaryDone(id, summary0)
+      }
+      return { ok: true, archived: true, note: '已归档', preview: summary0.slice(0, 160), instant: true }
     } catch (e: any) {
-      win?.webContents.send('archive:progress', { id, stage: 'error', note: String(e?.message || e).slice(0, 200) })
       return { ok: false, error: String(e?.message || e).slice(0, 300) }
     }
   })
+
+  // 恢复归档会话（ZCode resurrection）：消息保留在 sessions.json，去标记即回活跃列表
+  ipcMain.handle('session:unarchive', (_e, { id }: { id: string }) => {
+    const meta = unarchiveSession(id)
+    return meta ? { ok: true, session: meta } : { ok: false, error: '归档会话不存在' }
+  })
+
   ipcMain.handle('archive:get', (_e, { projectId }: { projectId: string }) => {
     const cfg = loadConfig()
     const project = cfg.projects.find((p) => p.id === projectId)
@@ -275,16 +286,42 @@ export function registerIpc(): void {
   ipcMain.handle('archive:list', (_e, { projectId }: { projectId: string }) => {
     const project = loadConfig().projects.find((p) => p.id === projectId)
     if (!project) return { ok: false, error: '项目不存在' }
-    return { ok: true, entries: listProjectArchiveEntries(project.name) }
+    // 主数据源：归档会话（sessions.json，消息保留可恢复）
+    const archived = listArchivedSessions(projectId).map((s) => {
+      const d = new Date(s.archivedAt)
+      const pad = (n: number) => String(n).padStart(2, '0')
+      return {
+        sessionId: s.id,
+        ts: d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()),
+        title: s.title,
+        summary: s.archiveSummary || '',
+        summarizing: s.summarizing,
+        messageCount: s.messageCount
+      }
+    })
+    // 兼容：md 里有、但对应会话已不存在的历史条目（旧版归档删会话的产物）
+    const heads = new Set(archived.map((a) => a.ts + '|' + a.title))
+    const legacy = listProjectArchiveEntries(project.name)
+      .filter((e) => !heads.has(e.ts + '|' + e.title))
+      .map((e) => ({ sessionId: null as string | null, ts: e.ts, title: e.title, summary: e.summary, summarizing: false, messageCount: 0, legacy: true, raw: e.raw }))
+    return { ok: true, entries: [...archived, ...legacy] }
   })
-  ipcMain.handle('archive:deleteEntry', (_e, { projectId, reverseIndex, rawCheck }: { projectId: string; reverseIndex: number; rawCheck: string }) => {
+  ipcMain.handle('archive:deleteEntry', (_e, { projectId, sessionId, reverseIndex, rawCheck, ts, title }: { projectId: string; sessionId?: string | null; reverseIndex?: number; rawCheck?: string; ts?: string; title?: string }) => {
     const project = loadConfig().projects.find((p) => p.id === projectId)
     if (!project) return { ok: false, error: '项目不存在' }
+    // 会话型：删除归档会话（级联停子任务）+ best-effort 清理 md 背景条目
+    if (sessionId) {
+      deleteSession(sessionId)
+      if (ts && title) deleteArchiveEntryByHead(project.name, ts, title)
+      return { ok: true }
+    }
+    // legacy 型（仅 md）：按内容校验删除
     return deleteProjectArchiveEntry(project.name, Number(reverseIndex) || 0, String(rawCheck || '')) ? { ok: true } : { ok: false, error: '该归档刚被修改，请刷新后重试' }
   })
   ipcMain.handle('archive:clear', (_e, { projectId }: { projectId: string }) => {
     const project = loadConfig().projects.find((p) => p.id === projectId)
     if (!project) return { ok: false, error: '项目不存在' }
+    for (const s of listArchivedSessions(projectId)) deleteSession(s.id)
     clearProjectArchive(project.name)
     return { ok: true }
   })

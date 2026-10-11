@@ -17,12 +17,14 @@ declare global {
       listSessions(): Promise<{ id: string; title: string; mode: string; providerId: string | null; projectId: string | null; effort: string | null }[]>
       newSession(): Promise<{ id: string; title: string; mode: string; providerId: string | null; projectId: string | null; effort: string | null }>
       deleteSession(id: string): Promise<{ ok: boolean }>
-      archiveSession(id: string, remove: boolean): Promise<{ ok: boolean; archived?: boolean; note?: string; preview?: string; error?: string }>
+      archiveSession(id: string, remove: boolean): Promise<{ ok: boolean; archived?: boolean; note?: string; preview?: string; instant?: boolean; error?: string }>
+      unarchiveSession(id: string): Promise<{ ok: boolean; session?: any; error?: string }>
       getProjectArchive(projectId: string): Promise<{ ok: boolean; project?: string; content?: string; error?: string }>
-      listArchive(projectId: string): Promise<{ ok: boolean; entries?: { ts: string; title: string; summary: string; raw: string }[]; error?: string }>
-      deleteArchiveEntry(projectId: string, reverseIndex: number, rawCheck: string): Promise<{ ok: boolean; error?: string }>
+      listArchive(projectId: string): Promise<{ ok: boolean; entries?: { sessionId: string | null; ts: string; title: string; summary: string; summarizing?: boolean; messageCount?: number; legacy?: boolean; raw?: string }[]; error?: string }>
+      deleteArchiveEntry(projectId: string, opts: { sessionId?: string | null; reverseIndex?: number; rawCheck?: string; ts?: string; title?: string }): Promise<{ ok: boolean; error?: string }>
       clearArchive(projectId: string): Promise<{ ok: boolean; error?: string }>
       onArchiveProgress(cb: (p: { id: string; stage: 'summary' | 'save' | 'done' | 'error'; note: string }) => void): () => void
+      onArchiveUpdated(cb: (p: { projectId: string }) => void): () => void
       updateSession(id: string, patch: any): Promise<{ ok: boolean; session?: any }>
       sendChat(sessionId: string, text: string): Promise<{ ok: boolean }>
       resetChat(sessionId: string): Promise<{ ok: boolean }>

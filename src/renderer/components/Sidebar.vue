@@ -67,11 +67,13 @@
                 <div class="arc-head">
                   <span class="arc-ts">{{ a.ts }}</span>
                   <span class="arc-title">{{ a.title }}</span>
+                  <span v-if="a.summarizing" class="arc-flag">总结生成中…</span>
+                  <span v-else-if="a.legacy" class="arc-flag legacy">仅总结</span>
                   <span style="flex:1"></span>
-                  <button class="icon-btn" title="基于此归档继续：在项目下新建会话并注入总结作为背景" @click.stop="continueArchive(g.key, a)">↻ 继续</button>
-                  <button class="icon-btn" title="删除这条归档（不影响其他条目）" @click.stop="deleteArchiveEntry(g.key, ai)">✕</button>
+                  <button class="icon-btn" :title="a.sessionId ? '恢复此会话：原对话完整保留，回到活跃列表' : '旧版归档（原会话已删）：以总结为背景新建会话'" @click.stop="continueArchive(g.key, a)">↻ {{ a.sessionId ? '恢复' : '继续' }}</button>
+                  <button class="icon-btn" title="彻底删除这条归档" @click.stop="deleteArchiveEntry(g.key, ai)">✕</button>
                 </div>
-                <div class="arc-sum">{{ a.summary.split('\n')[0].slice(0, 120) }}{{ a.summary.length > 120 ? '…' : '' }}</div>
+                <div class="arc-sum" :title="a.summary">{{ a.summary ? a.summary.split('\n')[0].slice(0, 120) + (a.summary.length > 120 ? '…' : '') : '（无摘要）' }}</div>
               </div>
               <div class="archive-clear" @click="clearArchive(g.key)">清空归档（{{ archives[g.key].length }} 条）…</div>
             </template>
@@ -178,7 +180,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
-import { store, curSession, removeSession, createSessionInProject, continueFromArchive, TYPE_LABELS } from '../store'
+import { store, curSession, removeSession, restoreArchivedSession, createSessionInProject, TYPE_LABELS } from '../store'
 
 const openConnModal = inject<(c?: any) => void>('openConnModal')!
 const openProjectModal = inject<() => void>('openProjectModal')!
@@ -348,7 +350,7 @@ function showMore(key: string): void {
 }
 
 // ---------- 归档子区（ZCode 归档平铺式：列表/继续/单条删除/清空） ----------
-interface ArchEntry { ts: string; title: string; summary: string; raw: string }
+interface ArchEntry { sessionId: string | null; ts: string; title: string; summary: string; summarizing?: boolean; messageCount?: number; legacy?: boolean; raw?: string }
 const openArchives = reactive(new Set<string>())
 const archives = reactive<Record<string, ArchEntry[]>>({})
 const archiveBusy = ref('')
@@ -371,19 +373,32 @@ async function loadArchive(key: string): Promise<void> {
   }
 }
 async function continueArchive(key: string, a: ArchEntry): Promise<void> {
-  await continueFromArchive(key, a)
+  if (a.sessionId) {
+    // 会话型：真恢复（ZCode resurrection）——原对话完整保留
+    await restoreArchivedSession(a.sessionId)
+    if (collapsed.has(key)) toggleGroup(key)
+    return
+  }
+  // legacy 型（旧版归档，原会话已删）：以总结为背景新建会话
+  await createSessionInProject(key)
+  await import('../store').then(m => m.sendMessage(`请基于以下历史归档继续工作（${a.ts} · ${a.title}）：\n\n${a.summary}\n\n——请先简要确认你从中掌握的背景，然后等我给出具体任务。`))
 }
 async function deleteArchiveEntry(key: string, reverseIndex: number): Promise<void> {
   const a = archives[key]?.[reverseIndex]
   if (!a) return
-  if (!(await window.sqlpilot.uiConfirm(`删除归档「${a.ts} · ${a.title}」？`, '仅删除这条总结，不影响其他归档与会话', true))) return
-  const r = await window.sqlpilot.deleteArchiveEntry(key, reverseIndex, a.raw)
+  const what = a.sessionId ? `该归档会话（${a.messageCount || 0} 条消息）将被彻底删除` : '仅删除这条历史总结'
+  if (!(await window.sqlpilot.uiConfirm(`删除归档「${a.ts} · ${a.title}」？`, what + '，不可恢复', true))) return
+  const r = await window.sqlpilot.deleteArchiveEntry(key, { sessionId: a.sessionId, reverseIndex, rawCheck: a.raw, ts: a.ts, title: a.title })
   if (!r.ok) {
     window.sqlpilot.uiAlert(r.error || '删除失败')
     return
   }
   await loadArchive(key)
 }
+// LLM 增强总结后台完成 → 已展开的归档区实时刷新
+window.sqlpilot.onArchiveUpdated(({ projectId }) => {
+  if (openArchives.has(projectId)) void loadArchive(projectId)
+})
 async function clearArchive(key: string): Promise<void> {
   const n = archives[key]?.length || 0
   if (!n) return
@@ -602,6 +617,8 @@ async function removeServer(s: any) {
 .arc-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .arc-ts { font-family: var(--mono); font-size: 10px; color: var(--text-faint); flex-shrink: 0; }
 .arc-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arc-flag { font-size: 10px; color: var(--accent); flex-shrink: 0; }
+.arc-flag.legacy { color: var(--text-faint); }
 .arc-sum {
   margin-top: 3px; color: var(--text-faint); font-size: 10.5px; line-height: 1.5;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

@@ -37,6 +37,7 @@ const api = {
   newSession: () => ipcRenderer.invoke('session:new'),
   deleteSession: (id: string) => ipcRenderer.invoke('session:delete', { id }),
   archiveSession: (id: string, remove: boolean) => ipcRenderer.invoke('session:archive', { id, remove }),
+  unarchiveSession: (id: string) => ipcRenderer.invoke('session:unarchive', { id }),
   getProjectArchive: (projectId: string) => ipcRenderer.invoke('archive:get', { projectId }),
   listArchive: (projectId: string) => ipcRenderer.invoke('archive:list', { projectId }),
   deleteArchiveEntry: (projectId: string, reverseIndex: number, rawCheck: string) => ipcRenderer.invoke('archive:deleteEntry', { projectId, reverseIndex, rawCheck }),
@@ -45,6 +46,12 @@ const api = {
     const l = (_e: any, p: any) => cb(p)
     ipcRenderer.on('archive:progress', l)
     return () => ipcRenderer.removeListener('archive:progress', l)
+  },
+  // LLM 增强总结后台完成 → 归档区实时刷新
+  onArchiveUpdated: (cb: (p: { projectId: string }) => void) => {
+    const l = (_e: any, p: { projectId: string }) => cb(p)
+    ipcRenderer.on('archive:updated', l)
+    return () => ipcRenderer.removeListener('archive:updated', l)
   },
   updateSession: (id: string, patch: any) => ipcRenderer.invoke('session:update', { id, patch: plain(patch) }),
   // 对话

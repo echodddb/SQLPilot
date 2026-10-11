@@ -66,6 +66,12 @@ interface SessionState extends SessionMeta {
   contextSummary?: string
   /** 后台子代理完成通知（随会话持久化；下一回合注入首条 user 消息，ZCode <task-notification> 的等价物） */
   pendingNotices: string[]
+  /** 归档时间戳（ZCode time_archived 式标记）：非空=已归档，消息保留可恢复 */
+  archivedAt?: number
+  /** 归档摘要（归档瞬间本地抽取，LLM 增强总结后台完成后覆盖） */
+  archiveSummary?: string
+  /** LLM 增强总结生成中（不持久化，重启视为完成） */
+  archiveSummarizing?: boolean
 }
 
 const sessions = new Map<string, SessionState>()
@@ -96,6 +102,8 @@ export function loadPersistedSessions(): void {
           messages: repairDanglingToolCalls(tr.kept),
           contextSummary: tr.dropped.length ? summarizeDropped(s.contextSummary, tr.dropped) : s.contextSummary,
           pendingNotices: Array.isArray(s.pendingNotices) ? s.pendingNotices : [],
+          archivedAt: typeof s.archivedAt === 'number' ? s.archivedAt : undefined,
+          archiveSummary: s.archiveSummary,
           running: false,
           sessionApproved: new Set(),
           cancelRequested: false,
@@ -123,7 +131,9 @@ export function persistSessions(): void {
         prePlanMode: s.prePlanMode ?? null,
         messages: s.messages,
         contextSummary: s.contextSummary,
-        pendingNotices: s.pendingNotices
+        pendingNotices: s.pendingNotices,
+        archivedAt: s.archivedAt,
+        archiveSummary: s.archiveSummary
       }
     }
     writeFileAtomic(sessionsFile(), JSON.stringify(data))
@@ -170,9 +180,49 @@ function metaOf(s: SessionState): SessionMeta {
   return { id: s.id, title: s.title, mode: s.mode, providerId: s.providerId, projectId: s.projectId, effort: s.effort, prePlanMode: s.prePlanMode ?? null }
 }
 
-/** 会话元信息（渲染层列表用） */
+/** 会话元信息（渲染层列表用）：归档会话不在活跃列表 */
 export function listSessions(): SessionMeta[] {
-  return [...sessions.values()].map(metaOf)
+  return [...sessions.values()].filter((s) => !s.archivedAt).map(metaOf)
+}
+
+/** 已归档会话（项目树归档区数据源；消息保留，可恢复） */
+export function listArchivedSessions(projectId?: string): Array<SessionMeta & { archivedAt: number; archiveSummary?: string; messageCount: number; summarizing: boolean }> {
+  const out: Array<SessionMeta & { archivedAt: number; archiveSummary?: string; messageCount: number; summarizing: boolean }> = []
+  for (const s of sessions.values()) {
+    if (!s.archivedAt) continue
+    if (projectId && s.projectId !== projectId) continue
+    out.push({ ...metaOf(s), archivedAt: s.archivedAt, archiveSummary: s.archiveSummary, messageCount: s.messages.length, summarizing: !!s.archiveSummarizing })
+  }
+  return out.sort((a, b) => b.archivedAt - a.archivedAt)
+}
+
+/** 归档会话（瞬时：打标记+存摘要+持久化；LLM 增强由调用方后台执行） */
+export function archiveSessionMark(id: string, summary: string): void {
+  const s = getSession(id)
+  s.archivedAt = Date.now()
+  s.archiveSummary = summary
+  s.archiveSummarizing = true
+  persistSessionsSoon()
+}
+
+/** LLM 增强总结完成回写 */
+export function archiveSummaryDone(id: string, summary: string): void {
+  const s = sessions.get(id)
+  if (!s || !s.archivedAt) return
+  s.archiveSummary = summary
+  s.archiveSummarizing = false
+  persistSessionsSoon()
+}
+
+/** 恢复归档会话（ZCode resurrection：消息本就保留，去标记即回到活跃列表） */
+export function unarchiveSession(id: string): SessionMeta | null {
+  const s = sessions.get(id)
+  if (!s) return null
+  s.archivedAt = undefined
+  s.archiveSummary = undefined
+  s.archiveSummarizing = false
+  persistSessionsSoon()
+  return metaOf(s)
 }
 
 export function newSession(): SessionMeta {
@@ -184,7 +234,6 @@ export function newSession(): SessionMeta {
 
 export function deleteSession(id: string): void {
   // 后台子代理不随会话删除而继续：删除即级联中止，防写权限任务脱离归属继续跑
-  stopSubtasksOfSession(id)
   stopSubtasksOfSession(id)
   sessions.delete(id)
   persistSessionsSoon()

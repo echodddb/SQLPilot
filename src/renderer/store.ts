@@ -392,11 +392,24 @@ export async function removeSession(id: string): Promise<void> {
     await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
+  // 归档瞬时完成（消息保留在 sessions.json，可在项目树归档区 ↻ 恢复）：立即从活跃列表移除
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
   if (store.currentId === id) store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
-  if (!r.archived) await window.sqlpilot.uiAlert(r.note || '会话内容未归档')
-  else pushNotice(`会话「${title}」${r.note}${r.preview ? `：${r.preview}…` : ''}`)
+  pushNotice(`会话「${title}」已归档（智能总结后台生成中，可在项目树归档区恢复）`)
+}
+
+/** 恢复归档会话（ZCode resurrection）：回到活跃列表并切换过去，原对话完整保留 */
+export async function restoreArchivedSession(id: string): Promise<void> {
+  const r = await window.sqlpilot.unarchiveSession(id)
+  if (!r.ok) {
+    window.sqlpilot.uiAlert(r.error || '恢复失败')
+    return
+  }
+  ensureSessionRecord(r.session)
+  const hist = await window.sqlpilot.getHistory(id)
+  if (hist.ok && Array.isArray(hist.messages)) store.sessions[id].msgs = historyToUi(hist.messages)
+  store.currentId = id
 }
 
 /** 归档当前对话到项目并清空本会话（原"清空对话"，内容不再直接丢弃） */
