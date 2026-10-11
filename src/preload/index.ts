@@ -38,6 +38,9 @@ const api = {
   deleteSession: (id: string) => ipcRenderer.invoke('session:delete', { id }),
   archiveSession: (id: string, remove: boolean) => ipcRenderer.invoke('session:archive', { id, remove }),
   getProjectArchive: (projectId: string) => ipcRenderer.invoke('archive:get', { projectId }),
+  listArchive: (projectId: string) => ipcRenderer.invoke('archive:list', { projectId }),
+  deleteArchiveEntry: (projectId: string, reverseIndex: number, rawCheck: string) => ipcRenderer.invoke('archive:deleteEntry', { projectId, reverseIndex, rawCheck }),
+  clearArchive: (projectId: string) => ipcRenderer.invoke('archive:clear', { projectId }),
   onArchiveProgress: (cb: (p: any) => void) => {
     const l = (_e: any, p: any) => cb(p)
     ipcRenderer.on('archive:progress', l)

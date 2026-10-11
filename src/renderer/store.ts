@@ -333,6 +333,13 @@ export async function init(): Promise<void> {
   store.ready = true
 }
 
+/** 基于一条归档继续工作：在归档所属项目下新建会话，并把归档总结作为背景注入。
+ *  归档语义是"总结后清空原对话"，原始消息不可恢复——"继续"= 以总结为起点的新任务。 */
+export async function continueFromArchive(projectId: string, entry: { ts: string; title: string; summary: string }): Promise<void> {
+  await createSessionInProject(projectId)
+  await sendMessage(`请基于以下历史归档继续工作（${entry.ts} · ${entry.title}）：\n\n${entry.summary}\n\n——请先简要确认你从中掌握的背景，然后等我给出具体任务。`)
+}
+
 export async function sendMessage(text: string): Promise<void> {
   const s = curSession()
   if (!s || s.running || !text.trim()) return

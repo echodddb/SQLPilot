@@ -117,3 +117,48 @@ export function readProjectArchiveFull(project: string): string | undefined {
     return undefined
   }
 }
+
+// ---------- 归档条目化（侧栏项目树内的归档区：列表/单条删除/清空） ----------
+
+export interface ArchiveEntry {
+  /** 归档时间（## 行原文，如 2026-10-11 09:30） */
+  ts: string
+  /** 会话标题 */
+  title: string
+  /** 总结正文 */
+  summary: string
+  /** 原始小节全文（删除时按内容校验，避免并发写导致错删） */
+  raw: string
+}
+
+/** 解析归档文件为条目列表（倒序：最近的在前，与侧栏展示一致） */
+export function listProjectArchiveEntries(project: string): ArchiveEntry[] {
+  const full = readProjectArchiveFull(project)
+  if (!full) return []
+  const out: ArchiveEntry[] = []
+  for (const part of full.split(/\n(?=## )/)) {
+    const m = part.match(/^## (.+?) · (.+)$/m)
+    if (!m) continue
+    const summary = part.split(/\n/).slice(1).join('\n').trim()
+    out.push({ ts: m[1], title: m[2].trim(), summary, raw: part.trim() })
+  }
+  return out.reverse()
+}
+
+/** 删除一条归档（按倒序 index + raw 内容校验；不一致时拒绝，防并发写错删） */
+export function deleteProjectArchiveEntry(project: string, reverseIndex: number, rawCheck: string): boolean {
+  const entries = listProjectArchiveEntries(project)
+  const entry = entries[reverseIndex]
+  if (!entry || entry.raw !== rawCheck) return false
+  const remain = entries.filter((_, i) => i !== reverseIndex).reverse() // 恢复正序（旧→新）
+  const file = archiveFile(project)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, remain.length ? remain.map((e) => e.raw).join('\n\n') + '\n\n' : '', 'utf8')
+  return true
+}
+
+/** 清空项目归档 */
+export function clearProjectArchive(project: string): void {
+  const file = archiveFile(project)
+  try { fs.writeFileSync(file, '', 'utf8') } catch { /* 无文件视为已空 */ }
+}

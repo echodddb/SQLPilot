@@ -19,6 +19,9 @@ declare global {
       deleteSession(id: string): Promise<{ ok: boolean }>
       archiveSession(id: string, remove: boolean): Promise<{ ok: boolean; archived?: boolean; note?: string; preview?: string; error?: string }>
       getProjectArchive(projectId: string): Promise<{ ok: boolean; project?: string; content?: string; error?: string }>
+      listArchive(projectId: string): Promise<{ ok: boolean; entries?: { ts: string; title: string; summary: string; raw: string }[]; error?: string }>
+      deleteArchiveEntry(projectId: string, reverseIndex: number, rawCheck: string): Promise<{ ok: boolean; error?: string }>
+      clearArchive(projectId: string): Promise<{ ok: boolean; error?: string }>
       onArchiveProgress(cb: (p: { id: string; stage: 'summary' | 'save' | 'done' | 'error'; note: string }) => void): () => void
       updateSession(id: string, patch: any): Promise<{ ok: boolean; session?: any }>
       sendChat(sessionId: string, text: string): Promise<{ ok: boolean }>

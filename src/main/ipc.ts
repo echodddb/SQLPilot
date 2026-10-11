@@ -15,7 +15,7 @@ import {
   type AgentEvent
 } from './agent/loop'
 import { callLlm } from './agent/llm'
-import { appendArchive, readProjectArchiveFull } from './memory'
+import { appendArchive, readProjectArchiveFull, listProjectArchiveEntries, deleteProjectArchiveEntry, clearProjectArchive } from './memory'
 import { listSkills, saveSkill, deleteSkill, importSkill, importSkillPack, importSkillPackFromUrl, readSkill } from './skills'
 import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
@@ -269,6 +269,24 @@ export function registerIpc(): void {
     const project = cfg.projects.find((p) => p.id === projectId)
     if (!project) return { ok: false, error: '项目不存在' }
     return { ok: true, project: project.name, content: readProjectArchiveFull(project.name) || '' }
+  })
+
+  // 归档条目化（侧栏项目树内嵌归档区）：列表/单条删除（内容校验防并发错删）/清空
+  ipcMain.handle('archive:list', (_e, { projectId }: { projectId: string }) => {
+    const project = loadConfig().projects.find((p) => p.id === projectId)
+    if (!project) return { ok: false, error: '项目不存在' }
+    return { ok: true, entries: listProjectArchiveEntries(project.name) }
+  })
+  ipcMain.handle('archive:deleteEntry', (_e, { projectId, reverseIndex, rawCheck }: { projectId: string; reverseIndex: number; rawCheck: string }) => {
+    const project = loadConfig().projects.find((p) => p.id === projectId)
+    if (!project) return { ok: false, error: '项目不存在' }
+    return deleteProjectArchiveEntry(project.name, Number(reverseIndex) || 0, String(rawCheck || '')) ? { ok: true } : { ok: false, error: '该归档刚被修改，请刷新后重试' }
+  })
+  ipcMain.handle('archive:clear', (_e, { projectId }: { projectId: string }) => {
+    const project = loadConfig().projects.find((p) => p.id === projectId)
+    if (!project) return { ok: false, error: '项目不存在' }
+    clearProjectArchive(project.name)
+    return { ok: true }
   })
   ipcMain.handle('session:update', (_e, { id, patch }: { id: string; patch: any }) => {
     // 渲染层可控字段白名单：只透传会话元数据，防异常渲染层把任意字段注入会话状态
