@@ -396,7 +396,9 @@ export async function removeSession(id: string): Promise<void> {
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
   if (store.currentId === id) store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
-  pushNotice(`会话「${title}」已归档（智能总结后台生成中，可在项目树归档区恢复）`)
+  pushNotice(r.archived
+    ? `会话「${title}」已归档（智能总结后台生成中，可在项目树归档区恢复）`
+    : `会话「${title}」${r.note || '已移除'}`)
 }
 
 /** 恢复归档会话（ZCode resurrection）：回到活跃列表并切换过去，原对话完整保留 */

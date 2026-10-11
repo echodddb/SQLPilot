@@ -221,20 +221,22 @@ export function registerIpc(): void {
   // ZCode time_archived 式瞬时归档：打标记 + 本地抽取摘要（毫秒级）立即返回，
   // 消息保留（可恢复）；LLM 增强总结后台生成，完成后更新归档条目并广播刷新。
   // remove 参数保留兼容但不再删除——归档语义就是"收起可恢复"，彻底删除走归档区 ✕
-  ipcMain.handle('session:archive', (_e, { id }: { id: string; remove?: boolean }) => {
+  ipcMain.handle('session:archive', (_e, { id, remove }: { id: string; remove?: boolean }) => {
     try {
       const cfg = loadConfig()
       const sess = getSession(id)
       if (sess.running) {
         return { ok: false, error: '会话正在执行任务，请先停止（或等它结束）再归档' }
       }
-      if (!sess.messages.length) {
-        return { ok: false, error: '会话为空，无需归档' }
+      // 空会话 / 未绑定项目：没有可归档的内容——不报错拦截（否则用户"归档不了"），
+      // 按调用方意图处理（remove=从列表删除；否则重置），说明性 note 随行返回
+      const project0 = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
+      if (!sess.messages.length || !project0) {
+        if (remove) deleteSession(id)
+        else resetSession(id)
+        return { ok: true, archived: false, note: !sess.messages.length ? '会话为空，未生成归档' : '会话未绑定项目，内容未归档', instant: true }
       }
-      const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
-      if (!project) {
-        return { ok: false, error: '会话未绑定项目，无法归档' }
-      }
+      const project = project0!
       // 1) 瞬时完成：本地抽取摘要（纯同步毫秒级）+ 打标记 + 写归档背景
       const summary0 = summarizeDropped(undefined, sess.messages)
       const ts = new Date()
