@@ -67,7 +67,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in result.rows" :key="i">
+          <tr v-for="(row, i) in result.rows" :key="i" class="data-grid-row">
             <td class="rownum">{{ (page - 1) * pageSize + i + 1 }}</td>
             <td
               v-for="(cell, j) in row"
@@ -504,4 +504,11 @@ td.celledit { cursor: text; }
 .ce-btn { border: none; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 11px; padding: 0 3px; }
 .ce-btn:hover { color: var(--accent); }
 .ce-btn.ok { color: var(--green, #4caf7d); }
+
+/* 500 行数据网格的轻量虚拟化：离屏行跳过渲染与布局（contain-intrinsic-size 保持滚动条稳定），
+   渲染成本从 O(总行数) 降到 O(可视行数)，无需 JS 虚拟滚动组件 */
+.data-grid-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30px;
+}
 </style>

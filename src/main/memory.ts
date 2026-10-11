@@ -12,6 +12,8 @@ const MAX_ENTRY_CHARS = 500
 const MAX_GLOBAL_INJECT = 3000
 /** 单连接记忆注入上限 */
 const MAX_CONN_INJECT = 1200
+/** 单项目记忆注入上限：项目记忆承载任务背景（表约定/运维惯例），量级大于连接事实 */
+const MAX_PROJECT_INJECT = 2400
 
 export function memoryDir(): string {
   return path.join(app.getPath('userData'), 'memory')
@@ -78,7 +80,7 @@ export function readConnMemory(conn: string): string | undefined {
 }
 
 export function readProjectMemory(project: string): string | undefined {
-  return tail(fileOf({ kind: 'project', name: project }), MAX_CONN_INJECT)
+  return tail(fileOf({ kind: 'project', name: project }), MAX_PROJECT_INJECT)
 }
 
 // ---------- 会话归档：按项目一份，每条归档是"时间 · 会话标题 + 总结"小节 ----------

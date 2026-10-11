@@ -37,7 +37,16 @@
 import { reactive, ref } from 'vue'
 import { store } from '../store'
 
-const props = defineProps<{ server: any }>()
+interface SshServerLike {
+  id?: string
+  name?: string
+  host?: string
+  port?: number
+  user?: string
+  tag?: string
+  note?: string
+}
+const props = defineProps<{ server: SshServerLike | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void }>()
 
 const form = reactive({

@@ -19,11 +19,25 @@ function auditRunFile(subId: string): string {
   return path.join(runsDir(), `${safeRunId(subId)}.jsonl`)
 }
 
+/** 单个运行审计文件上限：超过后轮转为 .1（保留一代历史），防高频运行无限增长 */
+const MAX_RUN_FILE_BYTES = 10 * 1024 * 1024
+
+function rotateIfNeeded(file: string): void {
+  try {
+    const st = fs.statSync(file)
+    if (st.size < MAX_RUN_FILE_BYTES) return
+    try { fs.rmSync(file + '.1') } catch { /* 无旧档 */ }
+    fs.renameSync(file, file + '.1')
+  } catch { /* 文件不存在（首次写入）或其他失败：照常追加 */ }
+}
+
 /** 追加一行 JSONL 审计（失败静默——审计不能阻断任务） */
 export function logRunLine(subId: string, entry: Record<string, any>): void {
   try {
     fs.mkdirSync(runsDir(), { recursive: true })
-    fs.appendFileSync(auditRunFile(subId), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n', 'utf8')
+    const file = auditRunFile(subId)
+    rotateIfNeeded(file)
+    fs.appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n', 'utf8')
   } catch { /* 磁盘满/权限问题不阻断子代理 */ }
 }
 
