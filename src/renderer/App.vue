@@ -65,8 +65,8 @@
 
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
            SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
+        <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" @destroy="wbEverOpen = false; store.workbench = null" />
         <Taskbar />
-        <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" />
       </template>
       <ReportView v-else style="flex: 1; min-height: 0" />
     </div>

@@ -5,7 +5,8 @@
     <div class="wb-head">
       <span class="wb-title">终端<span v-if="terms.length" class="wb-count">（{{ terms.length }}）</span></span>
       <span style="flex:1"></span>
-      <button class="icon-btn" title="关闭面板" @click="$emit('close')">✕</button>
+      <button class="icon-btn" title="隐藏面板（shell 保留，任务栏可再打开）" @click="$emit('close')">−</button>
+      <button class="icon-btn" title="关闭全部终端并销毁面板（断开所有 SSH 会话）" @click="destroyPanel">✕</button>
     </div>
 
     <div class="wb-body">
@@ -70,7 +71,13 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { store, curSession } from '../store'
 
-defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'destroy'): void }>()
+
+/** 窗口 ✕：关闭全部终端（逐个断 shell + 移除任务栏任务）后销毁面板 */
+function destroyPanel(): void {
+  for (const t of [...terms.value]) closeTerm(t.id)
+  emit('destroy')
+}
 
 // ---------- 尺寸拖拽 ----------
 const panelH = ref(320)

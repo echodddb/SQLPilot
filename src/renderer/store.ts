@@ -565,6 +565,14 @@ export function minimizeTask(t: { kind: 'db' | 'server' }): void {
   }
 }
 
+/** 关闭整个数据库工作台（窗口 ✕）：移除全部数据库任务并销毁挂载 */
+export function closeDbWorkbench(): void {
+  store.tasks = store.tasks.filter((t) => t.kind !== 'db')
+  store.lastDbConn = null
+  store.dbOpen = false
+  if (store.view === 'db') store.view = 'chat'
+}
+
 /** 任务栏 ✕：关闭并销毁（数据库任务最后一个时销毁工作台；服务器任务关闭对应 shell） */
 export function closeTask(t: { id: string; kind: 'db' | 'server'; refId: string }): void {
   store.tasks = store.tasks.filter((x) => x.id !== t.id)

@@ -2,7 +2,7 @@
   <div class="dbw-wrap">
     <DbTree @open-table="openTable" @new-query="newQuery" @open-info="openInfo" />
     <div class="dbw-main">
-      <div class="dbw-tabs" v-if="tabs.length">
+      <div class="dbw-tabs">
         <div
           v-for="t in tabs"
           :key="t.key"
@@ -16,6 +16,8 @@
         </div>
         <span style="flex: 1"></span>
         <button class="mini-btn" title="新建查询窗口" @click="newQuery()">＋ 查询</button>
+        <button class="icon-btn" title="隐藏工作台（任务栏可再打开，窗口状态保留）" @click="store.view = 'chat'">−</button>
+        <button class="icon-btn" title="关闭工作台（销毁全部查询/表标签页）" @click="closeDbWorkbench()">✕</button>
       </div>
 
       <div class="dbw-body" v-if="cur">
@@ -56,7 +58,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { store } from '../store'
+import { store, closeDbWorkbench } from '../store'
 import DbTree from './db/DbTree.vue'
 import TableTab from './db/TableTab.vue'
 import QueryTab from './db/QueryTab.vue'
