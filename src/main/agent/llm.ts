@@ -80,6 +80,19 @@ async function readSse(res: any, abort: AbortController | undefined, onData: (js
         onData(json)
       }
     }
+    // 流结束：终结 decoder（多字节字符跨 chunk 时最后一段必须 flush），
+    // 并处理 buf 中无换行结尾的最后一帧（此前被静默丢弃）
+    buf += decoder.decode()
+    for (const line of buf.split('\n')) {
+      const t = line.trim()
+      if (!t.startsWith('data:')) continue
+      const payload = t.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      try {
+        onData(JSON.parse(payload))
+      } catch { /* 尾帧损坏不中断（与流中处理一致） */ }
+    }
+    buf = ''
   } catch (e: any) {
     try { await reader.cancel().catch(() => {}) } catch { /* 忽略 */ }
     if (stalled) throw new Error(`LLM 流空闲超时（${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s 无数据），已中断`)
@@ -268,9 +281,12 @@ function toAnthropicMessages(history: ChatMsg[], includeThinking: boolean): any[
 async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort, preview?: LlmCallOptions['preview']): Promise<LlmResponse> {
   const url = trimSlash(p.baseUrl) + '/v1/messages'
   const think = anthropicThinking(findVendor(p.vendor).thinkingStyle, effortOverride ?? p.effort)
+  // 输出上限：默认 16K（Claude 3+ 均支持）。此前硬编码 8192，长巡检报告会被静默截断；
+  // 思考模式下 max_tokens 必须覆盖 thinking 预算（Anthropic 约束：max_tokens > budget_tokens）
+  const MAX_OUTPUT_TOKENS = 16_384
   const body: any = {
     model: p.model,
-    max_tokens: 8192,
+    max_tokens: MAX_OUTPUT_TOKENS,
     system,
     messages: toAnthropicMessages(history, !!think),
     stream: true
@@ -280,7 +296,7 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
   }
   if (think) {
     body.thinking = think
-    body.max_tokens = 8192 + think.budget_tokens
+    body.max_tokens = MAX_OUTPUT_TOKENS + think.budget_tokens
   }
   if (preview) {
     const go = await preview(url, body)
@@ -308,6 +324,7 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
     let thinking = ''
     let thinkingSig = ''
     let usage: LlmUsage | undefined
+    let stopReason: string | undefined
     const toolBlocks = new Map<number, { id: string; name: string; args: string }>()
     await readSse(res, ctrl, (j: any) => {
       const t = j?.type
@@ -326,8 +343,10 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
             cacheWrite: Number(u.cache_creation_input_tokens ?? 0)
           }
         }
-      } else if (t === 'message_delta' && usage && j.usage?.output_tokens != null) {
-        usage.output = Number(j.usage.output_tokens)
+      } else if (t === 'message_delta') {
+        // stop_reason（end_turn/max_tokens/stop_sequence…）必须透传：截断时 agent 循环需要感知
+        if (j.delta?.stop_reason) stopReason = j.delta.stop_reason
+        if (usage && j.usage?.output_tokens != null) usage.output = Number(j.usage.output_tokens)
       } else if (t === 'content_block_start') {
         const b = j.content_block
         if (b?.type === 'tool_use') toolBlocks.set(j.index, { id: b.id, name: b.name, args: '' })
@@ -348,7 +367,7 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
       }
     })
 
-    return { content, toolCalls: [...toolBlocks.values()].filter((x) => x.name), thinking: thinking || undefined, thinkingSig: thinkingSig || undefined, usage }
+    return { content, toolCalls: [...toolBlocks.values()].filter((x) => x.name), stopReason, thinking: thinking || undefined, thinkingSig: thinkingSig || undefined, usage }
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onExternalAbort)

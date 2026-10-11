@@ -13,7 +13,7 @@
     "start": "electron .",
     "dev": "npm run build && electron .",
     "pack:exe": "npm run build && electron-builder --win nsis",
-    "test": "node test/unit-context.mjs && node test/unit-guard.mjs"
+    "test": "node test/unit-context.mjs && node test/unit-guard.mjs && node test/unit-csv.mjs"
   },
   "dependencies": {
     "extract-zip": "^2.0.1",

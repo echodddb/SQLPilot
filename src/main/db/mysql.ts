@@ -20,6 +20,15 @@ export class MySqlAdapter implements DbAdapter {
   kind: string
   private conn: mysql.Connection | null = null
   private connPromise: Promise<mysql.Connection> | null = null
+  /** 连接上的操作串行化：单连接上并发 query 会交错（obj:saveEdits 的 START
+   *  TRANSACTION 可被并发读取插入，破坏批量原子性）——与 Oracle 适配器对齐 */
+  private opChain: Promise<unknown> = Promise.resolve()
+
+  private runSerial<T>(fn: () => Promise<T>): Promise<T> {
+    const p = this.opChain.then(fn, fn)
+    this.opChain = p.catch(() => {})
+    return p
+  }
 
   constructor(
     private profile: ConnProfile,
@@ -157,18 +166,25 @@ export class MySqlAdapter implements DbAdapter {
   }
 
   async query(sql: string, maxRows: number, timeoutMs: number, binds?: any[]): Promise<QueryResult> {
+    // 串行执行：事务语义（BEGIN/UPDATE/COMMIT 批量编辑）不被同连接并发操作打散
+    return this.runSerial(() => this.queryOnce(sql, maxRows, timeoutMs, binds))
+  }
+
+  private async queryOnce(sql: string, maxRows: number, timeoutMs: number, binds?: any[]): Promise<QueryResult> {
     let c = await this.ensure()
     const started = Date.now()
     let res: [any[], any]
-    const qp = c.query({ sql, rowsAsArray: true, values: binds }) as Promise<[any[], any]>
-    // 超时后被放弃的查询若再报错，避免 unhandled rejection 拖垮主进程
-    qp.catch(() => {})
-    const timeoutErr = queryTimeoutError(timeoutMs)
-    try {
-      res = await Promise.race([
+    /** 单次尝试：query + 超时哨兵（重试路径也必须包，慢库上无限挂） */
+    const attempt = (): Promise<[any[], any]> => {
+      const qp = c.query({ sql, rowsAsArray: true, values: binds }) as Promise<[any[], any]>
+      qp.catch(() => {}) // 超时后被放弃的查询若再报错，避免 unhandled rejection
+      return Promise.race([
         qp,
-        new Promise<never>((_, rej) => setTimeout(() => rej(timeoutErr), timeoutMs))
+        new Promise<never>((_, rej) => setTimeout(() => rej(queryTimeoutError(timeoutMs)), timeoutMs))
       ])
+    }
+    try {
+      res = await attempt()
     } catch (e: any) {
       if ((e as any)?.code === 'SQLPILOT_QUERY_TIMEOUT') {
         await this.destroy()
@@ -182,7 +198,7 @@ export class MySqlAdapter implements DbAdapter {
         }
         await this.destroy()
         c = await this.ensure()
-        res = await c.query({ sql, rowsAsArray: true, values: binds }) as [any[], any]
+        res = await attempt()
       } else {
         throw e
       }

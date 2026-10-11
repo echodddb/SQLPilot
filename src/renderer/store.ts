@@ -174,6 +174,25 @@ export async function init(): Promise<void> {
   }
   store.currentId = list[list.length - 1].id
 
+  // ---------- 流式文本节流 ----------
+  // 每 token 直接 text += 会触发 mdLite 全量重跑（O(n²)，长回答卡 UI）。
+  // 缓冲 100ms 批量落地：渲染重算次数从"每 token 一次"降为 10 次/秒。
+  const textBuf = new Map<UiMsg, string>()
+  let textFlushTimer: ReturnType<typeof setTimeout> | null = null
+  function flushTextBuf(): void {
+    if (textFlushTimer) {
+      clearTimeout(textFlushTimer)
+      textFlushTimer = null
+    }
+    for (const [msg, buf] of textBuf) msg.text += buf
+    textBuf.clear()
+  }
+  function queueText(msg: UiMsg, chunk: string): void {
+    if (!chunk) return
+    textBuf.set(msg, (textBuf.get(msg) || '') + chunk)
+    if (!textFlushTimer) textFlushTimer = setTimeout(flushTextBuf, 100)
+  }
+
   window.sqlpilot.onAgentEvent((ev: any) => {
     const s = store.sessions[ev.sessionId]
     if (!s) return
@@ -184,14 +203,15 @@ export async function init(): Promise<void> {
         // 正文开始输出：此前所有思考过程自动折叠（手动展开过的不动）
         for (const m of s.msgs) if (m.role === 'reasoning' && !m.manualToggle) m.collapsed = true
       }
-      lastMsgOf(s)!.text += ev.text
+      queueText(lastMsgOf(s)!, ev.text)
     } else if (ev.type === 'reasoning') {
       const last = lastMsgOf(s)
       if (!last || last.role !== 'reasoning') {
         s.msgs.push({ id: ++msgSeq, role: 'reasoning', text: '', tools: [] })
       }
-      lastMsgOf(s)!.text += ev.text
+      queueText(lastMsgOf(s)!, ev.text)
     } else if (ev.type === 'tool-start') {
+      flushTextBuf() // 消息边界：缓冲落地后再挂卡片，保证顺序
       const last = lastMsgOf(s)
       const target =
         last && last.role === 'assistant'
@@ -265,6 +285,7 @@ export async function init(): Promise<void> {
         target.ctx = { est: ev.est, windowK: ev.windowK, usage: ev.usage || target.ctx?.usage }
       }
     } else if (ev.type === 'done') {
+      flushTextBuf() // 回合结束：最后一批缓冲必须落地
       s.running = false
       // 回合结束（含无正文的收尾）：折叠未手动展开过的思考过程
       for (const m of s.msgs) if (m.role === 'reasoning') {
@@ -273,6 +294,7 @@ export async function init(): Promise<void> {
       }
       if (ev.note) s.msgs.push({ id: ++msgSeq, role: 'error', text: ev.note, tools: [] })
     } else if (ev.type === 'error') {
+      flushTextBuf() // 出错也要先落地已收到的内容（半截回答保留）
       s.running = false
       for (const m of s.msgs) if (m.role === 'reasoning') {
         if (!m.manualToggle) m.collapsed = true
