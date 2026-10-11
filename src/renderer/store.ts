@@ -375,13 +375,9 @@ export async function createSessionInProject(projectId: string): Promise<void> {
   store.currentId = meta.id
 }
 
-/** 归档会话（总结对话到项目归档，该项目其他会话可读）并从列表移除。
- *  最后一个会话不删除，只归档清空（保证界面始终有当前会话） */
+/** 归档会话（ZCode 式标记移除，消息保留可在归档区恢复）并从列表移除。
+ *  归档的是最后一个会话时自动新建兜底会话，保证界面始终有当前会话 */
 export async function removeSession(id: string): Promise<void> {
-  if (Object.keys(store.sessions).length <= 1) {
-    await archiveAndClear()
-    return
-  }
   const title = store.sessions[id]?.meta.title || '会话'
   const pid = store.sessions[id]?.meta.projectId
   const projName = (store.cfg?.projects || []).find((p: any) => p.id === pid)?.name
@@ -395,7 +391,11 @@ export async function removeSession(id: string): Promise<void> {
   // 归档瞬时完成（消息保留在 sessions.json，可在项目树归档区 ↻ 恢复）：立即从活跃列表移除
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
-  if (store.currentId === id) store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
+  if (!store.sessionOrder.length) {
+    await createSession() // 最后一个会话被归档：自动新建兜底，界面不落空
+  } else if (store.currentId === id) {
+    store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
+  }
   pushNotice(r.archived
     ? `会话「${title}」已归档（智能总结后台生成中，可在项目树归档区恢复）`
     : `会话「${title}」${r.note || '已移除'}`)
@@ -414,18 +414,24 @@ export async function restoreArchivedSession(id: string): Promise<void> {
   store.currentId = id
 }
 
-/** 归档当前对话到项目并清空本会话（原"清空对话"，内容不再直接丢弃） */
+/** 归档当前对话并新开一个会话（原"清空对话"）：
+ *  瞬时归档模型下，"归档当前对话" = 当前会话标记归档（可在归档区恢复）+ 自动新建会话接替。
+ *  此前 remove=false 只清消息——主进程已标记归档而界面仍显示该会话，状态分裂且看似"归档没反应" */
 export async function archiveAndClear(): Promise<void> {
   const s = curSession()
   if (!s) return
-  if (s.msgs.length && !(await window.sqlpilot.uiConfirm('归档当前对话？', '内容将总结归档到项目后清空本会话，可重新开始。'))) return
-  const r = await window.sqlpilot.archiveSession(store.currentId, false)
+  if (s.msgs.length && !(await window.sqlpilot.uiConfirm('归档当前对话？', '对话将归档到项目（可在项目树归档区恢复），并为你新开一个会话。'))) return
+  const title = s.meta.title || '会话'
+  const id = store.currentId
+  const r = await window.sqlpilot.archiveSession(id, true)
   if (!r.ok) {
     await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
-  s.msgs = []
-  pushNotice(`${r.note}${r.preview ? `：${r.preview}…` : ''}`)
+  delete store.sessions[id]
+  store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
+  await createSession()
+  pushNotice(r.archived ? `对话「${title}」已归档（可在项目树归档区恢复），已新开会话` : (r.note || '已新开会话'))
 }
 
 /** 切换当前会话权限模式；返回是否真的切换（会话放开/完全放开的确认被取消时返回 false，下拉框据此回退显示） */
