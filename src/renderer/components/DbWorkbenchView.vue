@@ -90,6 +90,18 @@ function tabTitle(t: WbTab): string {
 }
 
 // ---------- 打开各类 tab ----------
+// 任务栏定位：点击数据库任务时激活该连接最近的 tab（查询/表/信息皆可），无则新开查询窗口
+watch(() => store.pendingDbConn, (cid) => {
+  if (!cid) return
+  store.pendingDbConn = null
+  const found = tabs.value.find((t) => t.connId === cid)
+  if (found) {
+    activeKey.value = found.key
+    return
+  }
+  if ((store.cfg?.connections || []).some((c: any) => c.id === cid)) newQuery(cid)
+})
+
 function newQuery(connId?: string) {
   const cid = connId || tabs.value.find((t) => t.kind === 'query')?.connId || (store.cfg?.connections || [])[0]?.id || ''
   if (!cid) {

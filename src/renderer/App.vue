@@ -46,7 +46,7 @@
           class="btn ghost"
           :class="{ 'term-active': store.view === 'db' }"
           title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；再点返回对话）"
-          @click="store.view = store.view === 'db' ? 'chat' : 'db'">
+          @click="onDbButton">
           数据库
         </button>
 
@@ -61,10 +61,11 @@
         <div v-show="store.view === 'chat'" class="chat-view-host">
           <ChatView />
         </div>
-      <DbWorkbenchView v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
+      <DbWorkbenchView v-if="store.dbOpen" v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
 
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
            SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
+        <Taskbar />
         <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" />
       </template>
       <ReportView v-else style="flex: 1; min-height: 0" />
@@ -101,10 +102,11 @@
 
 <script setup lang="ts">
 import { computed, provide, ref, watch } from 'vue'
-import { store, curSession, init, setSessionProvider, toPlain, createSessionInProject, bindSessionProject } from './store'
+import { store, curSession, init, setSessionProvider, toPlain, createSessionInProject, bindSessionProject, openDbTask } from './store'
 import Sidebar from './components/Sidebar.vue'
 import ModuleNav from './components/ModuleNav.vue'
 import ReportView from './components/ReportView.vue'
+import Taskbar from './components/Taskbar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsView from './components/SettingsView.vue'
 import DbWorkbenchView from './components/DbWorkbenchView.vue'
@@ -165,6 +167,28 @@ async function toggleTheme() {
   applyTheme(next)
   store.cfg.theme = next
   await window.sqlpilot.setConfig(toPlain(store.cfg))
+}
+
+/** 顶栏数据库按钮：已存在数据库任务则回到工作台；否则以第一个/最近连接生成任务入口 */
+function onDbButton() {
+  if (store.view === 'db') {
+    store.view = 'chat'
+    return
+  }
+  const dbTask = store.tasks.find((t) => t.kind === 'db')
+  if (dbTask) {
+    store.view = 'db'
+    store.lastDbConn = dbTask.refId
+    store.pendingDbConn = dbTask.refId
+    return
+  }
+  const conn = (store.cfg?.connections || []).find((c: any) => c.id === store.lastDbConn) || (store.cfg?.connections || [])[0]
+  if (conn) {
+    openDbTask(conn)
+    return
+  }
+  store.dbOpen = true
+  store.view = 'db'
 }
 
 async function onProviderChange(e: Event) {

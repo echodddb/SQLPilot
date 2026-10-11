@@ -90,6 +90,16 @@ export const store = reactive({
   drafts: {} as Record<string, string>,
   /** 底部工作台面板：SSH 终端（数据库相关窗口都在数据库工作台视图里） */
   workbench: null as 'terminal' | null,
+  /** 任务栏（Windows 式）：从连接/服务器打开的窗口入口；− 隐藏保留状态，✕ 关闭销毁 */
+  tasks: [] as { id: string; kind: 'db' | 'server'; refId: string; title: string; icon: string }[],
+  /** 数据库工作台是否挂载（✕ 掉最后一个数据库任务时销毁，释放 tab 状态） */
+  dbOpen: false,
+  /** 任务栏激活态：最近的数据库任务连接 / 当前终端服务器 */
+  lastDbConn: null as string | null,
+  activeTermServerId: null as string | null,
+  /** 打开任务时的工作台定位请求（DbWorkbenchView / WorkbenchPanel watch 消费后清空） */
+  pendingDbConn: null as string | null,
+  pendingKillTermServer: null as string | null,
   /** 侧栏服务器点击 → 终端面板打开该服务器的 shell（WorkbenchPanel 消费后清空） */
   pendingTermServer: null as any,
   /** 子代理完整过程查看弹窗（审计 JSONL 实时读取） */
@@ -505,6 +515,69 @@ export function openSubRun(runId: string, title: string): void {
 
 export function closeSubRun(): void {
   store.subRun = null
+}
+
+// ---------- 任务栏 ----------
+function upsertTask(kind: 'db' | 'server', refId: string, title: string, icon: string): void {
+  const id = kind + ':' + refId
+  if (!store.tasks.some((t) => t.id === id)) store.tasks.push({ id, kind, refId, title, icon })
+}
+
+/** 从连接打开数据库工作台任务：挂载工作台 + 切换视图 + 定位该连接 */
+export function openDbTask(conn: { id: string; name: string }): void {
+  upsertTask('db', conn.id, conn.name, '🗄')
+  store.lastDbConn = conn.id
+  store.dbOpen = true
+  store.view = 'db'
+  store.pendingDbConn = conn.id
+}
+
+/** 从服务器打开终端任务：确保终端面板打开并激活该服务器 shell */
+export function openServerTask(server: { id: string; name: string }): void {
+  upsertTask('server', server.id, server.name, '🖥')
+  store.activeTermServerId = server.id
+  const full = (store.cfg?.servers || []).find((s: any) => s.id === server.id)
+  if (full) store.pendingTermServer = full
+  store.workbench = 'terminal'
+}
+
+/** 任务栏主体点击：显示对应窗口 */
+export function activateTask(t: { kind: 'db' | 'server'; refId: string }): void {
+  if (t.kind === 'db') {
+    store.dbOpen = true
+    store.view = 'db'
+    store.lastDbConn = t.refId
+    store.pendingDbConn = t.refId
+  } else {
+    store.activeTermServerId = t.refId
+    const full = (store.cfg?.servers || []).find((s: any) => s.id === t.refId)
+    if (full) store.pendingTermServer = full
+    store.workbench = 'terminal'
+  }
+}
+
+/** 任务栏 −：隐藏窗口（状态保留：工作台 v-show / shell 常驻） */
+export function minimizeTask(t: { kind: 'db' | 'server' }): void {
+  if (t.kind === 'db') {
+    if (store.view === 'db') store.view = 'chat'
+  } else {
+    if (store.workbench) store.workbench = null
+  }
+}
+
+/** 任务栏 ✕：关闭并销毁（数据库任务最后一个时销毁工作台；服务器任务关闭对应 shell） */
+export function closeTask(t: { id: string; kind: 'db' | 'server'; refId: string }): void {
+  store.tasks = store.tasks.filter((x) => x.id !== t.id)
+  if (t.kind === 'db') {
+    store.lastDbConn = null
+    if (!store.tasks.some((x) => x.kind === 'db')) {
+      store.dbOpen = false
+      if (store.view === 'db') store.view = 'chat'
+    }
+  } else {
+    if (store.activeTermServerId === t.refId) store.activeTermServerId = null
+    store.pendingKillTermServer = t.refId // WorkbenchPanel 消费：关 shell + 移 tab
+  }
 }
 
 /** 全局浮窗提示（右下角 toast，4 秒自动消失）：

@@ -113,7 +113,7 @@
         <div class="conn-group-title">{{ g.label }}</div>
         <template v-for="c in g.items" :key="c.id">
           <!-- 对象浏览在数据库工作台；侧边栏只做连接管理，点行进入工作台 -->
-          <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击进入数据库工作台`" @click="store.view = 'db'">
+          <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击打开数据库工作台（任务栏生成入口）`" @click="openDbTask(c)">
             <span>🗄</span>
             <span class="name">{{ c.name }}</span>
             <span v-if="projName(c.projectId)" class="sub" style="background: var(--bg-card-hover); color: var(--text-dim)" :title="'已关联项目：' + projName(c.projectId)">{{ projName(c.projectId) }}</span>
@@ -134,7 +134,7 @@
       <div v-if="!store.cfg.servers?.length" class="side-empty">
         还没有服务器。<br />点击右上角 <b>＋</b> 添加（SSH 密码认证，<br />密码 DPAPI 加密存储），项目里可按需引用。
       </div>
-      <div v-for="s in store.cfg.servers" :key="s.id" class="conn-item" :title="`${s.user}@${s.host}:${s.port}\n点击打开 SSH 终端面板`" @click="openTerm(s)">
+      <div v-for="s in store.cfg.servers" :key="s.id" class="conn-item" :title="`${s.user}@${s.host}:${s.port}\n点击打开 SSH 终端（任务栏生成入口）`" @click="openServerTask(s)">
         <span>🖥</span>
         <span class="name">{{ s.name }}</span>
         <span v-if="s.tag" class="sub" :class="{ rw: s.tag === '生产' }">{{ s.tag }}</span>
@@ -184,7 +184,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
-import { store, curSession, removeSession, restoreArchivedSession, createSessionInProject, TYPE_LABELS } from '../store'
+import { store, curSession, removeSession, restoreArchivedSession, createSessionInProject, openDbTask, openServerTask, TYPE_LABELS } from '../store'
 
 const openConnModal = inject<(c?: any) => void>('openConnModal')!
 const openProjectModal = inject<() => void>('openProjectModal')!

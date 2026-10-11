@@ -20,7 +20,7 @@
       <div class="wb-hsplit" @mousedown="startHDrag"></div>
       <div class="wb-main">
         <div class="term-tabs" v-if="terms.length">
-          <div v-for="t in terms" :key="t.id" class="term-tab" :class="{ active: t.id === activeId }" @click="activeId = t.id">
+          <div v-for="t in terms" :key="t.id" class="term-tab" :class="{ active: t.id === activeId }" @click="activateTerm(t)">
             {{ t.name }}
             <button class="icon-btn" style="padding:0 3px; font-size:11px" @click.stop="closeTerm(t.id)">✕</button>
           </div>
@@ -139,6 +139,11 @@ const activeId = ref('')
 const paneEls = new Map<string, HTMLElement>()
 const activeTerm = computed(() => terms.value.find((t) => t.id === activeId.value))
 
+function activateTerm(t: TermTab): void {
+  activeId.value = t.id
+  store.activeTermServerId = t.serverId
+}
+
 function setPaneRef(id: string) {
   return (el: any) => {
     if (el) paneEls.set(id, el as HTMLElement)
@@ -146,6 +151,10 @@ function setPaneRef(id: string) {
 }
 
 async function openTerm(s: any) {
+  // 任务栏入口：面板内开终端（含侧栏/任务栏点击）同步生成任务
+  const taskId = 'server:' + s.id
+  if (!store.tasks.some((t) => t.id === taskId)) store.tasks.push({ id: taskId, kind: 'server', refId: s.id, title: s.name, icon: '🖥' })
+  store.activeTermServerId = s.id
   const existing = terms.value.find((t) => t.serverId === s.id)
   if (existing) {
     activeId.value = existing.id
@@ -189,7 +198,21 @@ function closeTerm(id: string) {
   terms.value = terms.value.filter((x) => x.id !== id)
   paneEls.delete(id)
   if (activeId.value === id) activeId.value = terms.value[terms.value.length - 1]?.id || ''
+  // 任务栏同步：终端 tab 关闭 → 移除对应任务入口
+  store.tasks = store.tasks.filter((x) => x.id !== 'server:' + t.serverId)
+  if (store.activeTermServerId === t.serverId) {
+    const next = terms.value[terms.value.length - 1]
+    store.activeTermServerId = next ? next.serverId : null
+  }
 }
+
+// 任务栏 ✕：关闭指定服务器的终端（面板常驻，只销毁对应 shell 与任务）
+watch(() => store.pendingKillTermServer, (sid) => {
+  if (!sid) return
+  store.pendingKillTermServer = null
+  const t = terms.value.find((x) => x.serverId === sid)
+  if (t) closeTerm(t.id)
+})
 
 // 侧栏服务器区点击：打开终端面板并直达该服务器的 shell（消费后清空，防重复打开）。
 // immediate 覆盖"先设 pending、面板首次挂载"的顺序——否则 watch 注册前的事件丢失；
