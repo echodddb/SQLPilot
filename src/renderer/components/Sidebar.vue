@@ -95,12 +95,15 @@
       </div>
     </div>
 
-    <div class="side-head" style="margin-top: 4px">
-      <span>数据库连接</span>
-      <button class="icon-btn" title="新增连接" @click="openConnModal()">＋</button>
+    <!-- 底部组：连接/服务器（默认折叠）+ 资源监控，整体贴侧栏底部；
+         中间剩余空间全部归项目树（会话列表） -->
+    <div class="side-bottom">
+    <div class="side-head side-fold" title="展开/收起连接列表" @click="toggleSection('conns')">
+      <span><span class="chev">{{ openSections.has('conns') ? '▾' : '▸' }}</span> 数据库连接</span>
+      <button class="icon-btn" title="新增连接" @click.stop="openConnModal()">＋</button>
     </div>
 
-    <div class="conn-list" style="flex: 0 1 auto; max-height: 200px;">
+    <div v-if="openSections.has('conns')" class="conn-list" style="flex: 0 1 auto; max-height: 200px;">
       <div v-if="!groups.length" class="side-empty">
         还没有数据库连接。<br />点击本组标题行的 <b>＋</b> 添加：<br />
         Oracle 11g / 19c、OceanBase（MySQL 租户）、MySQL 均已支持。连接可按需关联到项目，不关联则全局可用。
@@ -122,12 +125,12 @@
       </template>
     </div>
 
-    <div class="side-head" style="margin-top: 4px">
-      <span>服务器</span>
-      <button class="icon-btn" title="添加 SSH 服务器（全局注册，项目按需引用）" @click="openServerModal()">＋</button>
+    <div class="side-head side-fold" style="margin-top: 4px" title="展开/收起服务器列表" @click="toggleSection('servers')">
+      <span><span class="chev">{{ openSections.has('servers') ? '▾' : '▸' }}</span> 服务器</span>
+      <button class="icon-btn" title="添加 SSH 服务器（全局注册，项目按需引用）" @click.stop="openServerModal()">＋</button>
     </div>
 
-    <div class="conn-list" style="flex: 0 1 auto; max-height: 160px;">
+    <div v-if="openSections.has('servers')" class="conn-list" style="flex: 0 1 auto; max-height: 160px;">
       <div v-if="!store.cfg.servers?.length" class="side-empty">
         还没有服务器。<br />点击右上角 <b>＋</b> 添加（SSH 密码认证，<br />密码 DPAPI 加密存储），项目里可按需引用。
       </div>
@@ -174,6 +177,7 @@
         <span class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
         <button class="rf-toggle" :title="resOpen ? '收起资源监控' : '展开资源监控'" @click="resOpen = !resOpen">{{ resOpen ? '−' : '▤' }}</button>
       </div>
+    </div>
     </div>
   </div>
 </template>
@@ -337,6 +341,19 @@ function toggleGroup(key: string) {
     visibleSessions[key] = SESSION_PAGE // 收起重置分页（ZCode 规则：再次展开从默认 5 条开始）
   }
   localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]))
+}
+
+// ---------- 低频配置区折叠（连接/服务器：默认收起贴底，点击标题展开，localStorage 记忆） ----------
+const SECTION_KEY = 'sqlpilot.sideSections.open'
+const openSections = reactive(new Set<string>())
+try {
+  const saved = JSON.parse(localStorage.getItem(SECTION_KEY) || '[]')
+  if (Array.isArray(saved)) for (const k of saved) openSections.add(String(k))
+} catch { /* 损坏时忽略：默认全收起 */ }
+function toggleSection(key: string): void {
+  if (openSections.has(key)) openSections.delete(key)
+  else openSections.add(key)
+  localStorage.setItem(SECTION_KEY, JSON.stringify([...openSections]))
 }
 
 // ---------- 会话分页（ZCode：每项目首屏 5 条，显示更多 +5，不提供"收起显示"） ----------
@@ -558,7 +575,8 @@ async function removeServer(s: any) {
 .foot-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
 
 /* ---- 底部资源迷你监控 ---- */
-.res-foot { border-top: 1px solid var(--border); padding: 8px 12px 6px; font-size: 11px; color: var(--text-faint); flex-shrink: 0; margin-top: auto; /* 恒贴侧栏底部：吸收上方全部剩余空间（收起/展开都不悬浮） */ }
+.side-bottom { margin-top: auto; display: flex; flex-direction: column; flex-shrink: 0; }
+.res-foot { border-top: 1px solid var(--border); padding: 8px 12px 6px; font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
 .rf-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
 .rf-label { width: 26px; font-size: 10.5px; letter-spacing: 1px; color: var(--text-faint); flex-shrink: 0; }
 .rf-spark { flex: 1; height: 20px; min-width: 0; }
@@ -576,6 +594,12 @@ async function removeServer(s: any) {
   border-radius: 6px; width: 22px; height: 20px; cursor: pointer; font-size: 12px; line-height: 1;
 }
 .rf-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* 折叠区标题（连接/服务器）：可点击整行切换 */
+.side-fold { cursor: pointer; user-select: none; }
+.side-fold:hover { color: var(--text); }
+.side-fold .chev { color: var(--text-faint); font-size: 10px; margin-right: 4px; }
+.side-fold span:first-child { display: flex; align-items: center; }
 
 /* ---- 项目树（ZCode workspace→task 式） ---- */
 .proj-row {
