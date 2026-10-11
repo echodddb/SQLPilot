@@ -87,6 +87,12 @@
     />
   </div>
   <div v-else class="empty-state"><div class="big">◆</div>加载中…</div>
+  <!-- UI 操作反馈浮窗（归档/模式切换等；4 秒自动消失，不进会话消息流） -->
+  <div class="toast-stack">
+    <transition-group name="toast">
+      <div v-for="t in store.toasts" :key="t.id" class="ui-toast">{{ t.text }}</div>
+    </transition-group>
+  </div>
   <!-- 归档进行中的前台提示（阶段事件驱动，done/error 自动消失） -->
   <div v-if="store.archiveProgress" class="archive-toast">
     <span class="spinner"></span>{{ store.archiveProgress.note }}
@@ -215,6 +221,31 @@ init().then(() => {
 </script>
 
 <style scoped>
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 320;
+  pointer-events: none;
+  max-width: 380px;
+}
+.ui-toast {
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.toast-enter-active, .toast-leave-active { transition: all 0.25s ease; }
+.toast-enter-from { opacity: 0; transform: translateX(14px); }
+.toast-leave-to { opacity: 0; transform: translateY(6px); }
 .archive-toast {
   position: fixed;
   bottom: 26px;

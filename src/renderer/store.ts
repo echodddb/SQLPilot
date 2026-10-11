@@ -82,6 +82,8 @@ export const store = reactive({
   previewQueue: [] as { requestId: string; sessionId?: string; url: string; body: any }[],
   /** 归档进行中的前台提示（阶段事件驱动；done/error 时清除） */
   archiveProgress: null as { sessionId: string; stage: string; note: string } | null,
+  /** 全局浮窗提示（UI 操作反馈：归档/模式切换等；不进会话消息流，数秒自动消失） */
+  toasts: [] as { id: number; text: string }[],
   secretsAvailable: false,
   // 侧边栏 schema 树状态: connId -> { expanded, schemas?, loading, tables, opened }
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
@@ -505,10 +507,17 @@ export function closeSubRun(): void {
   store.subRun = null
 }
 
-/** 在当前会话里追加一条系统提示（功能开关提醒等，不进入真实对话历史） */
+/** 全局浮窗提示（右下角 toast，4 秒自动消失）：
+ *  此前以 error 消息塞进当前会话——归档空会话等操作反馈会在对话流顶部弹红条，
+ *  语义误导（不是错误）且污染会话视图；操作反馈一律走浮窗 */
+let toastSeq = 0
 export function pushNotice(text: string): void {
-  const s = store.sessions[store.currentId]
-  if (s) s.msgs.push({ id: ++msgSeq, role: 'error', text, tools: [] })
+  const t = { id: ++toastSeq, text }
+  store.toasts.push(t)
+  if (store.toasts.length > 4) store.toasts.splice(0, store.toasts.length - 4)
+  setTimeout(() => {
+    store.toasts = store.toasts.filter((x) => x.id !== t.id)
+  }, 4_000)
 }
 
 export const MODES = [
