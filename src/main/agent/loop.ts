@@ -10,7 +10,7 @@ import { appendAudit } from '../audit'
 import { listSkills } from '../skills'
 import { loadConfig, projectServers, sessionConnections } from '../config'
 import { writeFileAtomic } from '../atomic'
-import { stopSubtasksOfSession } from './subtask-registry'
+import { listSubagentTasks, stopSubtasksOfSession } from './subtask-registry'
 import { modelContextK } from './catalog'
 import { metaGet, metaKeys, metaSet } from '../meta'
 import { getAdapter } from '../db/manager'
@@ -233,6 +233,9 @@ export function newSession(): SessionMeta {
 }
 
 export function deleteSession(id: string): void {
+  // 先中止主回合再删：否则会话已从列表消失、UI 无停止入口，但 agent 仍在执行
+  // db_write/run_command 等工具，形成不可见、不可控的写任务
+  cancelSession(id)
   // 后台子代理不随会话删除而继续：删除即级联中止，防写权限任务脱离归属继续跑
   stopSubtasksOfSession(id)
   sessions.delete(id)
@@ -288,6 +291,9 @@ const MAX_ITERATIONS = 24
 
 /** 同批 agent_spawn 的并发上限：DB 侧防爆 + 避免确认弹窗风暴 */
 const MAX_CONCURRENT_SUBAGENTS = 3
+/** 全局/每会话的后台子代理上限：run_in_background 立即返回，不设总量会随轮次无限累积 */
+const MAX_RUNNING_SUBAGENTS = 12
+const MAX_BACKGROUND_PER_SESSION = 5
 
 /** 该 toolCall 是否已有对应的 tool 消息（悬空修复与扇出去重共用） */
 function answered(messages: ChatMsg[], toolCallId: string): boolean {
@@ -738,6 +744,17 @@ export async function runTurn(
       const project = sess.projectId ? cfg.projects.find((p) => p.id === sess.projectId) : undefined
       const skills = listSkills().filter((s) => cfg.skillsEnabled[s.id] !== false)
       const system = buildSystemPrompt(sessionConnections(cfg, project), sess.mode, project, skills, cfg.maskPromptDetails !== false, facts, projectServers(cfg, project))
+      // 每轮都按预算重新裁剪：一次回合内 24 次迭代会持续追加 assistant/tool 结果，
+      // 只在回合开始裁一次会让长巡检任务中途超窗、下一请求直接被 API 拒绝
+      const trN = trimHistory(sess.messages, msgBudget)
+      if (trN.dropped.length) sess.contextSummary = summarizeDropped(sess.contextSummary, trN.dropped)
+      if (trN.kept !== sess.messages) sess.messages = trN.kept
+      facts.summary = sess.contextSummary
+      // 已停止（工具执行期间点了停止）：不要再发起新的 LLM 请求
+      if (sess.cancelRequested) {
+        deps.emit({ type: 'done', sessionId })
+        return
+      }
       const est = estimateContextTokens(system, sess.messages)
       // 先发估算（请求前徽标即可更新），响应带回真实计量后再补发一次
       deps.emit({ type: 'context', sessionId, est, windowK, usage: sess.lastUsage })
@@ -817,7 +834,7 @@ export async function runTurn(
       // 其余工具已在上面的串行循环执行完，保证写操作的顺序性
       const spawns = res.toolCalls.filter((tc) => tc.name === 'agent_spawn' && !answered(sess.messages, tc.id))
       if (spawns.length && !sess.cancelRequested) {
-        const buildSystem = (mode: PermissionMode) => buildSystemPrompt(cfg2.connections, mode, project2, skills2, mask2, facts, projectServers(cfg2, project2))
+        const buildSystem = (mode: PermissionMode) => buildSystemPrompt(sessionConnections(cfg2, project2), mode, project2, skills2, mask2, facts, projectServers(cfg2, project2))
         const spawnOne = async (tc: { id: string; args: string }): Promise<void> => {
           deps.emit({ type: 'tool-start', sessionId, tool: 'agent_spawn', args: tc.args, toolCallId: tc.id })
           let r: { ok: boolean; result: string }
@@ -835,6 +852,13 @@ export async function runTurn(
               r = { ok: false, result: JSON.stringify({ error: `未知子代理类型 "${a.agent_type}"，可用：${available}` }) }
             } else if (!prompt) {
               r = { ok: false, result: JSON.stringify({ error: 'prompt 不能为空：任务书必须自包含（目标、连接名、期望输出）' }) }
+            } else if (listSubagentTasks().filter((t) => t.status === 'running').length >= MAX_RUNNING_SUBAGENTS) {
+              r = { ok: false, result: JSON.stringify({ error: `并行子代理已达上限（${MAX_RUNNING_SUBAGENTS}），请先用 task_output 收割或 task_stop 停止部分任务` }) }
+            } else if (
+              a.run_in_background === true &&
+              listSubagentTasks().filter((t) => t.status === 'running' && t.sessionId === sessionId).length >= MAX_BACKGROUND_PER_SESSION
+            ) {
+              r = { ok: false, result: JSON.stringify({ error: `本会话后台子代理已达上限（${MAX_BACKGROUND_PER_SESSION} 个），请先收割` }) }
             } else {
               r = await launchSubagent({
                 sessionId,

@@ -105,7 +105,7 @@ watch(() => store.pendingDbConn, (cid) => {
     return
   }
   if ((store.cfg?.connections || []).some((c: any) => c.id === cid)) newQuery(cid)
-})
+}, { immediate: true })
 
 function newQuery(connId?: string) {
   const cid = connId || tabs.value.find((t) => t.kind === 'query')?.connId || (store.cfg?.connections || [])[0]?.id || ''

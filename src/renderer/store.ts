@@ -167,12 +167,20 @@ function historyToUi(history: any[]): UiMsg[] {
 }
 
 export async function init(): Promise<void> {
-  store.cfg = await window.sqlpilot.getConfig()
-  const info = await window.sqlpilot.appInfo()
-  store.secretsAvailable = info.secretsAvailable
+  try {
+    store.cfg = await window.sqlpilot.getConfig()
+    const info = await window.sqlpilot.appInfo()
+    store.secretsAvailable = info.secretsAvailable
+  } catch (e: any) {
+    // 初始化失败不能停在"加载中…"：给出错误并放行根节点渲染
+    store.ready = true
+    await window.sqlpilot.uiAlert(`初始化失败：${e?.message || e}`)
+    return
+  }
 
   // 恢复会话列表与各会话历史
-  const list = await window.sqlpilot.listSessions()
+  let list: any[] = []
+  try { list = await window.sqlpilot.listSessions() } catch { /* 列表读取失败时按空处理 */ }
   if (!list.length) {
     const s = await window.sqlpilot.newSession()
     list.push(s)
@@ -401,11 +409,13 @@ export async function removeSession(id: string): Promise<void> {
     return
   }
   // 归档瞬时完成（消息保留在 sessions.json，可在项目树归档区 ↻ 恢复）：立即从活跃列表移除
+  // 最后一个会话要先建新的再删：否则 curSession() 短暂为空，App 会卸载整棵 layout，
+  // 连带关掉数据库查询会话（未提交事务回滚）与 SSH 终端
+  const wasLast = store.sessionOrder.length === 1
+  if (wasLast) await createSession()
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
-  if (!store.sessionOrder.length) {
-    await createSession() // 最后一个会话被归档：自动新建兜底，界面不落空
-  } else if (store.currentId === id) {
+  if (!wasLast && store.currentId === id) {
     store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
   }
   pushNotice(r.archived

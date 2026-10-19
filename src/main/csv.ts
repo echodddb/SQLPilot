@@ -11,10 +11,12 @@ export function csvCell(v: any): string {
   let s: string
   if (v === null || v === undefined) s = ''
   else if (v instanceof Date) s = v.toISOString().replace('T', ' ').slice(0, 19)
+  else if (Buffer.isBuffer(v)) s = `[binary ${v.length} bytes]`
   else if (typeof v === 'object') s = JSON.stringify(v)
   else s = String(v)
   if (/^[=+@\t\r]/.test(s)) s = "'" + s
-  else if (/^-/.test(s) && !/^-?[\d.,()eE+\s%]+$/.test(s)) s = "'" + s
+  // "-" 开头：只放行严格数字样式（负数/百分比/千分位金额），其余（-2+3 等）一律加前缀
+  else if (/^-/.test(s) && !/^(?:-\d+(?:\.\d+)?%?|-\d{1,3}(?:,\d{3})+(?:\.\d+)?)$/.test(s)) s = "'" + s
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

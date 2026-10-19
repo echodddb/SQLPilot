@@ -2,13 +2,17 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Vue reactive Proxy 无法通过 Electron IPC 结构化克隆（"An object could not be cloned"），
 // 所有跨进程对象参数先深转换为纯对象
-const deepPlain = (v: any): any => {
-  if (v === null || typeof v !== 'object') return v
-  if (Array.isArray(v)) return v.map(deepPlain)
+const deepPlain = (v: any, seen: WeakSet<object> = new WeakSet()): any => {
+  if (v === null || typeof v !== 'object') return typeof v === 'bigint' ? v.toString() : v
+  // 循环引用会让递归无终止；Date/Map/Set 交给结构化克隆前先还原成可克隆形态
+  if (v instanceof Date) return new Date(v.getTime())
+  if (seen.has(v)) return undefined
+  seen.add(v)
+  if (Array.isArray(v)) return v.map((x) => deepPlain(x, seen))
   const o: any = {}
   for (const k of Object.keys(v)) {
     const val = (v as any)[k]
-    if (typeof val !== 'function') o[k] = deepPlain(val)
+    if (typeof val !== 'function') o[k] = deepPlain(val, seen)
   }
   return o
 }
@@ -45,7 +49,8 @@ const api = {
   unarchiveSession: (id: string) => ipcRenderer.invoke('session:unarchive', { id }),
   getProjectArchive: (projectId: string) => ipcRenderer.invoke('archive:get', { projectId }),
   listArchive: (projectId: string) => ipcRenderer.invoke('archive:list', { projectId }),
-  deleteArchiveEntry: (projectId: string, reverseIndex: number, rawCheck: string) => ipcRenderer.invoke('archive:deleteEntry', { projectId, reverseIndex, rawCheck }),
+  deleteArchiveEntry: (projectId: string, opts: { sessionId?: string | null; reverseIndex?: number; rawCheck?: string; ts?: string; title?: string }) =>
+    ipcRenderer.invoke('archive:deleteEntry', { projectId, ...opts }),
   clearArchive: (projectId: string) => ipcRenderer.invoke('archive:clear', { projectId }),
   onArchiveProgress: (cb: (p: any) => void) => {
     const l = (_e: any, p: any) => cb(p)

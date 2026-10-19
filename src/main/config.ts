@@ -2,7 +2,7 @@ import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AppConfig, ConnProfile, ProjectConfig } from './types'
-import { setPassword, getPassword, secretsAvailable } from './secrets'
+import { setPassword, getPassword, deletePassword, secretsAvailable } from './secrets'
 import { writeFileAtomic } from './atomic'
 import { defaultMaskingConfig, normalizeMaskingConfig } from './masking'
 
@@ -37,11 +37,18 @@ export function loadConfig(): AppConfig {
   try {
     const raw = fs.readFileSync(configPath(), 'utf8')
     cfg = { ...DEFAULT, ...JSON.parse(raw) }
-  } catch {
+  } catch (e: any) {
+    // 只有"文件不存在"才是首次启动。JSON 损坏/权限错误一律先把原文件改名保留，
+    // 否则用户看到连接全空、随手保存一次就把原配置永久覆盖。
+    if (e?.code !== 'ENOENT') {
+      try { fs.renameSync(configPath(), `${configPath()}.corrupt-${Date.now()}`) } catch { /* 文件不可读也无从保留 */ }
+    }
     cfg = { ...DEFAULT }
   }
   if (!Array.isArray(cfg.projects)) cfg.projects = []
   if (!Array.isArray(cfg.servers)) cfg.servers = []
+  if (!Array.isArray(cfg.connections)) cfg.connections = []
+  if (!Array.isArray(cfg.providers)) cfg.providers = []
   if (!cfg.skillsEnabled || typeof cfg.skillsEnabled !== 'object') cfg.skillsEnabled = {}
   cfg.masking = normalizeMaskingConfig(cfg.masking)
   // 一次性迁移：旧版服务器内联在项目里 → 折叠进全局注册表，项目改为 serverIds 引用。
@@ -87,14 +94,24 @@ export function projectServers(cfg: AppConfig, project: ProjectConfig | undefine
 export function saveConfig(cfg: AppConfig): void {
   cfg.masking = normalizeMaskingConfig(cfg.masking)
   const encrypted = secretsAvailable()
-  const onDisk: AppConfig = encrypted
-    ? { ...cfg, providers: cfg.providers.map((p) => ({ ...p, apiKey: '' })) }
-    : cfg
-  writeFileAtomic(configPath(), JSON.stringify(onDisk, null, 2))
-  cachedConfig = cfg
+  const hasKeys = cfg.providers.some((p) => !!p.apiKey)
+  // 不允许静默降级为明文：加密不可用时拒绝保存密钥（连接/项目等非密钥配置仍可保存）
+  if (!encrypted && hasKeys) {
+    throw new Error('系统加密不可用（DPAPI/safeStorage），为避免 API Key 明文写入磁盘，本次保存已取消。请检查系统凭据服务后重试。')
+  }
+  // 先写 secrets 再写 config：config 里 apiKey 恒为空，密钥只存在于 DPAPI 密文中
   if (encrypted) {
+    const keep = new Set(cfg.providers.map((p) => p.id))
+    for (const p of cachedConfig?.providers || []) {
+      if (!keep.has(p.id)) deletePassword(providerKey(p.id))
+    }
     for (const p of cfg.providers) {
+      // 用户把 Key 清空 → 同步删除旧密文，否则下次启动又被解密填回来
       if (p.apiKey) setPassword(providerKey(p.id), p.apiKey)
+      else if (getPassword(providerKey(p.id))) deletePassword(providerKey(p.id))
     }
   }
+  const onDisk: AppConfig = { ...cfg, providers: cfg.providers.map((p) => ({ ...p, apiKey: '' })) }
+  writeFileAtomic(configPath(), JSON.stringify(onDisk, null, 2))
+  cachedConfig = cfg
 }

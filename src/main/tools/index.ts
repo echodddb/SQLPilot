@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { shell } from 'electron'
 import type { ConnProfile, PermissionMode, SshServer } from '../types'
 import { resolveConnection, getAdapter } from '../db/manager'
-import { classifySql } from '../db/guard'
+import { classifySql, dialectOf } from '../db/guard'
 import { appendAudit } from '../audit'
 import type { AuditEntry } from '../audit'
 import { cached, metaDropConn, metaKeys } from '../meta'
@@ -26,6 +26,8 @@ export interface ApprovalRequest {
   sql: string
   kind: string
   risk: number
+  /** 会话放行的收敛范围：文件类为具体路径，缺省时按工具+类别+连接收敛 */
+  target?: string
   /** 发起者标注（如"子代理 explore"）：确认弹窗展示来源，主代理直接执行时为空 */
   origin?: string
 }
@@ -78,10 +80,14 @@ function auditBase(ctx: ToolContext, tool: string): { actor: string; sessionId?:
 function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
   if (!signal) return p
   if (signal.aborted) return Promise.resolve(undefined)
-  return Promise.race([
-    p,
-    new Promise<undefined>((r) => signal.addEventListener('abort', () => r(undefined), { once: true }))
-  ])
+  return new Promise<T | undefined>((resolve, reject) => {
+    const onAbort = () => resolve(undefined)
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(
+      (v) => { signal.removeEventListener('abort', onAbort); resolve(v) },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e) }
+    )
+  })
 }
 
 const MAX_ROWS = 500
@@ -369,8 +375,32 @@ export const TOOLS: ToolDef[] = [
   }
 ]
 
+/** 单行/单元格字节上限：大 CLOB/BLOB 不能撑爆模型上下文与主进程内存 */
+const CELL_MAX = 8_000
+
+function clipMiddle(s: string, max = 8_000): string {
+  if (s.length <= max) return s
+  const half = Math.floor((max - 24) / 2)
+  return `${s.slice(0, half)}\n…（中间省略 ${s.length - half * 2} 字符）…\n${s.slice(-half)}`
+}
+
+function fmtCell(v: any): any {
+  if (v === null || v === undefined) return null
+  if (v instanceof Date) return v.toISOString().replace('T', ' ').slice(0, 19)
+  if (Buffer.isBuffer(v)) {
+    return `[binary ${v.length} bytes] ${v.subarray(0, 64).toString('hex')}${v.length > 64 ? '…' : ''}`
+  }
+  if (typeof v === 'object') {
+    let s: string
+    try { s = JSON.stringify(v) } catch { s = String(v) }
+    return s.length > CELL_MAX ? `${s.slice(0, CELL_MAX)}…` : s
+  }
+  if (typeof v === 'string' && v.length > CELL_MAX) return `${v.slice(0, CELL_MAX)}…`
+  return v
+}
+
 function fmtQueryResult(r: { columns: string[]; rows: any[][]; rowCount: number; ms: number; truncated?: boolean }): any {
-  const preview = r.rows.slice(0, PREVIEW_ROWS).map((row) => row.map((v) => (v === null ? null : v instanceof Date ? v.toISOString().replace('T', ' ').slice(0, 19) : typeof v === 'object' ? JSON.stringify(v) : v)))
+  const preview = r.rows.slice(0, PREVIEW_ROWS).map((row) => row.map(fmtCell))
   return {
     columns: r.columns,
     rows: preview,
@@ -381,18 +411,66 @@ function fmtQueryResult(r: { columns: string[]; rows: any[][]; rowCount: number;
   }
 }
 
-/** 项目内路径安全解析：禁止越出项目根 */
-function safeProjectPath(root: string, rel: string): string {
-  const p = path.resolve(root, String(rel || '').trim())
-  if (p !== root && !p.startsWith(root + path.sep)) {
+/** 远程凭据类路径：读取需显式确认（防"读私钥→外链外传"链） */
+const SENSITIVE_REMOTE_PATH = /(^|[\\/])(\.ssh|\.aws|\.kube|\.gnupg|\.config\/gcloud)([\\/]|$)|id_rsa|id_ed25519|authorized_keys|known_hosts|\.pgpass|\.my\.cnf|(^|[\\/])\.env(\.|$)|(^|[\\/])(shadow|gshadow)$/i
+
+/** 灾难性命令硬阻断：即便完全放开模式也不自动执行——误触发代价不可逆，必须人工操作 */
+const CATASTROPHIC_CMD = /(?:^|[\s;&|])rm\s+-[a-z]*[rf][a-z]*\s+(?:\/|~|\$HOME)(?:\s|$)|\bmkfs(?:\.[a-z0-9]+)?\b|\bdd\s+if=[^\s]*\s+of=\/dev\/|\bformat\s+[a-z]:|\bdel\s+\/[a-z]*[sf][a-z]*\b[^\n]*[a-z]:\\|\bshutdown\s+[-\/]|\breg\s+delete\s+hklm/i
+
+/** Windows 保留设备名：CON/NUL/COM1 等经 API 归一化后可能落到意外设备 */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+
+/** 解析真实路径：目标不存在时解析其父目录（防止"目录是符号链接、文件尚不存在"的越界写） */
+function realpathLoose(p: string): string {
+  try {
+    return fs.realpathSync.native(p)
+  } catch {
+    try {
+      return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p))
+    } catch {
+      return p
+    }
+  }
+}
+
+/** 项目内路径安全解析：禁止越出项目根。
+ * 词法前缀之外还要做 realpath 归一（符号链接/junction 可把读写删带到项目外），
+ * 并拒绝 Windows 保留名、备用数据流（`file.txt:stream`）与尾随点/空格。 */
+function safeProjectPath(root: string, rel: string, allowRoot = false): string {
+  const raw = String(rel ?? '').trim()
+  if (!raw) {
+    if (allowRoot) return root
+    throw new Error('路径不能为空：不允许把项目根目录当作操作目标')
+  }
+  const p = path.resolve(root, raw)
+  const rootReal = realpathLoose(root)
+  const pReal = realpathLoose(p)
+  const relToRoot = path.relative(rootReal, pReal)
+  if (relToRoot.startsWith('..') || path.isAbsolute(relToRoot)) {
     throw new Error(`路径越界（只能访问项目目录内）: ${rel}`)
+  }
+  if (!allowRoot && relToRoot === '') {
+    throw new Error('不允许把项目根目录当作操作目标（请指定具体文件）')
+  }
+  const base = path.basename(p)
+  if (process.platform === 'win32') {
+    if (WINDOWS_RESERVED.test(base)) throw new Error(`Windows 保留设备名不可用: ${base}`)
+    if (base.includes(':')) throw new Error(`不允许备用数据流路径: ${base}`)
+    if (/[. ]$/.test(base)) throw new Error(`路径不能以点或空格结尾: ${base}`)
   }
   return p
 }
 
-/** 会话级放行键：工具+操作类别+目标 各自独立——批准"写文件"不等于批准"删文件"，批准 DML 不等于批准 DDL */
+/** 会话级放行键：工具+操作类别+目标 各自独立——批准"写文件"不等于批准"删文件"，
+ * 批准 DML 不等于批准 DDL。文件类必须带具体路径，避免"批准一次 = 放行任意路径"；
+ * origin 入键，子代理的批准不会扩散到父代理/兄弟子代理。 */
 function approvalKey(req: ApprovalRequest): string {
-  return `${req.tool}:${req.kind}:${req.conn}`
+  return `${req.tool}:${req.kind}:${req.conn}${req.target ? `:${req.target}` : ''}${req.origin ? `|${req.origin}` : ''}`
+}
+
+/** 读取当前权限模式（经函数返回，避免 TypeScript 用函数入口的收窄结果判定后续比较） */
+function currentMode(ctx: ToolContext): PermissionMode {
+  return ctx.mode
 }
 
 /** 写操作统一门控：计划/只读拒绝；确认/会话/放开按级别放行。
@@ -423,6 +501,13 @@ async function gateWrite(
     return JSON.stringify({ error: feedback })
   }
   if (outcome.decision === 'session') ctx.sessionApproved.add(approvalKey(req))
+  // 审批期间模式可能被降级（用户切只读 / 父会话降级）：执行前按当前模式再校验一次
+  const modeNow = currentMode(ctx)
+  if (modeNow === 'plan' || modeNow === 'readonly') {
+    const where = modeNow === 'plan' ? '计划模式' : '只读模式'
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: modeNow, approved: false, error: `审批期间切换为${where}，已拒绝`, ...sqlField })
+    return JSON.stringify({ error: `当前已切换为${where}，写操作被拒绝。` })
+  }
   // yolo：会话模式切换由审批应答方（ipc 层）完成，这里视同本次放行
   if (!skipSuccessAudit) {
     appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: true, ...sqlField })
@@ -434,7 +519,8 @@ function requestApprovalIfNeeded(ctx: ToolContext, req: ApprovalRequest): Promis
   // session 模式：同类写操作（同工具+同类别+同目标）首次确认后本会话放行；高危(risk3)每次都确认。yolo 全放行。
   const confirm = ctx.mode === 'yolo' ? false : ctx.mode === 'confirm' ? true : req.risk >= 3 ? true : !ctx.sessionApproved.has(approvalKey(req))
   if (!confirm) return Promise.resolve({ decision: 'approved' })
-  return ctx.requestApproval(req)
+  // 等待期间会话可能被停止/重置：不能让工具一直挂在确认弹窗上（最长 5 分钟）
+  return raceAbort(ctx.requestApproval(req), ctx.signal).then((o) => o ?? { decision: 'denied' as const, reason: '任务已停止' })
 }
 
 export async function executeTool(name: string, argsJson: string, ctx: ToolContext): Promise<{ ok: boolean; result: string }> {
@@ -443,6 +529,18 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     args = JSON.parse(argsJson || '{}')
   } catch {
     return { ok: false, result: JSON.stringify({ error: `工具参数不是合法 JSON: ${argsJson.slice(0, 200)}` }) }
+  }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return { ok: false, result: JSON.stringify({ error: '工具参数必须是 JSON 对象' }) }
+  }
+  // 未知工具先报未知，再进连接解析：否则会误报"找不到连接"
+  const def = TOOLS.find((t) => t.name === name)
+  if (!def) return { ok: false, result: JSON.stringify({ error: `未知工具: ${name}` }) }
+  // 必填参数校验：模型漏传时给出明确错误，避免 String(undefined) 拼出 "undefined" 去执行
+  for (const key of (def.parameters?.required || []) as string[]) {
+    if (args[key] === undefined || args[key] === null) {
+      return { ok: false, result: JSON.stringify({ error: `缺少必填参数 "${key}"（工具 ${name}）` }) }
+    }
   }
 
   // 工具侧统一审计入口：自动带发起者/会话/子代理运行 id/权限模式/工具名（格式见 audit.ts）
@@ -538,7 +636,8 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
           conn: ctx.project.name,
           sql: `${rel}\n\n（内容 ${content.length} 字符，预览）\n${content.slice(0, 300)}`,
           kind: 'file',
-          risk: 2
+          risk: 2,
+          target: rel
         }, ctx.project.name, `fs_write ${rel} (${content.length} 字符)`)
         if (gated) return { ok: false, result: gated }
         fs.mkdirSync(path.dirname(p), { recursive: true })
@@ -588,6 +687,10 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     if (name === 'run_command') {
       const command = String(args.command ?? '').trim()
       if (!command) return { ok: false, result: JSON.stringify({ error: '空命令' }) }
+      if (CATASTROPHIC_CMD.test(command)) {
+        audit({ kind: 'tool', conn: '本机', detail: '灾难性命令被硬阻断', error: command.slice(0, 300) })
+        return { ok: false, result: JSON.stringify({ error: '该命令被判定为灾难性操作（删除根目录/格式化/关机等），已阻断。请由用户手动执行，或改写成范围明确的命令。' }) }
+      }
       if (ctx.mode === 'plan' || ctx.mode === 'readonly') {
         return { ok: false, result: JSON.stringify({ error: '当前为计划/只读模式，系统命令被拒绝。' }) }
       }
@@ -633,8 +736,8 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
             aborted,
             exitCode: code,
             timedOut,
-            stdout: out.slice(0, 8000),
-            stderr: err.slice(0, 8000) || undefined,
+            stdout: clipMiddle(out),
+            stderr: err ? clipMiddle(err) : undefined,
             note: timedOut ? `命令超时（>${timeoutMs}ms）已终止` : undefined
           })
         })
@@ -651,14 +754,18 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         return { ok: false, result: JSON.stringify({ error: '当前会话未绑定项目，文件工具不可用。' }) }
       }
       const rel = String(args.path ?? '')
+      // 空串/`.`/`..` 由 safeProjectPath 拒绝；这里再兜一层，绝不把项目根当删除目标
       const p = safeProjectPath(ctx.project.rootPath, rel)
       const gated = await gateWrite(
         ctx,
-        { tool: 'fs_delete', conn: ctx.project.name, sql: rel, kind: 'file', risk: 2 },
+        { tool: 'fs_delete', conn: ctx.project.name, sql: rel, kind: 'file', risk: 2, target: rel },
         ctx.project.name,
         `fs_delete ${rel}`
       )
       if (gated) return { ok: false, result: gated }
+      // 先 lstat：符号链接/junction 本身不删，避免"删链接指向的真实目录"
+      const lst = fs.lstatSync(p)
+      if (lst.isSymbolicLink()) throw new Error(`不允许删除符号链接：${rel}（请先确认指向，必要时直接删目标）`)
       const stat = fs.statSync(p)
       fs.rmSync(p, { recursive: stat.isDirectory(), force: false })
       return { ok: true, result: JSON.stringify({ path: rel, deleted: stat.isDirectory() ? 'dir' : 'file' }) }
@@ -668,6 +775,16 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       const url = String(args.url ?? '')
       if (!/^https?:\/\//i.test(url)) {
         return { ok: false, result: JSON.stringify({ error: '仅支持 http/https 网址' }) }
+      }
+      // 只读/计划模式下打开外链需要确认：否则"读敏感文件 → 拼进 URL 打开"可无审批外传
+      if (ctx.mode === 'plan' || ctx.mode === 'readonly') {
+        const gated = await gateWrite(
+          ctx,
+          { tool: 'open_url', conn: '本机', sql: url, kind: 'net', risk: 2, target: url.slice(0, 200) },
+          '本机',
+          `open_url ${url.slice(0, 200)}`
+        )
+        if (gated) return { ok: false, result: gated }
       }
       await shell.openExternal(url)
       audit({ kind: 'tool', target: url.slice(0, 200), detail: `open_url ${url.slice(0, 200)}` })
@@ -700,6 +817,10 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       if (name === 'server_run') {
         const command = String(args.command ?? '').trim()
         if (!command) return { ok: false, result: JSON.stringify({ error: '空命令' }) }
+        if (CATASTROPHIC_CMD.test(command)) {
+          audit({ kind: 'tool', conn: server.name, detail: '灾难性远程命令被硬阻断', error: command.slice(0, 300) })
+          return { ok: false, result: JSON.stringify({ error: '该远程命令被判定为灾难性操作（删根/格式化/关机等），已阻断。请由用户手动执行。' }) }
+        }
         if (ctx.mode === 'plan' || ctx.mode === 'readonly') {
           return { ok: false, result: JSON.stringify({ error: '当前为计划/只读模式，远程命令被拒绝。' }) }
         }
@@ -716,7 +837,18 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       }
 
       if (name === 'server_read_file') {
-        const r = await raceAbort(ssh.readFile(server, String(args.path ?? '')), ctx.signal)
+        const p = String(args.path ?? '')
+        // 凭据类文件在只读模式也必须确认：否则"读私钥 → open_url 带出去"可全程无审批
+        if (SENSITIVE_REMOTE_PATH.test(p)) {
+          const gated = await gateWrite(
+            ctx,
+            { tool: 'server_read_file', conn: `${server.name} (${server.host})`, sql: p, kind: 'file', risk: 2, target: p },
+            server.name,
+            `server_read_file ${server.name}:${p}（敏感路径）`
+          )
+          if (gated) return { ok: false, result: gated }
+        }
+        const r = await raceAbort(ssh.readFile(server, p), ctx.signal)
         if (!r) return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，文件读取未完成' }) }
         audit({ kind: 'tool', conn: server.name, target: `${server.name}:${args.path}`, detail: `server_read_file ${args.path}` })
         return { ok: true, result: JSON.stringify(r) }
@@ -728,7 +860,16 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         // 路径进入 shell 前做 POSIX 单引号转义：双引号内 $(...)/反引号 仍会执行，
         // 而本工具在只读模式下无审批门控，必须完全字面化防注入
         const shq = `'${p.replace(/'/g, "'\\''")}'`
-        const r = await ssh.execCommand(server, `tail -n ${lines} ${shq}`, 60_000)
+        if (SENSITIVE_REMOTE_PATH.test(p)) {
+          const gated = await gateWrite(
+            ctx,
+            { tool: 'server_tail', conn: `${server.name} (${server.host})`, sql: p, kind: 'file', risk: 2, target: p },
+            server.name,
+            `server_tail ${server.name}:${p}（敏感路径）`
+          )
+          if (gated) return { ok: false, result: gated }
+        }
+        const r = await ssh.execCommand(server, `tail -n ${lines} ${shq}`, 60_000, undefined, ctx.signal)
         audit({ kind: 'tool', conn: server.name, target: `${server.name}:${p}`, detail: `server_tail ${p} -n ${lines}`, rows: lines })
         return { ok: r.exitCode === 0, result: JSON.stringify({ path: p, lines, content: r.stdout.slice(0, 20000) || r.stderr.slice(0, 2000) }) }
       }
@@ -741,12 +882,13 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         const content = String(args.content ?? '')
         const gated = await gateWrite(
           ctx,
-          { tool: 'server_write_file', conn: `${server.name} (${server.host})`, sql: `${p}\n\n（内容 ${content.length} 字符，预览）\n${content.slice(0, 300)}`, kind: 'file', risk: 2 },
+          { tool: 'server_write_file', conn: `${server.name} (${server.host})`, sql: `${p}\n\n（内容 ${content.length} 字符，预览）\n${content.slice(0, 300)}`, kind: 'file', risk: 2, target: p },
           server.name,
           `server_write_file ${server.name}:${p} (${content.length} 字符)`
         )
         if (gated) return { ok: false, result: gated }
-        const written = await ssh.writeFile(server, p, content)
+        const written = await raceAbort(ssh.writeFile(server, p, content), ctx.signal)
+        if (written === undefined) return { ok: false, result: JSON.stringify({ error: '任务已被用户中止：远程写入结果未知，请确认后再决定是否重试' }) }
         return { ok: true, result: JSON.stringify({ path: p, written }) }
       }
 
@@ -799,7 +941,7 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
 
     if (name === 'db_query') {
       const sql = String(args.sql ?? '').trim()
-      const v = classifySql(sql)
+      const v = classifySql(sql, dialectOf(profile.type))
       if (!v.ok) {
         audit({ kind: 'sql.read', conn: profile.name, detail: '只读通道拦截', sql, error: `拦截: ${v.reason || v.kind}` })
         return { ok: false, result: JSON.stringify({ error: `只读通道拦截该语句（${v.kind}）: ${v.reason || '仅允许 SELECT/EXPLAIN/SHOW 类语句'}。如确需执行写操作请使用 db_write 工具。` }) }
@@ -816,7 +958,12 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
 
     if (name === 'db_write') {
       const sql = String(args.sql ?? '').trim()
-      const v = classifySql(sql)
+      // 事务/会话控制语句不能走 db_write：MySQL 上 SET autocommit=0 会让后续写"报成功但从未提交"，
+      // USE/ALTER SESSION 还会污染共享连接的解析上下文
+      if (/^(set|use|begin|commit|rollback|start)\b/i.test(sql)) {
+        return { ok: false, result: JSON.stringify({ error: '事务/会话控制语句（SET/USE/BEGIN/COMMIT/ROLLBACK）不允许通过 db_write 执行；写操作由工具自动提交，Oracle 可用工作台的提交/回滚按钮。' }) }
+      }
+      const v = classifySql(sql, dialectOf(profile.type))
       if (v.ok) {
         return { ok: false, result: JSON.stringify({ error: '这是只读语句，请使用 db_query 工具执行' }) }
       }
@@ -826,17 +973,36 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       }
       const gated = await gateWrite(ctx, { tool: 'db_write', conn: profile.name, sql, kind: v.kind, risk: v.risk }, profile.name, sql, true)
       if (gated) return { ok: false, result: gated }
-      const r = await raceAbort(adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS), ctx.signal)
-      if (!r) {
-        audit({ kind: 'sql.write', conn: profile.name, detail: 'db_write 被用户中止（结果未知）', sql, error: '用户中止' })
-        return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，写操作执行结果未知：语句可能已生效、也可能未生效。如需确认请稍后只读查询核实，不要盲目重试。' }) }
+      const isOracleProtocol = profile.type === 'oracle' || profile.type === 'ob-oracle'
+      // 失败/中止必须把当前事务回滚掉：否则下一次任意 commit 会把这次"结果未知"的写一起提交
+      const rollbackQuietly = async () => {
+        if (!isOracleProtocol) return
+        try { await adapter.query('ROLLBACK', 1, 10_000) } catch { /* 连接可能已断开 */ }
       }
-      const committed = (await adapter.commit?.()) !== false
+      let r: any
+      try {
+        r = await raceAbort(adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS), ctx.signal)
+      } catch (e) {
+        await rollbackQuietly()
+        throw e
+      }
+      if (!r) {
+        await rollbackQuietly()
+        audit({ kind: 'sql.write', conn: profile.name, detail: 'db_write 被用户中止（已回滚）', sql, error: '用户中止' })
+        return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，本次写操作已回滚（ROLLBACK），未持久化。如需继续请重新执行。' }) }
+      }
+      let committed = true
+      try {
+        committed = (await adapter.commit?.()) !== false
+      } catch (e) {
+        await rollbackQuietly()
+        throw e
+      }
+      if (!committed) await rollbackQuietly()
       // agent 执行了 DDL：该连接的元数据缓存全部失效
       if (v.kind === 'ddl') metaDropConn(profile.id)
       audit({ kind: 'sql.write', conn: profile.name, detail: '执行完成', sql, rows: r.rowCount, ms: r.ms, approved: true, target: v.kind === 'ddl' ? '(DDL)' : undefined })
-      const isOracleProtocol = profile.type === 'oracle' || profile.type === 'ob-oracle'
-      return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: isOracleProtocol ? (committed ? '已提交(COMMIT)' : '连接已被重置，事务未提交（语句可能未生效）') : undefined }) }
+      return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: isOracleProtocol ? (committed ? '已提交(COMMIT)' : '连接已被重置，事务已回滚，语句未持久化') : undefined }) }
     }
 
     return { ok: false, result: JSON.stringify({ error: `未知工具: ${name}` }) }

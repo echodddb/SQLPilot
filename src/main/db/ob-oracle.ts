@@ -227,7 +227,7 @@ export class ObOracleAdapter implements DbAdapter {
         throw error
       }
       if (/closed|ECONN|PIPE|QUIT/.test(String(error?.code) + String(error?.message))) {
-        if (!classifySql(sql).ok) {
+        if (!classifySql(sql, 'oracle').ok) {
           await this.destroy()
           throw error
         }
@@ -260,7 +260,17 @@ export class ObOracleAdapter implements DbAdapter {
   }
 
   async commit(): Promise<boolean> {
-    await this.query('COMMIT', 1, 30_000)
-    return true
+    // 连接在串行链内取；已被重置时返回 false —— 不能走 query()，否则 ensure() 会新建
+    // 连接并在上面 COMMIT 一个不存在的事务，UI 却显示"已提交"
+    return this.runSerial(async () => {
+      const c = this.conn
+      if (!c) return false
+      try {
+        await c.query('COMMIT')
+        return true
+      } catch {
+        return false
+      }
+    })
   }
 }

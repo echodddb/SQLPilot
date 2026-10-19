@@ -425,12 +425,25 @@ function newSkill() {
 
 async function editSkill(s: any) {
   const r = await window.sqlpilot.readSkillFull(s.id)
-  skillEditor.value = { ...s, content: r.ok ? r.content : '' }
+  if (!r.ok) {
+    // 读取失败时不能打开空编辑器：用户保存会用空内容覆盖原技能
+    await window.sqlpilot.uiAlert(r.error || '读取技能内容失败，请重试')
+    return
+  }
+  skillEditor.value = { ...s, content: r.content }
 }
 
 async function toggleSkill(s: any, enabled: boolean) {
   s.enabled = enabled
-  await window.sqlpilot.toggleSkill(s.id, enabled)
+  const r = await window.sqlpilot.toggleSkill(s.id, enabled)
+  if (!r?.ok) {
+    s.enabled = !enabled
+    await window.sqlpilot.uiAlert(r?.error || '技能开关保存失败')
+    return
+  }
+  // 主进程已更新 skillsEnabled：同步渲染层快照，否则后续整包 setConfig
+  // 会把旧值写回，把刚关闭的技能重新启用
+  store.cfg = await window.sqlpilot.getConfig()
 }
 
 async function delSkill(s: any) {

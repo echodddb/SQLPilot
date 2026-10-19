@@ -1,6 +1,8 @@
 import { Client, type ClientChannel } from 'ssh2'
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
+import { app } from 'electron'
 import type { SshServer } from './types'
 import { getPassword } from './secrets'
 
@@ -14,6 +16,50 @@ interface PoolEntry {
 
 const pool = new Map<string, PoolEntry>()
 const shells = new Map<string, ClientChannel>()
+/** 主机密钥不匹配的详细说明：hostVerifier 只能返回布尔值，由 error 回调取出 */
+const hostKeyErrors = new Map<string, string>()
+
+/**
+ * 主机密钥校验（known_hosts / TOFU）：首次连接记录服务端公钥指纹，之后严格比对。
+ * 不做校验时 ssh2 接受任意服务端公钥——同网段攻击者可伪造 SSH 服务端拿到明文密码。
+ * 指纹格式与 OpenSSH known_hosts 一致（SHA256:base64）。
+ */
+function knownHostsPath(): string {
+  return path.join(app.getPath('userData'), 'known_hosts.json')
+}
+
+function loadKnownHosts(): Record<string, string> {
+  try {
+    const v = JSON.parse(fs.readFileSync(knownHostsPath(), 'utf8'))
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
+  } catch {
+    return {}
+  }
+}
+
+function hostKeyId(server: SshServer): string {
+  return `${server.host.toLowerCase()}:${server.port || 22}`
+}
+
+function fingerprint(key: Buffer): string {
+  return 'SHA256:' + crypto.createHash('sha256').update(key).digest('base64').replace(/=+$/, '')
+}
+
+/** 返回 true 表示通过；不匹配时记录原因并返回 false（握手失败） */
+function verifyHostKey(server: SshServer, key: Buffer): boolean {
+  const id = hostKeyId(server)
+  const fp = fingerprint(key)
+  const known = loadKnownHosts()
+  const rec = known[id]
+  if (!rec) {
+    known[id] = fp
+    try { fs.writeFileSync(knownHostsPath(), JSON.stringify(known, null, 2)) } catch { /* 仅影响下次校验 */ }
+    return true
+  }
+  if (rec === fp) return true
+  hostKeyErrors.set(id, `SSH 主机密钥与已知记录不一致：${id}\n已记录：${rec}\n本次：${fp}\n可能是中间人攻击，或服务器重装过。如确认服务器已重装，请删除 %APPDATA%/sqlpilot/known_hosts.json 中该条目后重连。`)
+  return false
+}
 
 function serverKeyPassword(serverId: string): string {
   return getPassword(`server:${serverId}`)
@@ -24,18 +70,32 @@ function getEntry(server: SshServer, passwordOverride?: string): PoolEntry {
   if (e) return e
   const client = new Client()
   const ready = new Promise<Client>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`SSH 连接超时：${server.host}:${server.port}`)), 15_000)
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      pool.delete(server.id)
+      try { client.end() } catch { /* 握手未完成，忽略 */ }
+      reject(new Error(`SSH 连接超时：${server.host}:${server.port}`))
+    }, 15_000)
     client
       .on('ready', () => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         resolve(client)
       })
       .on('error', (err: Error) => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         pool.delete(server.id)
-        reject(err)
+        const detail = hostKeyErrors.get(hostKeyId(server))
+        hostKeyErrors.delete(hostKeyId(server))
+        reject(detail ? new Error(detail) : err)
       })
       .on('close', () => {
+        clearTimeout(timer)
         pool.delete(server.id)
       })
       .connect({
@@ -44,7 +104,8 @@ function getEntry(server: SshServer, passwordOverride?: string): PoolEntry {
         username: server.user,
         password: passwordOverride ?? serverKeyPassword(server.id),
         readyTimeout: 15_000,
-        keepaliveInterval: 15_000
+        keepaliveInterval: 15_000,
+        hostVerifier: (key: Buffer) => verifyHostKey(server, key)
       })
   })
   e = { client, ready }
@@ -66,14 +127,41 @@ async function getClient(server: SshServer, passwordOverride?: string): Promise<
 export async function testServer(server: SshServer, passwordOverride?: string): Promise<string> {
   const c = await getClient(server, passwordOverride)
   return new Promise<string>((resolve, reject) => {
+    let done = false
+    const timer = setTimeout(() => {
+      if (done) return
+      done = true
+      reject(new Error(`SSH 命令超时：${server.host}`))
+    }, 15_000)
     c.exec('uname -a || ver', (err, stream) => {
-      if (err) return reject(err)
+      if (err) {
+        clearTimeout(timer)
+        return reject(err)
+      }
       let out = ''
-      stream.on('data', (d: Buffer) => { out += d.toString('utf8') })
-      stream.on('close', () => resolve(out.trim() || '连接成功'))
+      stream.on('data', (d: Buffer) => { out = (out + d.toString('utf8')).slice(-8_000) })
+      stream.on('error', (e: Error) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        reject(e)
+      })
+      stream.on('close', () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(out.trim() || '连接成功')
+      })
       stream.stderr.on('data', () => { /* 忽略 */ })
     })
   })
+}
+
+/** 头尾保留的截断：错误信息通常在末尾，不能只留开头 */
+function clipHeadTail(s: string, max = 8_000): string {
+  if (s.length <= max) return s
+  const half = Math.floor((max - 24) / 2)
+  return `${s.slice(0, half)}\n…（中间省略 ${s.length - half * 2} 字符）…\n${s.slice(-half)}`
 }
 
 export interface ExecResult {
@@ -112,7 +200,7 @@ export async function execCommand(server: SshServer, command: string, timeoutMs 
       stream.on('close', (code: number | null) => {
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
-        resolve({ exitCode: code, stdout: out.slice(0, 8000), stderr: er.slice(0, 8000), timedOut, aborted })
+        resolve({ exitCode: code, stdout: clipHeadTail(out), stderr: clipHeadTail(er), timedOut, aborted })
       })
     })
   })
@@ -122,8 +210,24 @@ export async function readFile(server: SshServer, remotePath: string, maxBytes =
   return withSftp(server, async (sftp) => {
     const stat: any = await new Promise((resolve, reject) => sftp.stat(remotePath, (e: Error | null, st: any) => (e ? reject(e) : resolve(st))))
     if (stat.size > maxBytes) throw new Error(`文件超过 ${Math.round(maxBytes / 1024)}KB，拒绝读取`)
-    const buf = await new Promise<Buffer>((resolve, reject) => sftp.readFile(remotePath, (e: Error | null, d: Buffer) => (e ? reject(e) : resolve(d))))
-    return { size: stat.size, content: buf.toString("utf8").slice(0, 20000) }
+    // 流式读取并在超限处立即停止：stat 与实际读取之间文件可能增长（日志正在写）
+    const chunks: Buffer[] = []
+    let total = 0
+    await new Promise<void>((resolve, reject) => {
+      const rs = sftp.createReadStream(remotePath)
+      rs.on('data', (c: Buffer) => {
+        total += c.length
+        if (total > maxBytes) {
+          rs.destroy()
+          reject(new Error(`文件超过 ${Math.round(maxBytes / 1024)}KB，已中止读取`))
+          return
+        }
+        chunks.push(c)
+      })
+      rs.on('end', () => resolve())
+      rs.on('error', (e: Error) => reject(e))
+    })
+    return { size: total, content: Buffer.concat(chunks).toString('utf8').slice(0, 20000) }
   }, passwordOverride)
 }
 

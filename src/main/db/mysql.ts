@@ -89,7 +89,9 @@ export class MySqlAdapter implements DbAdapter {
   private async destroy(): Promise<void> {
     this.connPromise = null
     if (this.conn) {
-      try { await this.conn.end() } catch { /* 忽略 */ }
+      // 必须用 destroy()：end() 会等已入队命令（可能正是那条卡死的查询）执行完再发 QUIT，
+      // 超时路径会因此永远返回不了，整个 opChain 被占住
+      try { this.conn.destroy() } catch { /* 忽略 */ }
       this.conn = null
     }
   }
@@ -166,11 +168,28 @@ export class MySqlAdapter implements DbAdapter {
   /** 网格编辑支持：主键定位行（无主键回退第一个全非空唯一键），生成列不可更新 */
   async editSupport(schema: string, table: string): Promise<EditSupport> {
     const c = await this.ensure()
-    const [stats] = await c.query<any[]>(
-      `SELECT index_name, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols, MAX(non_unique) AS nu
-       FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? GROUP BY index_name`,
-      [schema, table]
-    )
+    // 不能用 GROUP_CONCAT：函数索引的 column_name 为 NULL 会被跳过、超长复合键会被
+    // group_concat_max_len 截断，两种退化都会把唯一键解析成"键前缀"，
+    // 使网格编辑生成只覆盖部分键的 WHERE → 一次编辑静默改掉多行。
+    let stats: any[]
+    try {
+      const [rows] = await c.query<any[]>(
+        `SELECT index_name, column_name, seq_in_index, non_unique, expression
+         FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?
+         ORDER BY index_name, seq_in_index`,
+        [schema, table]
+      )
+      stats = rows
+    } catch {
+      // MySQL 5.7 / 部分 OB 版本没有 expression 列
+      const [rows] = await c.query<any[]>(
+        `SELECT index_name, column_name, seq_in_index, non_unique
+         FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?
+         ORDER BY index_name, seq_in_index`,
+        [schema, table]
+      )
+      stats = rows
+    }
     const [cols] = await c.query<any[]>(
       `SELECT column_name, is_nullable, extra FROM information_schema.columns WHERE table_schema = ? AND table_name = ?`,
       [schema, table]
@@ -178,17 +197,39 @@ export class MySqlAdapter implements DbAdapter {
     if (!cols.length) throw new Error(`表 ${schema}.${table} 不存在或无权限访问`)
     const nameOf = (r: any) => String(r.column_name ?? r.COLUMN_NAME)
     const nullable = new Set(cols.filter((r) => String(r.is_nullable ?? r.IS_NULLABLE).toUpperCase() === 'YES').map(nameOf))
-    const readonlyCols = cols.filter((r) => /GENERATED/i.test(String(r.extra ?? r.EXTRA))).map(nameOf)
+    // 只读列：仅虚拟/存储生成列。DEFAULT_GENERATED（DEFAULT CURRENT_TIMESTAMP）可正常更新
+    const readonlyCols = cols
+      .filter((r) => /^(virtual|stored)\s+generated/i.test(String(r.extra ?? r.EXTRA ?? '').trim()))
+      .map(nameOf)
+    // 按索引聚合（保持 seq_in_index 顺序）；表达式索引列为空，无法逐列等值定位，整条索引不可用
+    const indexes = new Map<string, { cols: string[]; uniq: boolean; usable: boolean }>()
+    for (const r of stats) {
+      const name = String(r.index_name ?? r.INDEX_NAME ?? '')
+      const col = r.column_name ?? r.COLUMN_NAME
+      const nu = Number(r.non_unique ?? r.NON_UNIQUE ?? 1)
+      const expr = r.expression ?? r.EXPRESSION
+      let it = indexes.get(name)
+      if (!it) {
+        it = { cols: [], uniq: nu === 0, usable: true }
+        indexes.set(name, it)
+      }
+      if (nu !== 0) it.uniq = false
+      if (!col || (expr !== null && expr !== undefined && String(expr) !== '')) it.usable = false
+      else it.cols.push(String(col))
+    }
     let keyCols: string[] = []
-    const pk = (stats as any[]).find((r) => String(r.index_name ?? r.INDEX_NAME) === 'PRIMARY')
-    if (pk) {
-      keyCols = String(pk.cols).split(',').map((s) => s.trim())
+    const pk = indexes.get('PRIMARY')
+    if (pk && pk.usable && pk.cols.length) {
+      keyCols = pk.cols
     } else {
       // 唯一键须全列非空：键列含 NULL 时无法可靠定位行
-      const uniq = (stats as any[]).find(
-        (r) => Number(r.nu) === 0 && String(r.cols).split(',').every((k: string) => !nullable.has(k.trim()))
-      )
-      if (uniq) keyCols = String(uniq.cols).split(',').map((s) => s.trim())
+      for (const it of indexes.values()) {
+        if (!it.uniq || !it.usable || !it.cols.length) continue
+        if (it.cols.every((k) => !nullable.has(k))) {
+          keyCols = it.cols
+          break
+        }
+      }
     }
     if (!keyCols.length) {
       return { editable: false, reason: '表没有主键或全非空唯一键，无法定位行', keyMode: 'cols', keyCols: [], readonlyCols }
@@ -223,7 +264,7 @@ export class MySqlAdapter implements DbAdapter {
       }
       if (/closed|ECONN|PIPE|QUIT/.test(String(e?.code) + String(e?.message))) {
         // 断连重试仅限只读语句：写语句可能在服务端已提交，盲目重发会重复执行
-        if (!classifySql(sql).ok) {
+        if (!classifySql(sql, 'mysql').ok) {
           await this.destroy()
           throw e
         }

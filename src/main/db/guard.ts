@@ -1,5 +1,22 @@
 // SQL 语句分类守门：只读通道只放行明确的读语句。
 // 这是"语句层"防线；账号层(只读账号)是第二道兜底。
+//
+// 分类必须按方言进行。MySQL 与 Oracle 对 `--`、`#`、反斜杠转义、双引号、反引号的
+// 语义不同，用同一套词法规则必然在其中一侧漏判：
+//   - MySQL 的 `--` 只有后跟空白/控制符时才算注释（`SELECT 0--1 INTO OUTFILE ...`
+//     在服务端是 `0 - -1`，不是注释）；
+//   - MySQL 默认把 `\` 当字符串转义符，`'a\'' INTO OUTFILE` 会在第二个引号处提前结束；
+//   - Oracle 的 `#`、`$` 是合法标识符字符，`FROM t e#` 不能从 `#` 起截断成注释。
+// MySQL 的 sql_mode 可能含 NO_BACKSLASH_ESCAPES / ANSI_QUOTES，分类时无法得知，
+// 因此对 MySQL 同时按"有转义"和"无转义"两种词法各分类一次，取更严格的结果。
+
+import type { ConnType } from '../types'
+
+export type SqlDialect = 'oracle' | 'mysql'
+
+export function dialectOf(type: ConnType): SqlDialect {
+  return type === 'mysql' || type === 'ob-mysql' ? 'mysql' : 'oracle'
+}
 
 export interface SqlVerdict {
   /** 是否允许走只读通道 */
@@ -15,26 +32,40 @@ const DDL = new Set(['create', 'alter', 'drop', 'truncate', 'comment', 'rename',
 const KILL = new Set(['kill', 'shutdown', 'startup'])
 const PLSQL = new Set(['exec', 'execute', 'call', 'begin', 'declare', 'set'])
 
+/** 高权限 DDL：改动账号/权限/实例参数，会话放行不得覆盖（每次确认） */
+const DANGEROUS_DDL = /\b(?:grant|revoke)\b|\b(?:create|alter|drop)\s+(?:user|role|profile|system|database)\b|\bset\s+(?:global|persist|password)\b|\balter\s+system\b/i
+
 /**
  * 单遍词法扫描，输出用于分类的"纯语句"。规则（顺序即安全性所在）：
- * 1) 字符串字面量（含 Oracle q'' 定界形式、'' 与 "" 与 `` 转义）内容清空、保留定界符——
- *    字面量里的分号/注释符/关键字既不构成多语句，也不能被注释规则误吞；
- * 2) 普通注释（块注释 /*...*\/、-- 行注释、# 行注释）剔除；
- * 3) MySQL 可执行注释 /*!...*\/（含 /*!50003 版本形式）内容按代码保留——它在服务端会真实执行，
- *    当普通注释剥掉等于给 INTO OUTFILE / 多语句注入让路；
+ * 1) 先按方言识别字符串字面量（MySQL 的 `\` 转义、Oracle 的 q''、`""`/`` `` `` 转义），
+ *    内容清空、保留定界符——字面量里的分号/注释符/关键字既不构成多语句，也不能被注释规则误吞；
+ * 2) 再剔除普通注释（块注释、`--` 行注释、MySQL 的 `#` 行注释）——`--` 的判定按方言：
+ *    MySQL 要求后跟空白/控制符或行尾，Oracle 无此限制；Oracle 的 `#` 不是注释；
+ * 3) MySQL 可执行注释 `/*!...*\/`（含版本号形式）内容按代码保留——它在服务端会真实执行；
  * 4) 未终止的字面量/注释按"已消费到结尾"处理：驱动侧本就报语法错误，分类侧宁可保守。
  */
-function normalizeSql(raw: string): string {
+function normalizeSql(raw: string, dialect: SqlDialect, backslashEscapes: boolean): string {
   const n = raw.length
+  const isMy = dialect === 'mysql'
   let out = ''
   let i = 0
   while (i < n) {
     const c = raw[i]
-    // 行注释：-- 与 #（# 在 Oracle 可出现在标识符中，但剔除只影响读语句内部细节，不影响首词判断）
-    if ((c === '-' && raw[i + 1] === '-') || c === '#') {
+    // MySQL 的 # 行注释；Oracle 中 # 是合法标识符字符，不能当注释
+    if (isMy && c === '#') {
       while (i < n && raw[i] !== '\n') i++
       out += ' '
       continue
+    }
+    if (c === '-' && raw[i + 1] === '-') {
+      // MySQL: `--` 后必须是空白/控制符/行尾；否则是减号运算（0--1）
+      const after = raw[i + 2]
+      const isComment = !isMy || after === undefined || after === '\n' || after === '\r' || after === '\t' || after === ' '
+      if (isComment) {
+        while (i < n && raw[i] !== '\n') i++
+        out += ' '
+        continue
+      }
     }
     if (c === '/' && raw[i + 1] === '*') {
       if (raw[i + 2] === '!') {
@@ -51,18 +82,13 @@ function normalizeSql(raw: string): string {
         }
       } else {
         const close = raw.indexOf('*/', i + 2)
-        if (close === -1) {
-          out += ' '
-          i = n
-        } else {
-          out += ' '
-          i = close + 2
-        }
+        out += ' '
+        i = close === -1 ? n : close + 2
       }
       continue
     }
     // Oracle q 定界字符串：q'[...]' q'(...)' q'{...}' q'<...>' q'#...#'（定界符自身成对）
-    if ((c === 'q' || c === 'Q') && raw[i + 1] === "'") {
+    if (!isMy && (c === 'q' || c === 'Q') && raw[i + 1] === "'") {
       const d = raw[i + 2]
       const closer = d === '[' ? "]'" : d === '(' ? ")'" : d === '{' ? "}'" : d === '<' ? ">'" : d + "'"
       const end = raw.indexOf(closer, i + 3)
@@ -70,10 +96,14 @@ function normalizeSql(raw: string): string {
       i = end === -1 ? n : end + closer.length
       continue
     }
-    // 普通字符串字面量（'' 为 SQL 标准转义；\' 由驱动层语法保证，分类层无需处理）
+    // 单引号字符串：MySQL 默认支持 \ 转义（除非 sql_mode 含 NO_BACKSLASH_ESCAPES，由双词法覆盖）
     if (c === "'") {
       i++
       while (i < n) {
+        if (isMy && backslashEscapes && raw[i] === '\\') {
+          i += 2
+          continue
+        }
         if (raw[i] === "'") {
           if (raw[i + 1] === "'") {
             i += 2
@@ -87,11 +117,17 @@ function normalizeSql(raw: string): string {
       if (i < n) i++
       continue
     }
-    // 引号标识符 ""（ANSI，"" 转义）与 ``（MySQL，`` 转义）：内容清空防干扰
-    if (c === '"' || c === '`') {
+    // 双引号：Oracle/ANSI 是标识符（"" 转义）；MySQL 默认是字符串（支持 \ 转义），
+    // 开启 ANSI_QUOTES 时才是标识符——两种语义都按最严格方式处理，由双词法覆盖
+    if (c === '"') {
+      const asString = isMy && backslashEscapes
       const q = c
       i++
       while (i < n) {
+        if (asString && raw[i] === '\\') {
+          i += 2
+          continue
+        }
         if (raw[i] === q) {
           if (raw[i + 1] === q) {
             i += 2
@@ -101,7 +137,24 @@ function normalizeSql(raw: string): string {
         }
         i++
       }
-      out += q + q
+      out += asString ? "''" : q + q
+      if (i < n) i++
+      continue
+    }
+    // 反引号标识符（MySQL）：`` 转义，内容清空防干扰
+    if (c === '`') {
+      i++
+      while (i < n) {
+        if (raw[i] === '`') {
+          if (raw[i + 1] === '`') {
+            i += 2
+            continue
+          }
+          break
+        }
+        i++
+      }
+      out += '``'
       if (i < n) i++
       continue
     }
@@ -111,8 +164,7 @@ function normalizeSql(raw: string): string {
   return out
 }
 
-export function classifySql(raw: string): SqlVerdict {
-  const sql = normalizeSql(raw).trim()
+function classifyNormalized(sql: string): SqlVerdict {
   if (!sql) return { ok: false, kind: 'unknown', risk: 3, reason: '空语句' }
 
   const parts = sql.split(';').map((s) => s.trim()).filter(Boolean)
@@ -120,6 +172,7 @@ export function classifySql(raw: string): SqlVerdict {
     return { ok: false, kind: 'multi', risk: 3, reason: `包含 ${parts.length} 条语句，一次只允许执行一条` }
   }
   const body = parts[0]
+  if (!body) return { ok: false, kind: 'unknown', risk: 3, reason: '空语句' }
   const first = (body.match(/^[a-zA-Z]+/)?.[0] || '').toLowerCase()
 
   if (READ_FIRST.has(first)) {
@@ -152,9 +205,35 @@ export function classifySql(raw: string): SqlVerdict {
   }
   if (DML.has(first)) return { ok: false, kind: 'dml', risk: 2 }
   if (DDL.has(first)) {
-    return { ok: false, kind: 'ddl', risk: first === 'drop' || first === 'truncate' ? 3 : 2 }
+    // 账号/权限/实例级 DDL 提升到 risk 3：会话放行只对普通对象 DDL 生效
+    const dangerous = first === 'drop' || first === 'truncate' || DANGEROUS_DDL.test(body)
+    return { ok: false, kind: 'ddl', risk: dangerous ? 3 : 2 }
   }
   if (KILL.has(first)) return { ok: false, kind: 'kill', risk: 3 }
-  if (PLSQL.has(first)) return { ok: false, kind: 'plsql', risk: 2 }
+  if (PLSQL.has(first)) {
+    // SET 可能是会话级（risk 2），也可能是 SET GLOBAL/PASSWORD（risk 3）；CALL/EXEC/BEGIN/DECLARE
+    // 可承载任意 PL/SQL 载荷，按高危处理，避免被"会话放行"静默通过
+    const dangerous = first !== 'set' || /\bset\s+(?:global|persist|password)\b/i.test(body)
+    return { ok: false, kind: 'plsql', risk: dangerous ? 3 : 2 }
+  }
   return { ok: false, kind: 'unknown', risk: 3, reason: `无法识别的语句首词: "${first || '(空)'}"` }
+}
+
+/** 同一语句在两种词法解释下取更严格的结论（ok=false 优先，其次 risk 更高者） */
+function stricter(a: SqlVerdict, b: SqlVerdict): SqlVerdict {
+  if (!a.ok && !b.ok) return a.risk >= b.risk ? a : b
+  if (!a.ok) return a
+  if (!b.ok) return b
+  return a
+}
+
+export function classifySql(raw: string, dialect: SqlDialect = 'oracle'): SqlVerdict {
+  if (dialect === 'mysql') {
+    // sql_mode 未知：默认（反斜杠转义）与 NO_BACKSLASH_ESCAPES/ANSI_QUOTES 各判一次
+    return stricter(
+      classifyNormalized(normalizeSql(raw, 'mysql', true)),
+      classifyNormalized(normalizeSql(raw, 'mysql', false))
+    )
+  }
+  return classifyNormalized(normalizeSql(raw, 'oracle', false))
 }

@@ -140,6 +140,8 @@ function toOpenAiMessages(system: string, history: ChatMsg[]): any[] {
 }
 
 async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort, preview?: LlmCallOptions['preview']): Promise<LlmResponse> {
+  // 已中止时直接短路：否则用户在工具执行期间点停止后，下一轮仍会发起完整请求
+  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
   const url = trimSlash(p.baseUrl) + '/chat/completions'
   const body: any = {
     model: p.model,
@@ -151,6 +153,7 @@ async function callOpenAi(p: ProviderConfig, system: string, history: ChatMsg[],
   }
   applyOpenAiThinking(body, findVendor(p.vendor).thinkingStyle, effortOverride ?? p.effort)
   if (preview) {
+    if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
     const go = await preview(url, body)
     if (!go) throw new Error('用户在发送前预览中取消了请求')
   }
@@ -279,6 +282,7 @@ function toAnthropicMessages(history: ChatMsg[], includeThinking: boolean): any[
 }
 
 async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg[], tools: ToolDef[], ev: LlmStreamEvents, signal?: AbortSignal, effortOverride?: ThinkingEffort, preview?: LlmCallOptions['preview']): Promise<LlmResponse> {
+  if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
   const url = trimSlash(p.baseUrl) + '/v1/messages'
   const think = anthropicThinking(findVendor(p.vendor).thinkingStyle, effortOverride ?? p.effort)
   // 输出上限：默认 16K（Claude 3+ 均支持）。此前硬编码 8192，长巡检报告会被静默截断；
@@ -299,6 +303,7 @@ async function callAnthropic(p: ProviderConfig, system: string, history: ChatMsg
     body.max_tokens = MAX_OUTPUT_TOKENS + think.budget_tokens
   }
   if (preview) {
+    if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
     const go = await preview(url, body)
     if (!go) throw new Error('用户在发送前预览中取消了请求')
   }

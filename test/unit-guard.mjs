@@ -120,4 +120,48 @@ reject(`${OC} 只有注释 ${CC}`, 'unknown', '空')
 reject('(SELECT 1)', 'unknown', '无法识别')
 reject('LOAD DATA INFILE', 'dml')
 
+// ---------- 方言化：MySQL / Oracle 的注释与转义规则不同 ----------
+const my = (s) => classifySql(s, 'mysql')
+const ora = (s) => classifySql(s, 'oracle')
+
+// MySQL 的 `--` 必须跟空白才算注释：`0--1` 是算术表达式，不能把后面的子句截掉
+let mv = my("SELECT 0--1 INTO OUTFILE '/tmp/x'")
+assert.equal(mv.ok, false, `MySQL --1 不得绕过: ${JSON.stringify(mv)}`)
+passed++
+mv = my('SELECT * FROM t WHERE id = 1--1 FOR UPDATE')
+assert.equal(mv.ok, false, `MySQL --1 不得隐藏 FOR UPDATE: ${JSON.stringify(mv)}`)
+passed++
+mv = my('SELECT 1 -- 正常注释')
+assert.equal(mv.ok, true, `MySQL -- 后跟空白仍是注释: ${JSON.stringify(mv)}`)
+passed++
+mv = my('SELECT 1 # 行注释')
+assert.equal(mv.ok, true, `MySQL # 是注释: ${JSON.stringify(mv)}`)
+passed++
+
+// MySQL 默认把 \ 当转义符：'a\'' 提前结束字符串，后续 INTO OUTFILE 必须暴露
+mv = my("SELECT 'a\\'' INTO OUTFILE '/tmp/x'")
+assert.equal(mv.ok, false, `MySQL \\' 不得绕过: ${JSON.stringify(mv)}`)
+passed++
+mv = my('SELECT "a\\"" INTO OUTFILE "/tmp/x"')
+assert.equal(mv.ok, false, `MySQL 双引号 \\" 不得绕过: ${JSON.stringify(mv)}`)
+passed++
+
+// Oracle 的 # 是合法标识符字符，不能当行注释截断
+let ov = ora('SELECT e.* FROM t e# WHERE 1=1 FOR UPDATE')
+assert.equal(ov.ok, false, `Oracle # 不得截断 FOR UPDATE: ${JSON.stringify(ov)}`)
+passed++
+ov = ora('SELECT 1 -- 注释')
+assert.equal(ov.ok, true, `Oracle -- 是注释: ${JSON.stringify(ov)}`)
+passed++
+
+// 高危 DDL/PLSQL 提到 risk 3（会话放行不得覆盖账号/权限变更）
+assert.equal(ora('GRANT DBA TO x').risk, 3, 'GRANT 应为 risk 3')
+passed++
+assert.equal(ora('ALTER USER u IDENTIFIED BY p').risk, 3, 'ALTER USER 应为 risk 3')
+passed++
+assert.equal(ora('ALTER TABLE t ADD c NUMBER').risk, 2, '普通 ALTER TABLE 仍为 risk 2')
+passed++
+assert.equal(ora('CALL p()').risk, 3, 'CALL 应为 risk 3')
+passed++
+
 console.log(`guard 单测：${passed} 组断言全部通过`)

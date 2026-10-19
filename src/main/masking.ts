@@ -168,6 +168,16 @@ function safeFlags(flags: string | undefined): string {
   return [...out].join('')
 }
 
+/**
+ * ReDoS 启发式：分组内已含量词、分组本身又被量词修饰（如 `(a+)+`、`(\w+\s?)*`），
+ * 在长文本上会指数回溯，主进程事件循环被占满。纯静态检测无法覆盖所有写法，
+ * 这里拦掉最常见的形态，并与 20MB 输入上限一起作为纵深防御。
+ */
+function riskyPattern(p: string): boolean {
+  if (p.length > 300) return true
+  return /\((?:\?:)?[^()]*[+*][^()]*\)\s*[+*{]/.test(p)
+}
+
 export function validateMaskingConfig(cfg: MaskingConfig): string | null {
   for (const key of Object.keys(cfg) as MaskingFileType[]) {
     const ids = new Set<string>()
@@ -178,6 +188,7 @@ export function validateMaskingConfig(cfg: MaskingConfig): string | null {
       if (r.kind === 'custom') {
         if (!r.pattern?.trim()) return `${r.name}：自定义规则必须填写正则表达式`
         if (!r.replacement) return `${r.name}：替换文本不能为空`
+        if (riskyPattern(r.pattern)) return `${r.name}：正则包含嵌套量词，可能造成灾难性回溯（ReDoS），请改写为更精确的表达式`
         try {
           new RegExp(r.pattern, safeFlags(r.flags))
         } catch (e: any) {
@@ -249,6 +260,9 @@ function validValue(value: string, category: string): boolean {
   if (category === 'DBID') return /^\d{5,20}$/.test(v)
   if (category === 'IPV4') return IP_RE.test(v)
   if (category === 'PHONE') return /^(?:\+?86[- ]?)?1[3-9]\d{9}$/.test(v)
+  // 口令可以包含任意可打印字符（! % * ^ ~ = & 等），通用标识符白名单会把真实密码
+  // 判为"不像敏感值"而丢弃，导致已脱敏报告里仍留明文
+  if (category === 'PASSWORD') return !/[\s\x00-\x1f\x7f]/.test(v)
   if (SKIP_VALUES.has(v.toUpperCase())) return false
   if ((category === 'DBUSER' || category === 'OSUSER' || category === 'SERVICE') && BUILTIN_SCHEMAS.has(v.toUpperCase())) return false
   if (!/[A-Za-z]/.test(v)) return false
@@ -267,7 +281,7 @@ class Detector {
     if (category === 'HOSTNAME' && IP_RE.test(v)) category = 'IPV4'
     if (!validValue(v, category)) return
     // user@host / client@host 单元格不能当整体主机名处理，交给专用正则。
-    if (v.includes('@') && category !== 'EMAIL') return
+    if (v.includes('@') && category !== 'EMAIL' && category !== 'PASSWORD') return
     const key = v.toLowerCase()
     const old = this.byKey.get(key)
     if (!old || categoryMeta(category).rank < categoryMeta(old.category).rank) {
@@ -378,7 +392,9 @@ function collectTextTables(text: string, detector: Detector): void {
             if (category) columns.push({ start, end, category })
           }
         })
-        rowsLeft = columns.length ? 8 : 0
+        // 表体扫描上限：8 行会漏掉第 9 行之后的用户名/主机（AWR 表格常见几十行），
+        // 这里放到 500 行兼顾覆盖与开销
+        rowsLeft = columns.length ? 500 : 0
       }
       pendingHeader = null
     } else if (headerLooksSensitive(raw)) {

@@ -40,4 +40,9 @@ passed++
 assert.ok(csv.charCodeAt(0) === 0xfeff, 'BOM 存在')
 passed++
 
+// "-" 开头的算术表达式仍可能被 Excel 求值：只放行严格数字样式
+eq(csvCell('-2+3'), "'-2+3", '负号+算术表达式必须加前缀')
+eq(csvCell('-123.45'), '-123.45', '负数不加前缀')
+eq(csvCell('-1,234.50'), '"-1,234.50"', '千分位负数不加前缀（含逗号按 CSV 规则加引号）')
+
 console.log(`csv 单测：${passed} 组断言全部通过`)

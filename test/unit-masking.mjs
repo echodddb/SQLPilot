@@ -60,4 +60,10 @@ assert.ok(!r.content.includes('987654321'), '自定义规则应脱敏')
 assert.ok(/order-tuoming1/.test(r.content), '自定义规则支持序号模板')
 passed++
 
+// 口令含特殊字符（! % * 等）：通用标识符白名单曾把真实密码判为"不像敏感值"而保留明文
+r = maskText('DB Name PDB1\nUsername APPUSER\npassword=P@ss%word!', 'oracle_awr', cfg)
+assert.ok(!r.content.includes('P@ss%word!'), '含特殊字符的口令必须脱敏')
+assert.ok(/password-tuoming\d/.test(r.content), '口令应使用语义代称')
+passed++
+
 console.log(`masking 单测：${passed} 组断言全部通过`)

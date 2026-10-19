@@ -413,9 +413,11 @@ async function deleteArchiveEntry(key: string, reverseIndex: number): Promise<vo
   await loadArchive(key)
 }
 // LLM 增强总结后台完成 → 已展开的归档区实时刷新
-window.sqlpilot.onArchiveUpdated(({ projectId }) => {
+// 必须保存 unsubscribe：Sidebar 随模块切换反复挂载，不注销会累积监听与已卸载组件闭包
+const offArchiveUpdated = window.sqlpilot.onArchiveUpdated(({ projectId }) => {
   if (openArchives.has(projectId)) void loadArchive(projectId)
 })
+onUnmounted(() => { offArchiveUpdated() })
 async function clearArchive(key: string): Promise<void> {
   const n = archives[key]?.length || 0
   if (!n) return

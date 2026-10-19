@@ -237,12 +237,13 @@ export async function importSkillPack(srcPath: string): Promise<SkillPackResult>
   const stat = fs.statSync(srcPath)
   let root = srcPath
   let tmpDir: string | null = null
-  if (stat.isFile()) {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpilot-skill-'))
-    await extract(srcPath, { dir: tmpDir })
-    root = tmpDir
-  }
   try {
+    if (stat.isFile()) {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpilot-skill-'))
+      // extract 放在 try 内：损坏/加密 zip 抛错时也能走到 finally 清理临时目录
+      await extract(srcPath, { dir: tmpDir })
+      root = tmpDir
+    }
     const roots = findSkillRoots(root)
     if (!roots.length) {
       throw new Error('未在包中找到任何技能（需有含 SKILL.md 的目录；GitHub 仓库通常为 <仓库主目录>/<技能名>/SKILL.md）')
@@ -256,15 +257,35 @@ export async function importSkillPack(srcPath: string): Promise<SkillPackResult>
       const old = existing.find((s) => s.name === name)
       let id: string
       if (old) {
-        // 同名更新：沿用原 ID（启用开关保留），目录重建
-        deleteSkill(old.id)
+        // 同名更新：沿用原 ID（启用开关保留）。目录采用"暂存 + 交换"，
+        // 不能先 deleteSkill 再拷贝——拷贝失败（超限/磁盘满/权限）会永久丢掉旧技能
         id = old.id
       } else {
         id = slugify(name)
         let n = 2
         while (fs.existsSync(skillDir(id))) id = `${slugify(name)}-${n++}`
       }
-      const files = copySkillDir(skillRoot, skillDir(id))
+      const finalDir = skillDir(id)
+      const stagingDir = `${finalDir}.staging-${process.pid}-${Date.now()}`
+      let files: number
+      try {
+        files = copySkillDir(skillRoot, stagingDir)
+      } catch (e) {
+        try { fs.rmSync(stagingDir, { recursive: true, force: true }) } catch { /* 已清理 */ }
+        throw e
+      }
+      const backupDir = `${finalDir}.old-${process.pid}-${Date.now()}`
+      try {
+        if (fs.existsSync(finalDir)) fs.renameSync(finalDir, backupDir)
+        fs.renameSync(stagingDir, finalDir)
+        try { fs.rmSync(backupDir, { recursive: true, force: true }) } catch { /* 残留旧版本不影响使用 */ }
+      } catch (e) {
+        try { if (fs.existsSync(stagingDir)) fs.rmSync(stagingDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+        try {
+          if (!fs.existsSync(finalDir) && fs.existsSync(backupDir)) fs.renameSync(backupDir, finalDir)
+        } catch { /* 回滚失败：旧版本仍在 backupDir */ }
+        throw e
+      }
       const meta: SkillMeta = { id, name, description: oneLine(fm.description) || '导入的技能', files }
       ;(old ? result.updated : result.imported).push(meta)
     }

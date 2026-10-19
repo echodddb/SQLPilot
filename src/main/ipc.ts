@@ -6,7 +6,7 @@ import { setPassword, deletePassword, getPassword, secretsAvailable } from './se
 import { readAudit, appendAudit, queryAudit } from './audit'
 import { getAdapter, dropAdapter, closeAll } from './db/manager'
 import { testServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, sftpList, sftpDownload, sftpUpload } from './ssh'
-import { classifySql } from './db/guard'
+import { classifySql, dialectOf } from './db/guard'
 import { OracleAdapter } from './db/oracle'
 import { ObOracleAdapter } from './db/ob-oracle'
 import { MYSQL_SYSTEM_SCHEMAS, MySqlAdapter } from './db/mysql'
@@ -174,7 +174,17 @@ export function registerIpc(): void {
     const validationError = validateConnectionProfile(normalized, false)
     if (validationError) return { ok: false, error: validationError }
     profile = normalized
-    const pw = password !== undefined && password !== '' ? password : getPassword(profile.id)
+    const usingSavedPwd = password === undefined || password === ''
+    if (usingSavedPwd) {
+      // 用已保存密码测试时不允许换目标：否则可借主进程把密文用于攻击者控制的伪服务端
+      const saved = loadConfig().connections.find((c) => c.id === profile.id)
+      const sameTarget = saved && saved.host === profile.host && Number(saved.port) === Number(profile.port) &&
+        saved.user === profile.user && saved.type === profile.type
+      if (!sameTarget) {
+        return { ok: false, error: '使用已保存密码时不能修改主机/端口/用户名/类型；测试新目标请先填写密码。' }
+      }
+    }
+    const pw = usingSavedPwd ? getPassword(profile.id) : password
     try {
       const adapter =
         profile.type === 'oracle'
@@ -332,7 +342,16 @@ export function registerIpc(): void {
       if (ts && title) deleteArchiveEntryByHead(project.name, ts, title)
       return { ok: true }
     }
-    // legacy 型（仅 md）：按内容校验删除
+    // legacy 型（仅 md）：优先按 ts+title 定位——列表下标含会话型条目，直接复用会错删；
+    // 找不到再回退 下标+内容校验（兼容旧调用）
+    if (ts && title) {
+      const entries = listProjectArchiveEntries(project.name)
+      const i = entries.findIndex((e) => e.ts === ts && e.title === title)
+      if (i < 0) return { ok: false, error: '该归档刚被修改，请刷新后重试' }
+      return deleteProjectArchiveEntry(project.name, i, entries[i].raw)
+        ? { ok: true }
+        : { ok: false, error: '该归档刚被修改，请刷新后重试' }
+    }
     return deleteProjectArchiveEntry(project.name, Number(reverseIndex) || 0, String(rawCheck || '')) ? { ok: true } : { ok: false, error: '该归档刚被修改，请刷新后重试' }
   })
   ipcMain.handle('archive:clear', (_e, { projectId }: { projectId: string }) => {
@@ -657,7 +676,7 @@ export function registerIpc(): void {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === connId)
     if (!profile) return { ok: false, error: '连接不存在' }
-    const v = classifySql(sql)
+    const v = classifySql(sql, dialectOf(profile.type))
     if (!v.ok && profile.role === 'readonly') {
       appendAudit({
         kind: 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)',
@@ -732,7 +751,12 @@ export function registerIpc(): void {
       // where 是渲染层可控的自由文本：必须过守门器（按只读 SELECT 分类），
       // 防多语句 / INTO OUTFILE / 写子句借道本通道绕过门控（此前为裸拼，属旁路）
       if (cond) {
-        const verdict = classifySql(`SELECT 1 WHERE ${cond}`)
+        // 注释符/多语句/UNION 直接拒绝：即便分类器方言化，也不允许筛选条件里出现可改变语句边的构造
+        if (/;|--|#|\/\*|\bunion\b|\binto\b/i.test(cond)) {
+          appendAudit({ kind: "sql.read", actor: "human", conn: profile.name, target: `${s}.${t}`, detail: "obj:data 筛选条件含危险构造", sql: cond.slice(0, 2000), error: '拦截: 注释/多语句/UNION/INTO' })
+          return { ok: false, error: '筛选条件不能包含注释符、分号、UNION 或 INTO 子句' }
+        }
+        const verdict = classifySql(`SELECT 1 WHERE ${cond}`, dialectOf(profile.type))
         if (!verdict.ok || verdict.kind !== "read") {
           appendAudit({ kind: "sql.read", actor: "human", conn: profile.name, target: `${s}.${t}`, detail: "obj:data 筛选条件被守门器拒绝", sql: cond.slice(0, 2000), error: `拦截: ${verdict.reason || verdict.kind}` })
           return { ok: false, error: `筛选条件被安全策略拒绝：${verdict.reason || "仅允许只读筛选条件"}` }
@@ -856,6 +880,7 @@ export function registerIpc(): void {
     if (!profile) return { ok: false, error: '连接不存在' }
     if (!sessionKey) return { ok: false, error: '缺少会话标识' }
     if (!Array.isArray(edits) || !edits.length) return { ok: false, error: '没有要保存的修改' }
+    if (edits.length > 500) return { ok: false, error: '单次最多保存 500 处修改，请分批提交' }
     if (profile.role === 'readonly') {
       appendAudit({
         kind: 'sql.write', actor: 'human', conn: profile.name, target: `${schema}.${table}`,
@@ -879,6 +904,17 @@ export function registerIpc(): void {
     }
     const ro = new Set((es?.readonlyCols || []).map((c) => (isOracle ? c.toUpperCase() : c)))
     const colOk = (name: string) => /^[A-Za-z_][\w$#]*$/.test(name) && !ro.has(isOracle ? name.toUpperCase() : name)
+    // 行标识必须以服务端 editSupport 为准：渲染层传的 keyCols 只用于核对，
+    // 若采用它，过时/被篡改的键会让 WHERE 只覆盖唯一键子集，一次编辑改多行
+    if (!isOracle) {
+      const serverKeys = (es?.keyCols || []).map((k) => String(k))
+      const reqKeys = Array.isArray(keyCols) ? keyCols.map((k) => String(k)) : []
+      if (!serverKeys.length) return { ok: false, error: '该表没有可用于定位行的主键/唯一键，请刷新后重试' }
+      if (reqKeys.length !== serverKeys.length || reqKeys.some((k, i) => k !== serverKeys[i])) {
+        return { ok: false, error: '行键与当前表结构不一致（可能已被修改），请刷新数据后重试' }
+      }
+      keyCols = serverKeys
+    }
     // 每 tab 独立数据库会话：Oracle 的未提交事务与其他窗口/agent 互不可见
     const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
     const conflicts: number[] = []
@@ -908,15 +944,19 @@ export function registerIpc(): void {
         }
       }
       // MySQL 侧整批原子：有冲突全部回滚；Oracle 保持事务打开，由工具栏 ✓/↩ 决定
+      let rolledBack = false
       if (!isOracle) {
-        await adapter.query(conflicts.length ? 'ROLLBACK' : 'COMMIT', 1, 10_000)
+        rolledBack = conflicts.length > 0
+        await adapter.query(rolledBack ? 'ROLLBACK' : 'COMMIT', 1, 10_000)
+        // 回滚后本次修改全部未生效：不能把 applied 报成"已保存"
+        if (rolledBack) applied = 0
       }
       appendAudit({
         kind: 'sql.write', actor: 'human', conn: profile.name, target: `${s}.${t}`,
-        detail: `网格编辑：${applied} 处修改${conflicts.length ? `，${conflicts.length} 处冲突` : ''}${isOracle ? '（未提交）' : ''}`,
-        rows: applied, mode: 'human', approved: true
+        detail: `网格编辑：${applied} 处修改${conflicts.length ? `，${conflicts.length} 处冲突` : ''}${rolledBack ? '（已全部回滚）' : ''}${isOracle ? '（未提交）' : ''}`,
+        rows: applied, mode: 'human', approved: !rolledBack
       })
-      return { ok: true, applied, conflicts, uncommitted: isOracle }
+      return { ok: true, applied, conflicts, rolledBack, uncommitted: isOracle }
     } catch (e: any) {
       if (!isOracle) {
         try { await adapter.query('ROLLBACK', 1, 10_000) } catch { /* 忽略 */ }
@@ -940,7 +980,7 @@ export function registerIpc(): void {
     if (!profile) return { ok: false, error: '连接不存在' }
     if (!sql?.trim()) return { ok: false, error: '当前窗口还没有执行过查询' }
     if (!Array.isArray(columns) || !columns.length) return { ok: false, error: '至少选择一列' }
-    const v = classifySql(sql)
+    const v = classifySql(sql, dialectOf(profile.type))
     if (!v.ok) return { ok: false, error: '只能导出查询语句（SELECT/SHOW 等）的结果' }
     try {
       const ts = new Date()
@@ -1586,14 +1626,20 @@ export function registerIpc(): void {
 
   // ---------- 模型提供商测试 ----------
   ipcMain.handle('provider:test', async (_e, { provider, apiKey }: { provider: any; apiKey?: string }) => {
-    const key = (apiKey && apiKey.trim()) || getPassword(`provider:${provider.id}`)
+    const typed = apiKey && apiKey.trim()
+    // 用已保存的 Key 测试时，目标地址/协议/模型必须取自主进程配置：
+    // 否则渲染层只要传已有 id + 攻击者 baseUrl，就能把真实 Key 发到任意主机
+    const saved = loadConfig().providers.find((p) => p.id === provider?.id)
+    const target = typed ? provider : saved
+    if (!target) return { ok: false, error: '未找到该提供商的已保存配置' }
+    const key = typed || getPassword(`provider:${target.id}`)
     if (!key) return { ok: false, error: '没有可用的 API Key（未填写且无历史存储）' }
-    const base = String(provider.baseUrl || '').replace(/\/+$/, '')
-    const url = provider.protocol === 'anthropic' ? `${base}/v1/messages` : `${base}/chat/completions`
+    const base = String(target.baseUrl || '').replace(/\/+$/, '')
+    const url = target.protocol === 'anthropic' ? `${base}/v1/messages` : `${base}/chat/completions`
     const body: any =
-      provider.protocol === 'anthropic'
-        ? { model: provider.model, max_tokens: 4, messages: [{ role: 'user', content: 'ping' }] }
-        : { model: provider.model, max_tokens: 4, stream: false, messages: [{ role: 'user', content: 'ping' }] }
+      target.protocol === 'anthropic'
+        ? { model: target.model, max_tokens: 4, messages: [{ role: 'user', content: 'ping' }] }
+        : { model: target.model, max_tokens: 4, stream: false, messages: [{ role: 'user', content: 'ping' }] }
     try {
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), 30_000)

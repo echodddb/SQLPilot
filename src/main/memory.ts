@@ -1,6 +1,8 @@
 import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
+import { writeFileAtomic } from './atomic'
 
 // 跨会话记忆（轻量版 agent memory）：三个维度——全局 MEMORY.md、按连接 conn/<名>.md、
 // 按项目 project/<名>.md，存 userData/memory/。注入系统提示词时只取文件尾部（近期事实优先），
@@ -25,15 +27,33 @@ function globalFile(): string {
 
 /** Windows 文件名非法字符替换为下划线；名称即文件名，读取时按同名连接/项目寻址 */
 function safeName(name: string): string {
-  return name.replace(/[\\/:*?"<>|\r\n\t]/g, '_').slice(0, 60) || '_'
+  const raw = String(name ?? '')
+  const clean = raw.replace(/[\\/:*?"<>|\r\n\t]/g, '_').slice(0, 60) || '_'
+  // 清洗/截断会碰撞（a:b 与 a/b、超长名截断）：附加原始名短哈希保证唯一，
+  // 否则两个连接/项目共用一份记忆，A 库的运维事实会被注入 B 库会话
+  if (clean !== raw || raw.length > 60) {
+    return `${clean.slice(0, 48)}-${crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8)}`
+  }
+  return clean
 }
 
 /** 记忆归属：全局 / 某数据库连接 / 某项目 */
 export type MemoryTarget = { kind: 'global' } | { kind: 'conn'; name: string } | { kind: 'project'; name: string }
 
 function fileOf(target: MemoryTarget): string {
+  if (!target || typeof target !== 'object') throw new Error('记忆归属无效')
   if (target.kind === 'global') return globalFile()
-  return path.join(memoryDir(), target.kind, `${safeName(target.name)}.md`)
+  // kind 是 TS 联合类型，运行时不生效：必须显式收口，防 `../../` 之类越出 memory 目录
+  if (target.kind !== 'conn' && target.kind !== 'project') throw new Error(`非法记忆归属: ${String((target as any).kind)}`)
+  const dir = path.join(memoryDir(), target.kind)
+  const file = path.join(dir, `${safeName(target.name)}.md`)
+  // 旧版文件名不带哈希：首次访问时迁移到新名，避免改名后旧记忆"消失"
+  const legacyName = String(target.name ?? '').replace(/[\\/:*?"<>|\r\n\t]/g, '_').slice(0, 60) || '_'
+  const legacy = path.join(dir, `${legacyName}.md`)
+  if (file !== legacy && !fs.existsSync(file) && fs.existsSync(legacy)) {
+    try { fs.renameSync(legacy, file) } catch { /* 迁移失败仍用新名，旧文件保留 */ }
+  }
+  return file
 }
 
 /** 追加一条记忆；返回写入的文件（相对 userData）与当前条目总数 */
@@ -153,14 +173,14 @@ export function deleteProjectArchiveEntry(project: string, reverseIndex: number,
   const remain = entries.filter((_, i) => i !== reverseIndex).reverse() // 恢复正序（旧→新）
   const file = archiveFile(project)
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, remain.length ? remain.map((e) => e.raw).join('\n\n') + '\n\n' : '', 'utf8')
+  writeFileAtomic(file, remain.length ? remain.map((e) => e.raw).join('\n\n') + '\n\n' : '')
   return true
 }
 
 /** 清空项目归档 */
 export function clearProjectArchive(project: string): void {
   const file = archiveFile(project)
-  try { fs.writeFileSync(file, '', 'utf8') } catch { /* 无文件视为已空 */ }
+  try { writeFileAtomic(file, '') } catch { /* 无文件视为已空 */ }
 }
 
 /** LLM 增强总结完成后更新对应条目（按 ts+title 定位；找不到跳过） */
@@ -171,7 +191,7 @@ export function updateArchiveEntry(project: string, ts: string, title: string, n
   hit.summary = newSummary.trim()
   hit.raw = `## ${hit.ts} · ${hit.title}\n${hit.summary}`
   const file = archiveFile(project)
-  fs.writeFileSync(file, entries.slice().reverse().map((e) => e.raw).join('\n\n') + '\n\n', 'utf8')
+  writeFileAtomic(file, entries.slice().reverse().map((e) => e.raw).join('\n\n') + '\n\n')
   return true
 }
 

@@ -1,7 +1,7 @@
 <template>
   <div class="qt-pane" ref="paneHost">
     <div class="qt-toolbar">
-      <select v-model="connId" class="qt-conn" title="本窗口使用的连接">
+      <select v-model="connId" class="qt-conn" :disabled="running" title="本窗口使用的连接">
         <option v-for="c in allConns" :key="c.id" :value="c.id">{{ c.name }} · {{ typeLabel(c.type) }}</option>
       </select>
       <div class="qt-action-group">
@@ -306,17 +306,21 @@ function runTx(stmt: 'COMMIT' | 'ROLLBACK') {
 }
 
 async function execSql(text: string) {
+  // 锁定发起时的连接：执行期间下拉即使被改，结果也不能挂到新连接名下
+  const runConn = connId.value
   // 切换过连接：释放旧连接上本窗口的独立会话（未提交事务随断连回滚）
-  if (prevConn && prevConn !== connId.value) {
+  if (prevConn && prevConn !== runConn) {
     window.sqlpilot.sqlCloseSession(prevConn, props.tabKey)
   }
-  prevConn = connId.value
+  prevConn = runConn
   running.value = true
   msg.value = ''
   result.value = null
   exportOpen.value = false
   try {
-    const r = await window.sqlpilot.sqlRun(connId.value, text, props.tabKey)
+    const r = await window.sqlpilot.sqlRun(runConn, text, props.tabKey)
+    // 执行期间切了连接：本次结果属于旧连接，丢弃（导出也只会用当前连接重跑）
+    if (runConn !== connId.value) return
     if (r.ok) {
       ok.value = true
       result.value = r.result
@@ -387,6 +391,9 @@ async function doExport() {
 // 卸载（关 tab / 切走视图）释放本窗口的独立数据库会话（未提交事务随断连回滚）
 onBeforeUnmount(() => {
   if (prevConn) window.sqlpilot.sqlCloseSession(prevConn, props.tabKey)
+  // CodeMirror 5 会在 window 上注册 resize 监听：不销毁会随开关 tab 累积
+  try { cm?.toTextArea() } catch { /* 已卸载 */ }
+  cm = null
 })
 </script>
 
