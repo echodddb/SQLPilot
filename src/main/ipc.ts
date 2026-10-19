@@ -8,7 +8,9 @@ import { getAdapter, dropAdapter, closeAll } from './db/manager'
 import { testServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, sftpList, sftpDownload, sftpUpload } from './ssh'
 import { classifySql } from './db/guard'
 import { OracleAdapter } from './db/oracle'
-import { MySqlAdapter } from './db/mysql'
+import { ObOracleAdapter } from './db/ob-oracle'
+import { MYSQL_SYSTEM_SCHEMAS, MySqlAdapter } from './db/mysql'
+import { normalizeConnectionProfile, validateConnectionProfile } from './db/connection-profile'
 import {
   runTurn, resetSession, cancelSession, loadPersistedSessions, persistSessions,
   getSession, listSessions, listArchivedSessions, newSession, deleteSession, updateSession, summarizeDropped,
@@ -20,11 +22,13 @@ import { appendArchive, readProjectArchiveFull, listProjectArchiveEntries, delet
 import { listSkills, saveSkill, deleteSkill, importSkill, importSkillPack, importSkillPackFromUrl, readSkill } from './skills'
 import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
+import { defaultMaskingConfig, maskText, normalizeMaskingConfig, validateMaskingConfig, type MaskingConfig, type MaskingFileType } from './masking'
 import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
 import type { ApprovalOutcome, ApprovalDecision, ApprovalRequest } from './tools'
 import { listSubagentTasks, onSubtaskChange, stopSubagentTask, stopSubtasksOfSession } from './agent/subtask-registry'
 import { readRunAudit } from './agent/subagent-audit'
 import { getSysResources } from './sysinfo'
+import { writeFileAtomic } from './atomic'
 
 let win: BrowserWindow | null = null
 const pendingApprovals = new Map<string, { resolve: (o: ApprovalOutcome) => void; sessionId: string }>()
@@ -32,6 +36,9 @@ let approvalSeq = 0
 // LLM 发送前预览（按会话归属，停止/退出时兜底取消）
 const pendingPreviews = new Map<string, { resolve: (ok: boolean) => void; sessionId: string }>()
 let previewSeq = 0
+
+const isOracleProtocol = (profile: ConnProfile): boolean =>
+  profile.type === 'oracle' || profile.type === 'ob-oracle'
 
 function previewLlmRequest(url: string, body: any, sessionId: string): Promise<boolean> {
   if (!loadConfig().previewLlm) return Promise.resolve(true)
@@ -116,6 +123,8 @@ export function registerIpc(): void {
     return { ...cfg, providers: cfg.providers.map((p) => ({ ...p, apiKey: '', hasKey: !!p.apiKey })) }
   })
   ipcMain.handle('config:set', (_e, cfg: AppConfig) => {
+    const maskError = validateMaskingConfig(normalizeMaskingConfig(cfg.masking))
+    if (maskError) return { ok: false, error: maskError }
     // 渲染层拿到的是掩码 Key：空值回填主进程已存 Key，避免整份配置回存时误清
     // （DPAPI 不可用、明文回退落盘的场景下尤其重要）
     const cur = loadConfig()
@@ -130,7 +139,10 @@ export function registerIpc(): void {
   })
 
   // ---------- 连接管理 ----------
-  ipcMain.handle('conn:save', (_e, { profile, password }: { profile: ConnProfile; password?: string }) => {
+  ipcMain.handle('conn:save', (_e, { profile: rawProfile, password }: { profile: ConnProfile; password?: string }) => {
+    const profile = normalizeConnectionProfile(rawProfile)
+    const validationError = validateConnectionProfile(profile, true)
+    if (validationError) return { ok: false, error: validationError }
     const cfg = loadConfig()
     // 连接名全局唯一：agent 按名称寻址，重名会产生歧义
     const dup = cfg.connections.find((c) => c.name === profile.name && c.id !== profile.id)
@@ -158,14 +170,17 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('conn:test', async (_e, { profile, password }: { profile: ConnProfile; password?: string }) => {
-    if (profile.type === 'ob-oracle') {
-      return { ok: false, error: 'OB Oracle 租户将在 M2 阶段接入（pyobclient 驱动），当前请使用 OB MySQL 租户连接' }
-    }
+    const normalized = normalizeConnectionProfile(profile)
+    const validationError = validateConnectionProfile(normalized, false)
+    if (validationError) return { ok: false, error: validationError }
+    profile = normalized
     const pw = password !== undefined && password !== '' ? password : getPassword(profile.id)
     try {
       const adapter =
         profile.type === 'oracle'
           ? new OracleAdapter(profile, loadConfig().instantClientDir, pw)
+          : profile.type === 'ob-oracle'
+            ? new ObOracleAdapter(profile, pw)
           : new MySqlAdapter(profile, pw)
       try {
         const label = await adapter.test()
@@ -199,7 +214,7 @@ export function registerIpc(): void {
     const profile = cfg.connections.find((c) => c.id === id)
     if (!profile) return { ok: false, error: '连接不存在' }
     // Oracle 元数据一律大写规范化，保证缓存 key 与实际查询一致
-    const s = profile.type === 'oracle' ? schema.toUpperCase() : schema
+    const s = isOracleProtocol(profile) ? schema.toUpperCase() : schema
     try {
       const tables = await cached(metaKeys.tables(profile.id, s), !!refresh, () =>
         getAdapter(profile, cfg.instantClientDir).listTables(s)
@@ -398,6 +413,60 @@ export function registerIpc(): void {
     return { ok: true, path: r.filePaths[0] }
   })
 
+  // ---------- 文件脱敏 ----------
+  ipcMain.handle('mask:defaults', () => defaultMaskingConfig())
+
+  ipcMain.handle('mask:pickFile', async (_e, { fileType }: { fileType: MaskingFileType }) => {
+    if (fileType !== 'oracle_awr') return { ok: false, error: '该文件类型暂未开放，当前请选择 Oracle AWR 报告' }
+    const filters = [
+      { name: 'Oracle AWR 报告', extensions: ['awr', 'txt', 'html', 'htm', 'log'] },
+      { name: '所有文件', extensions: ['*'] }
+    ]
+    const r = win ? await dialog.showOpenDialog(win, { properties: ['openFile'], filters }) : await dialog.showOpenDialog({ properties: ['openFile'], filters })
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true }
+    const p = r.filePaths[0]
+    try {
+      const st = await fs.stat(p)
+      if (!st.isFile()) return { ok: false, error: '请选择文件而不是目录' }
+      if (st.size > 20 * 1024 * 1024) return { ok: false, error: '文件超过 20MB，请先拆分后再脱敏' }
+      const content = await fs.readFile(p, 'utf8')
+      return { ok: true, path: p, fileName: path.basename(p), size: st.size, content }
+    } catch (e: any) {
+      return { ok: false, error: `读取文件失败：${e?.message || e}` }
+    }
+  })
+
+  ipcMain.handle('mask:text', (_e, { fileType, content }: { fileType: MaskingFileType; content: string }) => {
+    if (fileType !== 'oracle_awr') return { ok: false, error: '该文件类型暂未开放，当前支持 Oracle AWR 报告' }
+    if (typeof content !== 'string') return { ok: false, error: '文件内容无效' }
+    if (content.length > 20 * 1024 * 1024) return { ok: false, error: '文件超过 20MB，请先拆分后再脱敏' }
+    try {
+      const cfg = loadConfig()
+      const r = maskText(content, fileType, cfg.masking as MaskingConfig)
+      return { ok: true, ...r }
+    } catch (e: any) {
+      return { ok: false, error: `脱敏失败：${e?.message || e}` }
+    }
+  })
+
+  ipcMain.handle('mask:save', async (_e, { fileName, content }: { fileName: string; content: string }) => {
+    if (typeof content !== 'string') return { ok: false, error: '脱敏内容无效' }
+    const ext = path.extname(fileName || '').toLowerCase()
+    const outExt = ext === '.html' || ext === '.htm' ? '.masked.html' : '.masked.txt'
+    const base = path.basename(fileName || 'awr-report', ext)
+    const defaultPath = `${base}${outExt}`
+    const filters = outExt === '.masked.html'
+      ? [{ name: '已脱敏 AWR HTML', extensions: ['html', 'htm'] }]
+      : [{ name: '已脱敏 AWR 文本', extensions: ['txt', 'awr', 'log'] }]
+    const r = win ? await dialog.showSaveDialog(win, { defaultPath, filters }) : await dialog.showSaveDialog({ defaultPath, filters })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      writeFileAtomic(r.filePath, content)
+      return { ok: true, path: r.filePath }
+    } catch (e: any) {
+      return { ok: false, error: `保存失败：${e?.message || e}` }
+    }
+  })
   ipcMain.handle('project:save', (_e, { project }: { project: ProjectConfig }) => {
     const cfg = loadConfig()
     // 服务器全局注册后项目只存引用：剔除旧渲染层可能回传的内联定义，以 serverIds 为准
@@ -589,7 +658,15 @@ export function registerIpc(): void {
     const profile = cfg.connections.find((c) => c.id === connId)
     if (!profile) return { ok: false, error: '连接不存在' }
     const v = classifySql(sql)
-    const isOracle = profile.type === 'oracle'
+    if (!v.ok && profile.role === 'readonly') {
+      appendAudit({
+        kind: 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)',
+        detail: '只读连接拒绝写语句', sql, mode: 'human', approved: false,
+        error: `语句类别: ${v.kind}`
+      })
+      return { ok: false, error: `连接「${profile.name}」标记为只读账号，禁止执行 ${v.kind.toUpperCase()} 语句。如确需变更，请使用管理账号连接。` }
+    }
+    const isOracle = isOracleProtocol(profile)
     // 按数据库特性处理事务：Oracle 本身无自动提交——控制台 DML 保持事务打开，
     // 由用户显式 COMMIT/ROLLBACK（DDL 在 Oracle 内部隐式提交，属数据库自身行为）；
     // MySQL/OB 连接为原生 autocommit，无需额外提交
@@ -646,7 +723,7 @@ export function registerIpc(): void {
     if (!profile) return { ok: false, error: '连接不存在' }
     try {
       const adapter = getAdapter(profile, cfg.instantClientDir)
-      const isOracle = profile.type === 'oracle'
+      const isOracle = isOracleProtocol(profile)
       const s = isOracle ? schema.toUpperCase() : schema
       const t = isOracle ? table.toUpperCase() : table
       const ident = `${quoteIdent(isOracle, s)}.${quoteIdent(isOracle, t)}`
@@ -718,8 +795,11 @@ export function registerIpc(): void {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === connId)
     if (!profile) return { ok: false, error: '连接不存在' }
-    const s = profile.type === 'oracle' ? schema.toUpperCase() : schema
-    const t = profile.type === 'oracle' ? table.toUpperCase() : table
+    if (profile.role === 'readonly') {
+      return { ok: true, editable: false, reason: '只读账号连接不可网格编辑', keyMode: 'cols', keyCols: [], readonlyCols: [] }
+    }
+    const s = isOracleProtocol(profile) ? schema.toUpperCase() : schema
+    const t = isOracleProtocol(profile) ? table.toUpperCase() : table
     try {
       const info = await cached(metaKeys.describe(connId, s, t), !!refresh, () =>
         getAdapter(profile, cfg.instantClientDir).describeTable(s, t)
@@ -748,8 +828,8 @@ export function registerIpc(): void {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === connId)
     if (!profile) return { ok: false, error: '连接不存在' }
-    const s = profile.type === 'oracle' ? schema.toUpperCase() : schema
-    const t = profile.type === 'oracle' ? table.toUpperCase() : table
+    const s = isOracleProtocol(profile) ? schema.toUpperCase() : schema
+    const t = isOracleProtocol(profile) ? table.toUpperCase() : table
     try {
       const adapter = getAdapter(profile, cfg.instantClientDir)
       if (!adapter.editSupport) {
@@ -776,7 +856,14 @@ export function registerIpc(): void {
     if (!profile) return { ok: false, error: '连接不存在' }
     if (!sessionKey) return { ok: false, error: '缺少会话标识' }
     if (!Array.isArray(edits) || !edits.length) return { ok: false, error: '没有要保存的修改' }
-    const isOracle = profile.type === 'oracle'
+    if (profile.role === 'readonly') {
+      appendAudit({
+        kind: 'sql.write', actor: 'human', conn: profile.name, target: `${schema}.${table}`,
+        detail: '只读连接拒绝网格编辑', mode: 'human', approved: false, error: 'readonly connection'
+      })
+      return { ok: false, error: `连接「${profile.name}」标记为只读账号，禁止网格编辑。` }
+    }
+    const isOracle = isOracleProtocol(profile)
     const s = isOracle ? schema.toUpperCase() : schema
     const t = isOracle ? table.toUpperCase() : table
     const ident = `${quoteIdent(isOracle, s)}.${quoteIdent(isOracle, t)}`
@@ -880,6 +967,7 @@ export function registerIpc(): void {
   // ---------- 数据库信息面板（Navicat 式概览，逐项容错：无权限的项自动略过） ----------
   interface InfoSection { title: string; rows: { k: string; v: string }[] }
   interface InfoTable { title: string; columns: string[]; rows: any[][] }
+  const businessSchemaFilter = `table_schema NOT IN (${[...MYSQL_SYSTEM_SCHEMAS].map((s) => `'${s}'`).join(', ')})`
 
   async function tryQuery(adapter: any, sql: string): Promise<any[][] | null> {
     try {
@@ -888,6 +976,23 @@ export function registerIpc(): void {
     } catch {
       return null
     }
+  }
+
+  async function tryQueryResult(adapter: any, sql: string): Promise<{ columns: string[]; rows: any[][] } | null> {
+    try {
+      const r = await adapter.query(sql, 500, 30_000)
+      return { columns: r.columns, rows: r.rows as any[][] }
+    } catch {
+      return null
+    }
+  }
+
+  const columnIndex = (columns: string[], names: string[]): number =>
+    columns.findIndex((column) => names.includes(column.toLowerCase()))
+
+  const columnValue = (columns: string[], row: any[], names: string[]): any => {
+    const index = columnIndex(columns, names)
+    return index >= 0 ? row[index] : undefined
   }
 
   const fmtMB = (bytes: any): string => {
@@ -901,11 +1006,14 @@ export function registerIpc(): void {
     return d > 0 ? `${d} 天 ${h} 小时` : `${h} 小时 ${Math.floor((s % 3600) / 60)} 分`
   }
 
-  async function oracleInfo(adapter: any): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
+  async function oracleInfo(adapter: any, profile: ConnProfile): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
     const sections: InfoSection[] = []
     const tables: InfoTable[] = []
 
-    const banner = await tryQuery(adapter, `SELECT banner FROM v$version WHERE banner LIKE 'Oracle%'`)
+    const isObOracle = profile.type === 'ob-oracle'
+    const banner = isObOracle
+      ? await tryQuery(adapter, `SELECT banner FROM v$version WHERE ROWNUM <= 2`)
+      : await tryQuery(adapter, `SELECT banner FROM v$version WHERE banner LIKE 'Oracle%'`)
     const inst = await tryQuery(adapter, `SELECT instance_name, host_name, status, TO_CHAR(startup_time, 'YYYY-MM-DD HH24:MI') FROM v$instance`)
     const db = await tryQuery(adapter, `SELECT name, TO_CHAR(created, 'YYYY-MM-DD'), log_mode, open_mode FROM v$database`)
     const nls = await tryQuery(adapter, `SELECT parameter, value FROM nls_database_parameters WHERE parameter IN ('NLS_LANGUAGE','NLS_CHARACTERSET','NLS_NCHAR_CHARACTERSET')`)
@@ -921,7 +1029,27 @@ export function registerIpc(): void {
         { k: '实例状态', v: String(inst[0][2]) }, { k: '启动时间', v: String(inst[0][3]) })
     }
     if (nls?.length) for (const r of nls) rows.push({ k: String(r[0]), v: String(r[1]) })
+    if (isObOracle) {
+      const tenant = profile.obTenant || profile.user.split('@')[1]?.split('#')[0]
+      const cluster = profile.obCluster || profile.user.split('#')[1]
+      rows.push(
+        { k: 'OceanBase 租户', v: tenant || '（未识别）' },
+        { k: 'OceanBase 集群', v: cluster || '（未配置）' },
+        { k: '连接入口', v: `${profile.obConnectMode === 'observer' ? 'Observer' : 'OBProxy'} · ${profile.host}:${profile.port}` }
+      )
+    }
     if (rows.length) sections.push({ title: '服务器', rows })
+
+    if (isObOracle) {
+      const zones = await tryQuery(adapter, `SELECT zone, status, info FROM SYS.DBA_OB_ZONES ORDER BY zone`)
+      if (zones) tables.push({ title: 'OB Zone 状态', columns: ['Zone', '状态', '说明'], rows: zones })
+
+      const servers = await tryQuery(adapter, `SELECT zone, svr_ip, status FROM SYS.GV$OB_SERVERS ORDER BY zone`)
+      if (servers) tables.push({ title: 'OB 节点', columns: ['Zone', '服务器', '状态'], rows: servers })
+
+      const compaction = await tryQuery(adapter, `SELECT status, frozen_scn, last_scn, TO_CHAR(last_finish_time, 'YYYY-MM-DD HH24:MI:SS') FROM SYS.DBA_OB_MAJOR_COMPACTION`)
+      if (compaction) tables.push({ title: '合并状态（Major Compaction）', columns: ['状态', 'Frozen SCN', 'Last SCN', '完成时间'], rows: compaction })
+    }
 
     const sess = await tryQuery(adapter, `SELECT COUNT(*), COUNT(CASE WHEN wait_class <> 'Idle' AND username IS NOT NULL THEN 1 END) FROM v$session`)
     if (sess) {
@@ -955,14 +1083,185 @@ export function registerIpc(): void {
     return { sections, tables }
   }
 
-  async function mysqlInfo(adapter: any, isOb: boolean): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
+  async function obOracleInfo(adapter: any, profile: ConnProfile): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
     const sections: InfoSection[] = []
     const tables: InfoTable[] = []
+    const diagnostics: string[] = []
+
+    const version = await tryQuery(adapter, 'SELECT banner FROM v$version WHERE ROWNUM <= 2')
+    const tenant = await tryQuery(adapter, `
+      SELECT tenant_id, tenant_name, tenant_type, primary_zone, locality, compatibility_mode,
+             status, tenant_role, switchover_status, log_mode, unit_num, compatible
+      FROM SYS.DBA_OB_TENANTS`)
+    const nls = await tryQuery(adapter, `
+      SELECT parameter, value FROM NLS_DATABASE_PARAMETERS
+      WHERE parameter IN ('NLS_LANGUAGE','NLS_CHARACTERSET','NLS_NCHAR_CHARACTERSET','NLS_DATE_FORMAT')`)
+    const sessions = await tryQuery(adapter, `
+      SELECT COUNT(*), COUNT(CASE WHEN command <> 'Sleep' THEN 1 END)
+      FROM SYS.GV$OB_PROCESSLIST`)
+
+    const serverRows: { k: string; v: string }[] = []
+    if (version?.length) serverRows.push({ k: '数据库产品', v: String(version[0][0]) })
+    if (tenant?.length) {
+      serverRows.push(
+        { k: '租户', v: `${tenant[0][1]}（ID ${tenant[0][0]}，${tenant[0][2]}）` },
+        { k: 'Primary Zone', v: String(tenant[0][3]) },
+        { k: 'Locality', v: String(tenant[0][4]) },
+        { k: '兼容模式', v: String(tenant[0][5]) },
+        { k: '租户状态', v: String(tenant[0][6]) },
+        { k: '租户角色', v: String(tenant[0][7]) },
+        { k: 'Switchover', v: String(tenant[0][8]) },
+        { k: '日志模式', v: String(tenant[0][9]) },
+        { k: 'Unit 数', v: String(tenant[0][10]) },
+        { k: '兼容版本', v: String(tenant[0][11]) }
+      )
+    }
+    serverRows.push(
+      { k: '连接入口', v: `${profile.obConnectMode === 'observer' ? 'Observer' : 'OBProxy'} · ${profile.host}:${profile.port}` },
+      { k: '配置租户', v: profile.obTenant || '（未识别）' },
+      { k: '配置集群', v: profile.obCluster || '（未配置）' }
+    )
+    if (nls?.length) sections.push({ title: 'NLS / 字符集', rows: nls.map((row) => ({ k: String(row[0]), v: String(row[1]) })) })
+    if (sessions?.length) {
+      sections.push({
+        title: '会话',
+        rows: [
+          { k: '会话总数', v: String(sessions[0][0]) },
+          { k: '活跃会话', v: `${sessions[0][1]}（GV$OB_PROCESSLIST，详见下方列表）` }
+        ]
+      })
+    }
+    sections.push({ title: '服务器 / 租户', rows: serverRows })
+
+    const databases = await tryQuery(adapter, `
+      SELECT database_name, in_recyclebin, collation, read_only, comment
+      FROM SYS.DBA_OB_DATABASES ORDER BY database_name`)
+    if (databases) tables.push({
+      title: '数据库 / Schema',
+      columns: ['数据库', '回收站', '字符序', '只读', '说明'],
+      rows: databases
+    })
+
+    const objects = await tryQuery(adapter, `
+      SELECT object_type, COUNT(*) FROM user_objects GROUP BY object_type ORDER BY 1`)
+    if (objects) tables.push({ title: '当前用户对象统计', columns: ['对象类型', '数量'], rows: objects })
+
+    const logStreams = await tryQuery(adapter, `
+      SELECT ls_id, status, primary_zone, unit_group_id, ls_group_id, sync_scn, readable_scn
+      FROM SYS.DBA_OB_LS ORDER BY ls_id`)
+    if (logStreams) tables.push({
+      title: 'LogStream',
+      columns: ['LS', '状态', 'Primary Zone', 'Unit Group', 'LS Group', 'Sync SCN', 'Readable SCN'],
+      rows: logStreams
+    })
+
+    const lsLocations = await tryQuery(adapter, `
+      SELECT ls_id, zone, svr_ip, svr_port, role, replica_type, paxos_replica_number, member_list
+      FROM SYS.DBA_OB_LS_LOCATIONS ORDER BY ls_id, zone, svr_ip`)
+    if (lsLocations) tables.push({
+      title: 'LogStream 副本分布',
+      columns: ['LS', 'Zone', '服务器', 'RPC 端口', '角色', '副本类型', 'Paxos 副本数', '成员列表'],
+      rows: lsLocations
+    })
+
+    const replicaDistribution = await tryQuery(adapter, `
+      SELECT zone, role, COUNT(*)
+      FROM SYS.DBA_OB_TABLE_LOCATIONS GROUP BY zone, role ORDER BY zone, role`)
+    if (replicaDistribution) tables.push({
+      title: '表副本分布（按 Zone/角色）',
+      columns: ['Zone', '角色', '副本记录数'],
+      rows: replicaDistribution
+    })
+
+    const tabletStorage = await tryQuery(adapter, `
+      SELECT svr_ip, COUNT(*), ROUND(SUM(data_size) / 1048576, 1), ROUND(SUM(required_size) / 1048576, 1)
+      FROM SYS.DBA_OB_TABLET_REPLICAS GROUP BY svr_ip ORDER BY svr_ip`)
+    if (tabletStorage) tables.push({
+      title: 'Tablet 存储分布',
+      columns: ['服务器', 'Tablet 副本数', '数据量 MB', '占用 MB'],
+      rows: tabletStorage
+    })
+
+    const compaction = await tryQuery(adapter, `
+      SELECT frozen_scn, global_broadcast_scn, last_scn,
+             last_finish_time, start_time, status, is_error, is_suspended
+      FROM SYS.DBA_OB_MAJOR_COMPACTION`)
+    if (compaction) tables.push({
+      title: '合并状态（Major Compaction）',
+      columns: ['Frozen SCN', 'Broadcast SCN', 'Last SCN', 'Last Finish SCN', 'Start SCN', '状态', '错误', '暂停'],
+      rows: compaction
+    })
+
+    const activeSessions = await tryQuery(adapter, `
+      SELECT svr_ip, id, "USER", host, db, command, time, total_time, state,
+             sql_id, trans_id, user_client_ip, in_bytes, out_bytes
+      FROM SYS.GV$OB_PROCESSLIST
+      WHERE command <> 'Sleep' ORDER BY total_time DESC`)
+    if (activeSessions) tables.push({
+      title: '活跃会话',
+      columns: ['服务器', '连接 ID', '用户', '客户端', '数据库', '命令', '秒', '累计毫秒', '状态', 'SQL ID', '事务 ID', '用户 IP', '入站', '出站'],
+      rows: activeSessions
+    })
+
+    const deadlocks = await tryQuery(adapter, `
+      SELECT event_id, svr_ip, svr_port, TO_CHAR(report_time, 'YYYY-MM-DD HH24:MI:SS'),
+             cycle_idx, cycle_size, role, priority, module, visitor, object
+      FROM SYS.DBA_OB_DEADLOCK_EVENT_HISTORY ORDER BY report_time DESC`)
+    if (deadlocks) tables.push({
+      title: '死锁历史',
+      columns: ['事件', '服务器', '端口', '报告时间', '环序号', '环大小', '角色', '优先级', '模块', '访问者', '对象'],
+      rows: deadlocks
+    })
+
+    const concurrentLimits = await tryQuery(adapter, `
+      SELECT database_name, outline_name, concurrent_num, limit_target, visible_signature, sql_text
+      FROM SYS.DBA_OB_CONCURRENT_LIMIT_SQL ORDER BY database_name, outline_name`)
+    if (concurrentLimits) tables.push({
+      title: '并发限制',
+      columns: ['数据库', '规则名', '并发数', '限制目标', '签名', 'SQL'],
+      rows: concurrentLimits
+    })
+
+    const parameters = await tryQuery(adapter, `
+      SELECT name, value FROM SYS.DBA_OB_SYS_VARIABLES
+      WHERE name IN (
+        'autocommit','sql_mode','max_connections','ob_query_timeout','ob_trx_timeout',
+        'ob_max_read_concurrent_sessions','net_read_timeout','net_write_timeout',
+        'query_cache_size','max_allowed_packet','tx_isolation'
+      ) ORDER BY name`)
+    if (parameters) sections.push({ title: '关键参数', rows: parameters.map((row) => ({ k: String(row[0]), v: String(row[1]) })) })
+
+    const unavailableViews = [
+      ['Zone / 节点拓扑', 'SYS.DBA_OB_ZONES / SYS.GV$OB_SERVERS'],
+      ['租户 Unit / 资源池', 'SYS.DBA_OB_UNITS / SYS.DBA_OB_RESOURCE_POOLS'],
+      ['MemStore 转储压力', 'SYS.GV$OB_MEMSTORE']
+    ]
+    for (const [label, view] of unavailableViews) {
+      diagnostics.push(`${label}：当前 Oracle 租户账号不可见 ${view}；请使用 sys 租户或集群级监控查看。`)
+    }
+    sections.push({ title: '采集诊断', rows: diagnostics.map((message) => ({ k: '提示', v: message })) })
+    return { sections, tables }
+  }
+
+  async function mysqlInfo(adapter: any, profile: ConnProfile): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
+    const sections: InfoSection[] = []
+    const tables: InfoTable[] = []
+    const isOb = profile.type === 'ob-mysql'
+    const diagnostics: string[] = []
 
     const ver = await tryQuery(adapter, `SELECT VERSION()`)
     const rows: { k: string; v: string }[] = []
     if (ver?.length) rows.push({ k: '数据库版本', v: String(ver[0][0]) })
     if (isOb) {
+      const legacyUser = profile.user.split('@')
+      const legacyTenant = legacyUser[1]?.split('#')[0]
+      const legacyCluster = profile.user.split('#')[1]
+      rows.push(
+        { k: '连接入口', v: `${profile.obConnectMode === 'observer' ? 'Observer' : 'OBProxy'} · ${profile.host}:${profile.port}` },
+        { k: '配置租户', v: profile.obTenant || legacyTenant || '（未识别）' },
+        { k: '配置集群', v: profile.obCluster || legacyCluster || '（未配置）' },
+        { k: '默认数据库', v: profile.database || '（未配置）' }
+      )
       const obv = await tryQuery(adapter, `SELECT ob_version()`)
       if (obv?.length) rows.push({ k: 'OceanBase 版本', v: String(obv[0][0]) })
       const tenant = await tryQuery(adapter, `SELECT tenant_name FROM oceanbase.DBA_OB_TENANTS WHERE tenant_id = (SELECT effective_tenant_id())`)
@@ -996,13 +1295,135 @@ export function registerIpc(): void {
     const size = await tryQuery(adapter, `
       SELECT table_schema, COUNT(*), IFNULL(ROUND(SUM(data_length + index_length) / 1048576, 1), 0)
       FROM information_schema.tables
-      WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys','oceanbase','SYS','LBACSYS','ORAAUDITOR','__public__')
+      WHERE ${businessSchemaFilter}
       GROUP BY table_schema ORDER BY SUM(data_length + index_length) DESC LIMIT 15`)
     if (size) tables.push({ title: '库容量 TOP 15', columns: ['数据库', '表数', '数据量 MB'], rows: size })
 
     if (isOb) {
-      const zones = await tryQuery(adapter, `SELECT zone, svr_ip, status FROM oceanbase.GV$OB_SERVERS ORDER BY zone`)
-      if (zones) tables.push({ title: 'OB 节点（GV$OB_SERVERS）', columns: ['Zone', '服务器', '状态'], rows: zones })
+      const tenant = await tryQuery(adapter, `
+        SELECT tenant_name, primary_zone, compatibility_mode, status, unit_num
+        FROM oceanbase.DBA_OB_TENANTS
+        WHERE tenant_id = (SELECT effective_tenant_id())`)
+      if (tenant) {
+        sections.push({
+          title: 'OceanBase 租户',
+          rows: [
+            { k: '租户名', v: String(tenant[0][0]) },
+            { k: 'Primary Zone', v: String(tenant[0][1]) },
+            { k: '兼容模式', v: String(tenant[0][2]) },
+            { k: '状态', v: String(tenant[0][3]) },
+            { k: 'Unit 数', v: String(tenant[0][4]) }
+          ]
+        })
+      }
+
+      const poolResult = await tryQueryResult(adapter, `
+        SELECT * FROM oceanbase.DBA_OB_RESOURCE_POOLS
+        WHERE tenant_id = (SELECT effective_tenant_id())`)
+      if (!poolResult) {
+        diagnostics.push('租户资源池采集失败：可能缺少 DBA_OB_RESOURCE_POOLS 权限，或当前 OB 版本不提供该视图。')
+      } else {
+        const configResult = await tryQueryResult(adapter, `SELECT * FROM oceanbase.DBA_OB_UNIT_CONFIGS`)
+        if (!configResult) diagnostics.push('Unit 规格采集失败：可能缺少 DBA_OB_UNIT_CONFIGS 权限，或当前 OB 版本不提供该视图。')
+        const configIdIndex = columnIndex(configResult?.columns || [], ['unit_config_id'])
+        const configById = new Map<string, any[]>()
+        for (const row of configResult?.rows || []) {
+          const id = configIdIndex >= 0 ? String(row[configIdIndex]) : ''
+          if (id) configById.set(id, row)
+        }
+        const poolConfigIdIndex = columnIndex(poolResult.columns, ['unit_config_id'])
+        const resourceRows = poolResult.rows.map((poolRow) => {
+          const configRow = poolConfigIdIndex >= 0 ? configById.get(String(poolRow[poolConfigIdIndex])) : undefined
+          const memory = columnValue(configResult?.columns || [], configRow || [], ['max_memory', 'memory_size'])
+          const disk = columnValue(configResult?.columns || [], configRow || [], ['max_disk_size', 'log_disk_size'])
+          return [
+            columnValue(poolResult.columns, poolRow, ['resource_pool_name', 'name']),
+            columnValue(poolResult.columns, poolRow, ['unit_count']),
+            columnValue(configResult?.columns || [], configRow || [], ['name']),
+            columnValue(configResult?.columns || [], configRow || [], ['max_cpu']),
+            memory === undefined || memory === null ? '—' : fmtMB(memory),
+            disk === undefined || disk === null ? '—' : fmtMB(disk),
+            columnValue(configResult?.columns || [], configRow || [], ['max_session_num'])
+          ]
+        })
+        tables.push({
+          title: '租户资源池 / Unit 规格',
+          columns: ['资源池', 'Unit 数', '规格名', 'Max CPU', 'Max Memory', 'Max/Log Disk', 'Max Session'],
+          rows: resourceRows
+        })
+      }
+
+      const units = await tryQuery(adapter, `
+        SELECT unit_id, unit_group_id, zone, svr_ip, svr_port, status
+        FROM oceanbase.DBA_OB_UNITS ORDER BY zone, svr_ip, unit_id`)
+      if (units) tables.push({
+        title: 'Unit 分布',
+        columns: ['Unit', 'Unit Group', 'Zone', '服务器', 'SQL 端口', '状态'],
+        rows: units
+      })
+
+      const zones = await tryQuery(adapter, `SELECT zone, status, info FROM oceanbase.DBA_OB_ZONES ORDER BY zone`)
+      if (zones) tables.push({ title: 'Zone 状态', columns: ['Zone', '状态', '说明'], rows: zones })
+
+      const servers = await tryQuery(adapter, `SELECT zone, svr_ip, status FROM oceanbase.GV$OB_SERVERS ORDER BY zone`)
+      if (servers) tables.push({ title: 'OB 节点', columns: ['Zone', '服务器', '状态'], rows: servers })
+
+      const memstore = await tryQuery(adapter, `
+        SELECT svr_ip, active, hold, freeze_cnt,
+               ROUND(active / NULLIF(hold, 0) * 100, 1)
+        FROM oceanbase.GV$OB_MEMSTORE
+        WHERE tenant_id = (SELECT effective_tenant_id()) ORDER BY svr_ip`)
+      if (memstore) tables.push({
+        title: 'MemStore / 转储压力',
+        columns: ['服务器', 'Active', 'Hold', 'Freeze 次数', '使用率 %'],
+        rows: memstore
+      })
+
+      const compaction = await tryQuery(adapter, `
+        SELECT status, frozen_scn, last_scn, last_finish_time
+        FROM oceanbase.DBA_OB_MAJOR_COMPACTION`)
+      if (compaction) tables.push({
+        title: '合并状态（Major Compaction）',
+        columns: ['状态', 'Frozen SCN', 'Last SCN', '完成时间'],
+        rows: compaction
+      })
+
+      const activeSessions = await tryQuery(adapter, `
+        SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE
+        FROM information_schema.PROCESSLIST
+        WHERE COMMAND <> 'Sleep' ORDER BY TIME DESC LIMIT 50`)
+      if (activeSessions) tables.push({
+        title: '活跃会话 TOP 50',
+        columns: ['连接 ID', '用户', '客户端', '数据库', '命令', '持续秒', '状态'],
+        rows: activeSessions
+      })
+
+      const trx = await tryQuery(adapter, `
+        SELECT trx_id, trx_state, trx_started, trx_mysql_thread_id, trx_query
+        FROM information_schema.INNODB_TRX ORDER BY trx_started LIMIT 50`)
+      if (trx) tables.push({
+        title: '当前事务（需视图权限）',
+        columns: ['事务 ID', '状态', '开始时间', '连接 ID', 'SQL'],
+        rows: trx
+      })
+
+      const lockWaits = await tryQuery(adapter, `
+        SELECT requesting_trx_id, requested_lock_id, blocking_trx_id, blocking_lock_id
+        FROM information_schema.INNODB_LOCK_WAITS LIMIT 50`)
+      if (lockWaits) tables.push({
+        title: '锁等待（需视图权限）',
+        columns: ['等待事务', '请求锁', '阻塞事务', '阻塞锁'],
+        rows: lockWaits
+      })
+
+      const params = await tryQuery(adapter, `
+        SHOW VARIABLES WHERE Variable_name IN (
+          'autocommit','tx_isolation','sql_mode','max_connections',
+          'ob_query_timeout','ob_trx_timeout','ob_max_read_concurrent_sessions',
+          'net_read_timeout','net_write_timeout'
+        )`)
+      if (params) sections.push({ title: 'OceanBase 关键参数', rows: params.map((r) => ({ k: String(r[0]), v: String(r[1]) })) })
+      if (diagnostics.length) sections.push({ title: '采集诊断', rows: diagnostics.map((message) => ({ k: '提示', v: message })) })
     }
     return { sections, tables }
   }
@@ -1015,9 +1436,11 @@ export function registerIpc(): void {
       const adapter = getAdapter(profile, cfg.instantClientDir)
       // 先显式建连：账号/网络错误直接透出，而不是显示成"未采集到信息"
       await adapter.connect()
-      const data = profile.type === 'oracle'
-        ? await oracleInfo(adapter)
-        : await mysqlInfo(adapter, profile.type === 'ob-mysql')
+      const data = profile.type === 'ob-oracle'
+        ? await obOracleInfo(adapter, profile)
+        : isOracleProtocol(profile)
+        ? await oracleInfo(adapter, profile)
+        : await mysqlInfo(adapter, profile)
       return { ok: true, ...data }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
@@ -1032,15 +1455,45 @@ export function registerIpc(): void {
     'INST_ID', 'SID', 'SERIAL#', 'USERNAME', 'TADDR', 'SQL_ID', 'PREV_SQL_ID',
     'EVENT', 'PROGRAM', 'STATE', 'LAST_CALL_ET', 'LOGON_TIME', 'BLOCKING_SESSION', 'BLOCKING_INSTANCE'
   ]
+  const OB_ORACLE_ACTIVE_SESSION_DEFAULT_COLS = [
+    'SVR_IP', 'ID', 'USER', 'HOST', 'DB', 'COMMAND', 'TIME', 'TOTAL_TIME',
+    'STATE', 'SQL_ID', 'TRANS_ID', 'USER_CLIENT_IP', 'IN_BYTES', 'OUT_BYTES'
+  ]
 
   ipcMain.handle('conn:activeSessions', async (_e, { id, columns }: { id: string; columns?: string[] }) => {
     const cfg = loadConfig()
     const profile = cfg.connections.find((c) => c.id === id)
     if (!profile) return { ok: false, error: '连接不存在' }
-    if (profile.type !== 'oracle') return { ok: false, error: '仅 Oracle 连接支持活跃会话查询' }
+    if (!isOracleProtocol(profile)) return { ok: false, error: '仅 Oracle 协议连接支持活跃会话查询' }
     try {
       const adapter = getAdapter(profile, cfg.instantClientDir)
       await adapter.connect()
+      if (profile.type === 'ob-oracle') {
+        const probe = await adapter.query('SELECT * FROM SYS.GV$OB_PROCESSLIST WHERE ROWNUM <= 1', 1, 30_000)
+        const available = (probe.columns || []).map((column: string) => String(column).toUpperCase())
+        const defaults = OB_ORACLE_ACTIVE_SESSION_DEFAULT_COLS
+        const wanted = (columns?.length ? columns : defaults).map((column) => String(column).toUpperCase())
+        const use = [...new Set(wanted)].filter((column) => available.includes(column))
+        if (!use.length) return { ok: false, error: `所选列在 GV$OB_PROCESSLIST 中均不存在。可用列: ${available.join(', ')}` }
+        const quote = (name: string) => `"${name.replace(/"/g, '""')}"`
+        const sql = `
+          SELECT ${use.map(quote).join(', ')} FROM (
+            SELECT ${use.map(quote).join(', ')}
+            FROM SYS.GV$OB_PROCESSLIST
+            WHERE command <> 'Sleep'
+            ORDER BY total_time DESC, time DESC
+          ) WHERE ROWNUM <= 500`
+        const result = await adapter.query(sql, 500, 60_000)
+        const skipped = wanted.filter((column) => !use.includes(column))
+        return {
+          ok: true,
+          available,
+          columns: use,
+          rows: result.rows,
+          ms: result.ms,
+          note: skipped.length ? `本版本无这些列，已忽略: ${skipped.join(', ')}` : undefined
+        }
+      }
       // 探测真实列：SELECT * 取一行 metaData（无需 DESC，也避免 GV_$SESSION 命名差异）
       const probe = await adapter.query('SELECT * FROM gv$session WHERE ROWNUM <= 1', 1, 30_000)
       const available = (probe.columns || []).map((c: string) => String(c).toUpperCase())

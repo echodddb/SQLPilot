@@ -1,6 +1,7 @@
 import oracledb from 'oracledb'
 import type { ConnProfile, DbAdapter, EditSupport, QueryResult, TableInfo } from '../types'
 import { getPassword } from '../secrets'
+import { profileObTenant } from './connection-profile'
 
 oracledb.fetchAsString = [oracledb.CLOB, oracledb.NCLOB]
 
@@ -25,6 +26,13 @@ interface OraConnection {
   callTimeout: number
 }
 
+const ORACLE_SYSTEM_OWNERS = new Set([
+  'SYS', 'SYSTEM', 'SYSAUX', 'OUTLN', 'XDB', 'ANONYMOUS', 'APPQOSSYS', 'DBSNMP',
+  'ORDDATA', 'ORDSYS', 'MDDATA', 'MDSYS', 'OLAPSYS', 'CTXSYS', 'EXFSYS',
+  'WMSYS', 'LBACSYS', 'DVSYS', 'DVF', 'AUDSYS', 'GSMADMIN_INTERNAL', 'OJVMSYS',
+  '__PUBLIC__', 'ORAAUDITOR'
+])
+
 // initOracleClient 全进程只能调一次，这里做防重入
 const thickState = { done: false }
 
@@ -41,25 +49,35 @@ export function initThick(libDir?: string): void {
 
 export class OracleAdapter implements DbAdapter {
   kind = 'oracle'
-  private conn: OraConnection | null = null
-  private connPromise: Promise<OraConnection> | null = null
+  protected conn: OraConnection | null = null
+  protected connPromise: Promise<OraConnection> | null = null
   /** 连接上的操作串行化：多会话共用同一 profile 连接时，oracledb 不允许并发 execute */
-  private opChain: Promise<unknown> = Promise.resolve()
+  protected opChain: Promise<unknown> = Promise.resolve()
 
-  private runSerial<T>(fn: () => Promise<T>): Promise<T> {
+  protected runSerial<T>(fn: () => Promise<T>): Promise<T> {
     const p = this.opChain.then(fn, fn)
     this.opChain = p.catch(() => {})
     return p
   }
 
   constructor(
-    private profile: ConnProfile,
-    private defaultClientDir?: string,
+    protected profile: ConnProfile,
+    protected defaultClientDir?: string,
     /** 测试连接时传入的临时密码（不落盘） */
-    private passwordOverride?: string
-  ) {}
+    protected passwordOverride?: string
+  ) {
+    this.kind = profile.type
+  }
 
-  private async ensure(): Promise<OraConnection> {
+  protected connectionUser(): string {
+    return this.profile.user
+  }
+
+  protected connectString(): string {
+    return `${this.profile.host}:${this.profile.port}/${this.profile.serviceName || ''}`
+  }
+
+  protected async ensure(): Promise<OraConnection> {
     if (this.conn) {
       try {
         await this.conn.execute('SELECT 1 FROM DUAL', {}, { maxRows: 1 })
@@ -73,11 +91,10 @@ export class OracleAdapter implements DbAdapter {
       this.connPromise = (async () => {
         const libDir = this.profile.instantClientDir || this.defaultClientDir
         if (libDir) initThick(libDir)
-        const cs = `${this.profile.host}:${this.profile.port}/${this.profile.serviceName || ''}`
         const c = await oracledb.getConnection({
-          user: this.profile.user,
+          user: this.connectionUser(),
           password: this.passwordOverride ?? getPassword(this.profile.id),
-          connectString: cs,
+          connectString: this.connectString(),
           connectTimeout: 10000
         })
         c.callTimeout = 60000
@@ -99,7 +116,7 @@ export class OracleAdapter implements DbAdapter {
     return this.runSerial(() => this.testInner())
   }
 
-  private async testInner(): Promise<string> {
+  protected async testInner(): Promise<string> {
     const c = await this.ensure()
     try {
       const r = await c.execute<string[]>(`SELECT banner FROM v$version WHERE banner LIKE 'Oracle%'`, {}, { maxRows: 2, outFormat: oracledb.OUT_FORMAT_ARRAY })
@@ -121,7 +138,7 @@ export class OracleAdapter implements DbAdapter {
       {},
       { maxRows: 2000, outFormat: oracledb.OUT_FORMAT_ARRAY }
     )
-    return r.rows.map((x: any) => x[0])
+    return r.rows.map((x: any) => String(x[0])).filter((owner) => !ORACLE_SYSTEM_OWNERS.has(owner.toUpperCase()))
   }
 
   async listTables(schema: string): Promise<TableInfo[]> {

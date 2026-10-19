@@ -14,7 +14,7 @@
             <option value="oracle">Oracle（11g / 19c）</option>
             <option value="ob-mysql">OceanBase · MySQL 租户</option>
             <option value="mysql">MySQL</option>
-            <option value="ob-oracle" disabled>OceanBase · Oracle 租户（M2 接入）</option>
+            <option value="ob-oracle">OceanBase · Oracle 租户</option>
           </select>
         </div>
       </div>
@@ -26,27 +26,45 @@
         </div>
         <div>
           <label>端口</label>
-          <input type="number" v-model.number="form.port" />
+          <input type="number" v-model.number="form.port" @change="portTouched = true" />
+        </div>
+      </div>
+
+      <div class="form-row" v-if="isObTenant">
+        <div>
+          <label>连接方式</label>
+          <select v-model="form.obConnectMode">
+            <option value="obproxy">OBProxy（生产推荐）</option>
+            <option value="observer">直连 Observer（排障）</option>
+          </select>
+        </div>
+        <div>
+          <label>租户 *</label>
+          <input type="text" v-model="form.obTenant" placeholder="如 biz_tenant" />
+        </div>
+        <div>
+          <label>集群名（OBProxy 建议填写）</label>
+          <input type="text" v-model="form.obCluster" placeholder="如 prod_cluster" />
         </div>
       </div>
 
       <div class="form-row" v-if="form.type === 'oracle'">
         <div>
-          <label>服务名（Service Name）</label>
-          <input type="text" v-model="form.serviceName" placeholder="orcl" />
+          <label>{{ form.type === 'oracle' ? '服务名（Service Name）' : 'Oracle Net 服务名（可选）' }}</label>
+          <input type="text" v-model="form.serviceName" :placeholder="form.type === 'oracle' ? 'orcl' : '通常可留空，由 OB 租户路由决定'" />
         </div>
       </div>
       <div class="form-row" v-else>
         <div>
-          <label>数据库（可留空）</label>
+          <label>{{ form.type === 'ob-mysql' ? '数据库 *' : '数据库（可留空）' }}</label>
           <input type="text" v-model="form.database" placeholder="业务库名" />
         </div>
       </div>
 
       <div class="form-row">
         <div>
-          <label>用户名</label>
-          <input type="text" v-model="form.user" placeholder="数据库账号" />
+          <label>{{ isObTenant ? '用户名（不含租户）' : '用户名' }}</label>
+          <input type="text" v-model="form.user" :placeholder="isObTenant ? '如 dbadmin' : '数据库账号'" />
         </div>
         <div>
           <label>密码</label>
@@ -65,6 +83,25 @@
         <div>
           <label>Instant Client 目录（连 11g 必填；19c 纯协议可留空）</label>
           <input type="text" v-model="form.instantClientDir" placeholder="D:\instantclient_19_x，留空则用全局设置" />
+        </div>
+      </div>
+
+      <div class="form-row" v-if="form.type === 'mysql' || isObTenant">
+        <div>
+          <label>
+            <input type="checkbox" v-model="form.ssl" style="width:auto;margin-right:6px" />
+            启用 SSL
+          </label>
+        </div>
+        <div>
+          <label>
+            <input type="checkbox" v-model="form.sslVerifyServer" :disabled="!form.ssl" style="width:auto;margin-right:6px" />
+            校验服务器证书
+          </label>
+        </div>
+        <div style="flex:2">
+          <label>SSL CA 证书路径（可选）</label>
+          <input type="text" v-model="form.sslCa" :disabled="!form.ssl" placeholder="D:\certs\obproxy-ca.pem" />
         </div>
       </div>
 
@@ -97,7 +134,21 @@ import { store } from '../store'
 const props = defineProps<{ editing: any }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
-const DEFAULT_PORT: Record<string, number> = { oracle: 1521, mysql: 3306, 'ob-mysql': 2881, 'ob-oracle': 2881 }
+const DEFAULT_PORT: Record<string, number> = { oracle: 1521, mysql: 3306, 'ob-mysql': 2883, 'ob-oracle': 2883 }
+const OB_DEFAULT_PORT: Record<string, number> = { obproxy: 2883, observer: 2881 }
+
+function parseObUser(user?: string): { user: string; tenant: string; cluster: string } {
+  const raw = (user || '').trim()
+  const match = raw.match(/^([^@#]+)(?:@([^#]+))?(?:#(.+))?$/)
+  return {
+    user: match?.[1] || raw,
+    tenant: match?.[2] || '',
+    cluster: match?.[3] || ''
+  }
+}
+
+const editingObUser = parseObUser(props.editing?.user)
+const editingIsObTenant = props.editing?.type === 'ob-mysql' || props.editing?.type === 'ob-oracle'
 
 const form = reactive({
   id: props.editing?.id || `conn_${Date.now()}`,
@@ -107,11 +158,21 @@ const form = reactive({
   port: props.editing?.port || 1521,
   serviceName: props.editing?.serviceName || '',
   database: props.editing?.database || '',
-  user: props.editing?.user || '',
+  user: editingIsObTenant ? editingObUser.user : props.editing?.user || '',
   role: props.editing?.role || 'readonly',
+  obConnectMode: editingIsObTenant
+    ? props.editing?.obConnectMode || (props.editing?.port === 2881 ? 'observer' : 'obproxy')
+    : 'obproxy',
+  obTenant: editingIsObTenant ? props.editing?.obTenant || editingObUser.tenant : '',
+  obCluster: editingIsObTenant ? props.editing?.obCluster || editingObUser.cluster : '',
+  ssl: props.editing?.ssl || false,
+  sslVerifyServer: props.editing?.sslVerifyServer || false,
+  sslCa: props.editing?.sslCa || '',
   instantClientDir: props.editing?.instantClientDir || '',
   projectId: (props.editing?.projectId as string) || ''
 })
+
+const isObTenant = computed(() => form.type === 'ob-mysql' || form.type === 'ob-oracle')
 
 const projects = computed(() => store.cfg?.projects || [])
 
@@ -122,20 +183,55 @@ const testMsg = ref('')
 
 // 切换数据库类型时联动默认端口（用户已手改过端口则不覆盖）
 let portTouched = false
-watch(
-  () => form.port,
-  () => { portTouched = true },
-  { once: true }
-)
+let sslDefaultInitialized = !!props.editing
 watch(
   () => form.type,
   (t, old) => {
     if (t !== old && !portTouched) form.port = DEFAULT_PORT[t] ?? 3306
+    if (isObTenant.value && form.obConnectMode !== 'observer') form.obConnectMode = 'obproxy'
+    if (isObTenant.value && !portTouched) form.port = OB_DEFAULT_PORT[form.obConnectMode] || 2883
+    if (t !== old && t !== 'mysql' && !isObTenant.value) {
+      form.ssl = false
+      form.sslVerifyServer = false
+      form.sslCa = ''
+    }
+  }
+)
+watch(
+  () => form.obConnectMode,
+  () => {
+    if (isObTenant.value && !portTouched) form.port = OB_DEFAULT_PORT[form.obConnectMode] || 2883
   }
 )
 
+watch(
+  () => form.ssl,
+  (enabled) => {
+    if (enabled && !sslDefaultInitialized) {
+      form.sslVerifyServer = true
+      sslDefaultInitialized = true
+    }
+  }
+)
+
+function validate(): string {
+  if (!form.name || !form.host || !form.user) return '名称、主机、用户名为必填'
+  if (form.type === 'oracle' && !form.serviceName) return 'Oracle 需要填写服务名'
+  if (isObTenant.value) {
+    if (!form.obTenant && !form.user.includes('@')) return 'OceanBase 需要填写租户'
+    if (/[@#]/.test(form.user) || /#/.test(form.obTenant) || /#/.test(form.obCluster)) return 'OceanBase 用户、租户、集群请分开填写，不要包含 @ 或 #'
+    if (form.obConnectMode === 'obproxy' && !form.obCluster) return '经 OBProxy 连接需要填写集群名'
+    if (form.type === 'ob-mysql' && !form.database) return 'OceanBase MySQL 租户需要显式指定业务数据库'
+  }
+  if (form.type === 'ob-mysql') {
+    if (form.ssl && form.sslVerifyServer && !form.sslCa) return '校验服务器证书需要填写 SSL CA 证书路径'
+  }
+  return ''
+}
+
 async function doTest() {
-  if (!form.host || !form.user) { testMsg.value = '请先填写主机和用户名'; testOk.value = false; return }
+  const validationError = validate()
+  if (validationError) { testMsg.value = validationError; testOk.value = false; return }
   testing.value = true
   testMsg.value = ''
   try {
@@ -151,8 +247,8 @@ async function doTest() {
 }
 
 async function doSave() {
-  if (!form.name || !form.host || !form.user) { window.sqlpilot.uiAlert('名称、主机、用户名为必填'); return }
-  if (form.type === 'oracle' && !form.serviceName) { window.sqlpilot.uiAlert('Oracle 需要填写服务名'); return }
+  const validationError = validate()
+  if (validationError) { window.sqlpilot.uiAlert(validationError); return }
   const r = await window.sqlpilot.saveConn({ ...form, projectId: form.projectId || null }, password.value || undefined)
   if (!r.ok) { window.sqlpilot.uiAlert(r.error || '保存失败'); return }
   store.cfg = await window.sqlpilot.getConfig()

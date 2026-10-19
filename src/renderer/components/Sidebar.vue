@@ -106,7 +106,7 @@
     <div v-if="openSections.has('conns')" class="conn-list" style="flex: 0 1 auto; max-height: 200px;">
       <div v-if="!groups.length" class="side-empty">
         还没有数据库连接。<br />点击本组标题行的 <b>＋</b> 添加：<br />
-        Oracle 11g / 19c、OceanBase（MySQL 租户）、MySQL 均已支持。连接可按需关联到项目，不关联则全局可用。
+        Oracle 11g / 19c、OceanBase（MySQL / Oracle 租户）、MySQL 均已支持。连接可按需关联到项目，不关联则全局可用。
       </div>
 
       <template v-for="g in groups" :key="g.type">

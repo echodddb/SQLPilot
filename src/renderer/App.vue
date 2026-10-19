@@ -68,7 +68,8 @@
         <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" @destroy="wbEverOpen = false; store.workbench = null" />
         <Taskbar />
       </template>
-      <ReportView v-else style="flex: 1; min-height: 0" />
+      <ReportView v-else-if="store.module === 'report'" style="flex: 1; min-height: 0" />
+      <MaskingView v-else style="flex: 1; min-height: 0" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
@@ -106,6 +107,7 @@ import { store, curSession, init, setSessionProvider, toPlain, createSessionInPr
 import Sidebar from './components/Sidebar.vue'
 import ModuleNav from './components/ModuleNav.vue'
 import ReportView from './components/ReportView.vue'
+import MaskingView from './components/MaskingView.vue'
 import Taskbar from './components/Taskbar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsView from './components/SettingsView.vue'

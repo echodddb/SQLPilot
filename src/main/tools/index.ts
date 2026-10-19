@@ -776,15 +776,16 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     }
 
     if (name === 'db_list_tables') {
-      const s = profile.type === 'oracle' ? String(args.schema).toUpperCase() : String(args.schema)
+      const s = profile.type === 'oracle' || profile.type === 'ob-oracle' ? String(args.schema).toUpperCase() : String(args.schema)
       const tables = await cached(metaKeys.tables(profile.id, s), false, () => adapter.listTables(s))
       audit({ kind: 'tool', conn: profile.name, target: String(args.schema), detail: `db_list_tables ${args.schema} → ${tables.length} 个对象`, rows: tables.length })
       return { ok: true, result: JSON.stringify({ schema: args.schema, tables: tables.slice(0, 300), total: tables.length }) }
     }
 
     if (name === 'db_describe_table') {
-      const s = profile.type === 'oracle' ? String(args.schema).toUpperCase() : String(args.schema)
-      const t = profile.type === 'oracle' ? String(args.table).toUpperCase() : String(args.table)
+      const isOracleProtocol = profile.type === 'oracle' || profile.type === 'ob-oracle'
+      const s = isOracleProtocol ? String(args.schema).toUpperCase() : String(args.schema)
+      const t = isOracleProtocol ? String(args.table).toUpperCase() : String(args.table)
       const info = await cached(metaKeys.describe(profile.id, s, t), false, () => adapter.describeTable(s, t))
       audit({ kind: 'tool', conn: profile.name, target: `${args.schema}.${args.table}`, detail: `db_describe_table ${args.schema}.${args.table}`, rows: info.columns.length })
       return { ok: true, result: JSON.stringify(info) }
@@ -819,6 +820,10 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       if (v.ok) {
         return { ok: false, result: JSON.stringify({ error: '这是只读语句，请使用 db_query 工具执行' }) }
       }
+      if (profile.role === 'readonly') {
+        audit({ kind: 'sql.write', conn: profile.name, detail: '只读连接拒绝 db_write', sql, mode: ctx.mode, approved: false, error: `语句类别: ${v.kind}` })
+        return { ok: false, result: JSON.stringify({ error: `连接「${profile.name}」是只读账号，禁止执行写操作。请改用管理账号连接，或让用户先更新连接角色。` }) }
+      }
       const gated = await gateWrite(ctx, { tool: 'db_write', conn: profile.name, sql, kind: v.kind, risk: v.risk }, profile.name, sql, true)
       if (gated) return { ok: false, result: gated }
       const r = await raceAbort(adapter.query(sql, MAX_ROWS, QUERY_TIMEOUT_MS), ctx.signal)
@@ -830,7 +835,8 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       // agent 执行了 DDL：该连接的元数据缓存全部失效
       if (v.kind === 'ddl') metaDropConn(profile.id)
       audit({ kind: 'sql.write', conn: profile.name, detail: '执行完成', sql, rows: r.rowCount, ms: r.ms, approved: true, target: v.kind === 'ddl' ? '(DDL)' : undefined })
-      return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: profile.type === 'oracle' ? (committed ? '已提交(COMMIT)' : '连接已被重置，事务未提交（语句可能未生效）') : undefined }) }
+      const isOracleProtocol = profile.type === 'oracle' || profile.type === 'ob-oracle'
+      return { ok: true, result: JSON.stringify({ affected: r.rowCount, ms: r.ms, note: isOracleProtocol ? (committed ? '已提交(COMMIT)' : '连接已被重置，事务未提交（语句可能未生效）') : undefined }) }
     }
 
     return { ok: false, result: JSON.stringify({ error: `未知工具: ${name}` }) }

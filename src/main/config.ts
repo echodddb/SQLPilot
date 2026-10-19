@@ -4,6 +4,7 @@ import path from 'node:path'
 import type { AppConfig, ConnProfile, ProjectConfig } from './types'
 import { setPassword, getPassword, secretsAvailable } from './secrets'
 import { writeFileAtomic } from './atomic'
+import { defaultMaskingConfig, normalizeMaskingConfig } from './masking'
 
 const DEFAULT: AppConfig = {
   connections: [],
@@ -12,7 +13,8 @@ const DEFAULT: AppConfig = {
   mode: 'readonly',
   projects: [],
   servers: [],
-  skillsEnabled: {}
+  skillsEnabled: {},
+  masking: defaultMaskingConfig()
 }
 
 // API Key 不落明文盘：config.json 里置空，真实值经 DPAPI(safeStorage) 加密存 secrets.json
@@ -41,6 +43,7 @@ export function loadConfig(): AppConfig {
   if (!Array.isArray(cfg.projects)) cfg.projects = []
   if (!Array.isArray(cfg.servers)) cfg.servers = []
   if (!cfg.skillsEnabled || typeof cfg.skillsEnabled !== 'object') cfg.skillsEnabled = {}
+  cfg.masking = normalizeMaskingConfig(cfg.masking)
   // 一次性迁移：旧版服务器内联在项目里 → 折叠进全局注册表，项目改为 serverIds 引用。
   // 密码键本来就是全局的 server:<id>，迁移后原密码直接生效；迁移幂等，落盘一次后此分支不再进
   if (cfg.projects.some((p) => Array.isArray(p.servers) && p.servers.length)) {
@@ -82,6 +85,7 @@ export function projectServers(cfg: AppConfig, project: ProjectConfig | undefine
 }
 
 export function saveConfig(cfg: AppConfig): void {
+  cfg.masking = normalizeMaskingConfig(cfg.masking)
   const encrypted = secretsAvailable()
   const onDisk: AppConfig = encrypted
     ? { ...cfg, providers: cfg.providers.map((p) => ({ ...p, apiKey: '' })) }

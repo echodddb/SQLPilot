@@ -177,7 +177,7 @@ const editMsg = ref('')
 /** 是否已建立独立编辑会话（卸载时需释放，Oracle 未提交事务随断连回滚） */
 const hasEditSession = ref(false)
 
-const isOracle = computed(() => (store.cfg?.connections || []).find((c: any) => c.id === props.connId)?.type === 'oracle')
+const isOracle = computed(() => ['oracle', 'ob-oracle'].includes((store.cfg?.connections || []).find((c: any) => c.id === props.connId)?.type))
 
 // ---------- 数据加载 ----------
 async function loadData(p: number) {

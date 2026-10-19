@@ -10,7 +10,7 @@ export interface SqlVerdict {
 }
 
 const READ_FIRST = new Set(['select', 'with', 'explain', 'show', 'desc', 'describe'])
-const DML = new Set(['insert', 'update', 'delete', 'merge'])
+const DML = new Set(['insert', 'update', 'delete', 'merge', 'replace', 'load'])
 const DDL = new Set(['create', 'alter', 'drop', 'truncate', 'comment', 'rename', 'grant', 'revoke', 'flashback', 'purge', 'audit', 'noaudit'])
 const KILL = new Set(['kill', 'shutdown', 'startup'])
 const PLSQL = new Set(['exec', 'execute', 'call', 'begin', 'declare', 'set'])

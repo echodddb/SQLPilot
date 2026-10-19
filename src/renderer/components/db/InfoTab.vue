@@ -20,7 +20,7 @@
       <!-- Oracle 活跃会话（交互块：列可选 + 刷新，列清单来自 GV$SESSION 实际结构） -->
       <div v-if="isOracle && as" class="it-sec">
         <div class="as-head">
-          <span class="it-title">活跃会话（wait_class ≠ Idle 且 username 非空，按 last_call_et 排序）</span>
+          <span class="it-title">{{ isObOracle ? '活跃会话（GV$OB_PROCESSLIST，按执行时长排序）' : '活跃会话（wait_class ≠ Idle 且 username 非空，按 last_call_et 排序）' }}</span>
           <span style="flex: 1"></span>
           <button class="mini-btn" title="勾选要显示的列（按当前库 GV$SESSION 实际列动态生成）" @click="as.open = !as.open">列 {{ as.open ? '▴' : '▾' }}</button>
           <button class="mini-btn" title="重新查询" @click="loadActiveSessions">⟳ 刷新</button>
@@ -29,7 +29,7 @@
           <label v-for="c in as.available" :key="c" class="as-col">
             <input type="checkbox" :checked="as.selected.includes(c)" @change="toggleAsCol(c)" />{{ c }}
           </label>
-          <div class="as-col-hint">列清单取自当前数据库 GV$SESSION 的真实结构（各版本不同）；默认勾选常用排障列</div>
+          <div class="as-col-hint">列清单取自当前数据库{{ isObOracle ? ' GV$OB_PROCESSLIST' : ' GV$SESSION' }} 的真实结构（各版本不同）；默认勾选常用排障列</div>
         </div>
         <div v-if="as.loading" class="it-meta" style="padding: 4px 0"><span class="spinner"></span> 查询中…</div>
         <div v-else-if="as.error" style="color: var(--red); font-size: 12.5px; padding: 4px 0">✗ {{ as.error }}</div>
@@ -82,7 +82,8 @@ const infoError = ref('')
 /** Oracle 活跃会话交互块；seq 为请求序号，防止乱序响应覆盖最新状态 */
 const as = ref<{ available: string[]; selected: string[]; columns: string[]; rows: any[][]; ms: number; note: string; loading: boolean; error: string; open: boolean; seq: number } | null>(null)
 
-const isOracle = computed(() => (store.cfg?.connections || []).find((c: any) => c.id === props.connId)?.type === 'oracle')
+const isOracle = computed(() => ['oracle', 'ob-oracle'].includes((store.cfg?.connections || []).find((c: any) => c.id === props.connId)?.type))
+const isObOracle = computed(() => (store.cfg?.connections || []).find((c: any) => c.id === props.connId)?.type === 'ob-oracle')
 const connName = computed(() => (store.cfg?.connections || []).find((c: any) => c.id === props.connId)?.name || props.connId)
 
 async function loadInfo() {

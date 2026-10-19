@@ -1,4 +1,7 @@
+import type { MaskingConfig } from './masking'
 export type ConnType = 'oracle' | 'mysql' | 'ob-mysql' | 'ob-oracle'
+
+export type ObConnectMode = 'obproxy' | 'observer'
 
 /** plan = 计划模式（只读探索 + 输出计划等批准） */
 export type PermissionMode = 'plan' | 'readonly' | 'confirm' | 'session' | 'yolo'
@@ -24,6 +27,15 @@ export interface ConnProfile {
   database?: string
   user: string
   role: 'readonly' | 'admin'
+  /** OceanBase MySQL 租户：生产默认走 OBProxy，排障可直连 Observer */
+  obConnectMode?: ObConnectMode
+  /** OceanBase 账号身份拆分存储；兼容旧的 user@tenant#cluster 完整写法 */
+  obTenant?: string
+  obCluster?: string
+  /** MySQL/OceanBase SSL；CA 用于服务端证书校验 */
+  ssl?: boolean
+  sslCa?: string
+  sslVerifyServer?: boolean
   /** Oracle 11g thick 模式需要 Instant Client 目录（留空则用全局设置） */
   instantClientDir?: string
   /** 可选：关联到某个项目（不关联 = 全局连接，任何会话可用） */
@@ -85,6 +97,8 @@ export interface AppConfig {
   skillsEnabled: Record<string, boolean>
   /** Oracle Instant Client 目录（全局默认，连接 11g 时需要） */
   instantClientDir?: string
+  /** 文件脱敏规则（按文件类型独立配置） */
+  masking?: MaskingConfig
   /** 界面主题 */
   theme?: 'dark' | 'light'
   /** 系统提示词脱敏：不发送连接主机/账号、服务器地址、项目路径等明细（默认开启） */

@@ -18,7 +18,7 @@
             <b>第 1 步</b>　点击左下角 <b>⚙ 设置</b> 选择厂商和模型（DeepSeek / GLM / Kimi / Claude…）
           </div>
           <div class="step" v-if="!store.cfg?.connections?.length">
-            <b>可选</b>　需要操作数据库时，左侧「数据库连接」标题行的 <b>＋</b> 添加连接（Oracle 11g/19c、OB MySQL 租户、MySQL）；纯文件/技能任务无需连接
+            <b>可选</b>　需要操作数据库时，左侧「数据库连接」标题行的 <b>＋</b> 添加连接（Oracle、OceanBase MySQL/Oracle 租户、MySQL）；纯文件/技能任务无需连接
           </div>
           <div class="step">
             <b>示例</b>　查看某个库的表结构 · 多库巡检 · 复杂变更先切<b>计划模式</b>出方案再执行

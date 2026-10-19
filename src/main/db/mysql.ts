@@ -1,13 +1,38 @@
 import mysql from 'mysql2/promise'
+import fs from 'node:fs'
 import type { ConnProfile, DbAdapter, EditSupport, QueryResult, TableInfo } from '../types'
 import { getPassword } from '../secrets'
 import { classifySql } from './guard'
 
 // MySQL 协议适配器：同时覆盖 MySQL 与 OceanBase MySQL 租户
-const SYSTEM_SCHEMAS = new Set([
+export const MYSQL_SYSTEM_SCHEMAS = new Set([
   'information_schema', 'performance_schema', 'mysql', 'sys',
   'oceanbase', '__public__', 'SYS', 'LBACSYS', 'ORAAUDITOR'
 ])
+
+function obConnectMode(profile: ConnProfile): 'OBProxy' | 'Observer' {
+  if (profile.obConnectMode === 'observer') return 'Observer'
+  if (profile.obConnectMode === 'obproxy') return 'OBProxy'
+  return profile.port === 2881 ? 'Observer' : 'OBProxy'
+}
+
+function obIdentity(profile: ConnProfile): string {
+  const rawUser = profile.user.trim()
+  if (rawUser.includes('@') || rawUser.includes('#')) return rawUser
+  const tenant = profile.obTenant?.trim()
+  if (!tenant) return rawUser
+  if (obConnectMode(profile) === 'Observer') return `${rawUser}@${tenant}`
+  const cluster = profile.obCluster?.trim()
+  return `${rawUser}@${tenant}${cluster ? `#${cluster}` : ''}`
+}
+
+function sslOptions(profile: ConnProfile) {
+  if (!profile.ssl) return undefined
+  return {
+    ca: profile.sslCa ? fs.readFileSync(profile.sslCa, 'utf8') : undefined,
+    rejectUnauthorized: !!profile.sslVerifyServer
+  }
+}
 
 /** 超时哨兵：catch 侧按 code 识别，避免数据库报错文本含"超时"时误杀健康连接 */
 function queryTimeoutError(ms: number): Error {
@@ -44,11 +69,12 @@ export class MySqlAdapter implements DbAdapter {
       this.connPromise = mysql.createConnection({
         host: this.profile.host,
         port: this.profile.port,
-        user: this.profile.user,
+        user: this.profile.type === 'ob-mysql' ? obIdentity(this.profile) : this.profile.user,
         password: this.passwordOverride ?? getPassword(this.profile.id),
         database: this.profile.database || undefined,
         connectTimeout: 10000,
-        charset: 'utf8mb4'
+        charset: 'utf8mb4',
+        ssl: sslOptions(this.profile)
       }).then((c) => {
         this.conn = c
         return c
@@ -77,10 +103,15 @@ export class MySqlAdapter implements DbAdapter {
     const [rows] = await c.query<any[]>('SELECT version() AS v')
     let label = `${this.profile.type === 'ob-mysql' ? 'OceanBase(MySQL租户)' : 'MySQL'} ${rows[0]?.v || ''}`
     if (this.profile.type === 'ob-mysql') {
+      let version = rows[0]?.v || ''
+      const tenant = this.profile.obTenant?.trim() || this.profile.user.split('@')[1]?.split('#')[0] || '未知租户'
+      const cluster = this.profile.obCluster?.trim() || this.profile.user.split('#')[1] || ''
       try {
         const [ob] = await c.query<any[]>('SELECT ob_version() AS v')
-        if (ob[0]?.v) label = `OceanBase ${ob[0].v} (MySQL 租户兼容)`
-      } catch { /* 社区版可能无此函数 */ }
+        version = ob[0]?.v || version
+      } catch { /* 社区版/低版本可能无此函数 */
+      }
+      label = `OceanBase ${version} · MySQL 租户 · ${tenant}${cluster ? `#${cluster}` : ''} · ${obConnectMode(this.profile)}`
     }
     return label
   }
@@ -88,7 +119,7 @@ export class MySqlAdapter implements DbAdapter {
   async listSchemas(): Promise<string[]> {
     const c = await this.ensure()
     const [rows] = await c.query<any[]>('SHOW DATABASES')
-    return rows.map((r) => String(Object.values(r)[0])).filter((d) => !SYSTEM_SCHEMAS.has(d))
+    return rows.map((r) => String(Object.values(r)[0])).filter((d) => !MYSQL_SYSTEM_SCHEMAS.has(d))
   }
 
   async listTables(schema: string): Promise<TableInfo[]> {

@@ -26,6 +26,11 @@ const api = {
   // 配置
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (cfg: any) => ipcRenderer.invoke('config:set', plain(cfg)),
+  // 文件脱敏
+  maskDefaults: () => ipcRenderer.invoke('mask:defaults'),
+  maskPickFile: (fileType: string) => ipcRenderer.invoke('mask:pickFile', { fileType }),
+  maskText: (fileType: string, content: string) => ipcRenderer.invoke('mask:text', { fileType, content }),
+  maskSave: (fileName: string, content: string) => ipcRenderer.invoke('mask:save', { fileName, content }),
   // 连接管理
   saveConn: (profile: any, password?: string) => ipcRenderer.invoke('conn:save', { profile: plain(profile), password }),
   deleteConn: (id: string) => ipcRenderer.invoke('conn:delete', { id }),

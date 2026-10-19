@@ -1,5 +1,6 @@
 import type { ConnProfile, DbAdapter } from '../types'
 import { OracleAdapter } from './oracle'
+import { ObOracleAdapter } from './ob-oracle'
 import { MySqlAdapter } from './mysql'
 
 // 连接池：默认每个连接 profile 一个共享适配器（agent/信息面板/对象浏览器用）；
@@ -16,11 +17,9 @@ export function getAdapter(profile: ConnProfile, globalClientDir?: string, sessi
   if (a) return a
   if (profile.type === 'oracle') {
     a = new OracleAdapter(profile, globalClientDir)
+  } else if (profile.type === 'ob-oracle') {
+    a = new ObOracleAdapter(profile)
   } else {
-    // ob-oracle 租户在 M1 阶段暂未接入驱动，占位提示
-    if (profile.type === 'ob-oracle') {
-      throw new Error('OB Oracle 租户支持将在 M2 阶段接入（pyobclient），当前版本请使用 OB MySQL 租户连接')
-    }
     a = new MySqlAdapter(profile)
   }
   adapters.set(key, a)

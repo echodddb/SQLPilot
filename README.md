@@ -1,11 +1,12 @@
 # SQLPilot — DBA 智能助手（v0.1）
 
-桌面端数据库 AI Agent，支持 Oracle 11g/19c、OceanBase 4.x（MySQL 租户）、MySQL。
+桌面端数据库 AI Agent，支持 Oracle 11g/19c、OceanBase 4.x（MySQL / Oracle 租户）、MySQL。
 大模型可配置多家厂商（厂商/型号直接选择，含思考级别），全部数据留在本机。
 
 ## 核心概念
 
-- **功能模块**：最左侧一级导航切换——「AI 助手」（对话 / 数据库工作台 / SSH 终端 / 会话管理）与「巡检报告」（规划中，基于模板生成、与 AI 无关）；导航底部是全局工具（主题切换 / 设置浮窗）
+- **功能模块**：最左侧一级导航切换——「AI 助手」（对话 / 数据库工作台 / SSH 终端 / 会话管理）、「脱敏工具」（AWR 本地脱敏）与「巡检报告」（规划中，基于模板生成、与 AI 无关）；导航底部是全局工具（主题切换 / 设置浮窗）
+- **文件脱敏工具**：左侧「脱敏工具」入口，先选择文件类型（当前开放 Oracle AWR，普通日志预留）再选择/拖入文件；内置规则面向 AWR 表格语义解析，覆盖 HTML 表格列 / `headers` 属性、文本列式报表、RAC 汇总、DB / PDB / DBID / 实例 / 主机 / 服务名 / Schema / OS 用户 / IP / ASM 磁盘组 / JDBC 与 TNS 组件，并避免数据库版本号、说明文字句号、SQL 别名等误报；同一敏感值在同一次处理中稳定映射为 `ip-tuoming1`、`db-tuoming1`、`host-tuoming1` 这类别名代称。前后对比视图左右显示原文与脱敏后文本，行号对齐并红 / 绿高亮；“映射备注”列出 `原始值 → 代称` 与命中次数，悬停高亮块也能看到前后备注；支持自定义正则、复制、另存，原始文件不会被修改
 - **本机资源监控**：侧边栏底部常驻——CPU / 内存趋势 sparkline（3s 采样）与各盘占用条形，"−"收起为单行（品牌 · CPU%/内存% · DPAPI 状态）
 - **项目**：选择一个文件夹注册为项目，是会话的工作单元（文件产出、连接关联都以项目为单位）
 - **会话**：必须挂在一个项目下发起（点项目名或"＋"选择项目）；权限模式、模型、思考级别均为**会话级**设置，互不影响
@@ -81,6 +82,7 @@ npm run pack:exe
 Electron 33 + Vue 3 + TypeScript（esbuild 打包主进程，Vite 打包渲染层）
 src/main/          主进程
   db/oracle.ts     Oracle 适配器（11g thick / 19c thin 自适应）
+  db/ob-oracle.ts  OceanBase Oracle 租户适配器
   db/mysql.ts      MySQL / OB MySQL 租户适配器
   db/guard.ts      SQL 语句分类守门
   agent/llm.ts     LLM 双协议（OpenAI 兼容 + Anthropic，SSE 流式）
@@ -89,6 +91,7 @@ src/main/          主进程
   agent/subtask-registry.ts 后台子代理任务注册表（task_output/task_stop 数据源）
   agent/subagent-audit.ts 子代理过程审计 JSONL 与报告 artifact
   tools/index.ts   工具集（schema 浏览 / 只读查询 / 受控写）
+  masking.ts       AWR / 日志文件本地脱敏规则与执行引擎
   secrets.ts       密码 DPAPI 加密存储
 src/renderer/      界面（连接树 / 对话 / 设置 / 确认弹窗，日/夜双主题）
 ```
@@ -113,7 +116,6 @@ src/renderer/      界面（连接树 / 对话 / 设置 / 确认弹窗，日/夜
 
 ## 已知边界（M2 计划）
 
-- OB Oracle 租户连接尚未接入（需 pyobclient spike）
 - 无内嵌终端（xterm.js + SSH 在 M2）
 - 停止任务会在最近的检查点结束：LLM 流式输出立即中断，正在执行的数据库工具会等它跑完（最长 60 秒超时）后停止
 

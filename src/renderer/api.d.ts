@@ -8,7 +8,11 @@ declare global {
   interface Window {
     sqlpilot: {
       getConfig(): Promise<any>
-      setConfig(cfg: any): Promise<{ ok: boolean }>
+      setConfig(cfg: any): Promise<{ ok: boolean; error?: string }>
+      maskDefaults(): Promise<any>
+      maskPickFile(fileType: string): Promise<{ ok: boolean; canceled?: boolean; path?: string; fileName?: string; size?: number; content?: string; error?: string }>
+      maskText(fileType: string, content: string): Promise<{ ok: boolean; content?: string; stats?: { ruleId: string; name: string; count: number }[]; edits?: { ruleId: string; category: string; original: string; replacement: string; originalStart: number; originalEnd: number; outputStart: number; outputEnd: number }[]; mappings?: { category: string; label: string; original: string; replacement: string; count: number }[]; error?: string }>
+      maskSave(fileName: string, content: string): Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>
       saveConn(profile: any, password?: string): Promise<{ ok: boolean; error?: string }>
       deleteConn(id: string): Promise<{ ok: boolean }>
       testConn(profile: any, password?: string): Promise<{ ok: boolean; label?: string; error?: string }>

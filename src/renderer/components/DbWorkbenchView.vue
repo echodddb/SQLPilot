@@ -7,12 +7,13 @@
           v-for="t in tabs"
           :key="t.key"
           class="dbw-tab"
-          :class="{ active: t.key === activeKey }"
+          :class="[t.kind, { active: t.key === activeKey }]"
           :title="tabTitle(t)"
           @click="activate(t)"
         >
-          <span>{{ KIND_ICON[t.kind] }} {{ t.title }}</span>
-          <button class="icon-btn" style="padding: 0 3px; font-size: 11px" @click.stop="closeTab(t.key)">✕</button>
+          <span class="dbw-tab-icon">{{ KIND_ICON[t.kind] }}</span>
+          <span class="dbw-tab-title">{{ t.title }}</span>
+          <button class="dbw-tab-close" title="关闭标签页" @click.stop="closeTab(t.key)">✕</button>
         </div>
         <span style="flex: 1"></span>
         <button class="mini-btn" title="新建查询窗口" @click="newQuery()">＋ 查询</button>
@@ -49,8 +50,10 @@
       </div>
 
       <div v-else class="dbw-empty">
-        双击左侧的表或视图打开浏览<br />
-        <span class="dim">查询窗口（Ctrl+Enter 执行）、表数据（双击单元格编辑）、结构 / DDL、数据库信息都在这里以标签页打开</span>
+        <div class="dbw-empty-icon">SQL</div>
+        <b>数据库控制台</b>
+        <span class="dim">新建查询，或双击左侧表 / 视图浏览数据；标签页会保留会话与结果。</span>
+        <button class="mini-btn primary" @click="newQuery()">＋ 新建查询</button>
       </div>
     </div>
   </div>
@@ -175,24 +178,53 @@ watch(
 .dbw-wrap { display: flex; height: 100%; min-height: 0; }
 .dbw-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .dbw-tabs {
-  display: flex; align-items: center; gap: 4px; padding: 5px 8px 0;
+  display: flex; align-items: flex-end; gap: 4px; padding: 6px 8px 0;
   border-bottom: 1px solid var(--border); background: var(--bg-input);
-  overflow-x: auto; flex-shrink: 0;
+  overflow-x: auto; flex-shrink: 0; scrollbar-width: thin;
 }
 .dbw-tab {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 12px; border: 1px solid var(--border); border-bottom: none;
-  border-radius: 7px 7px 0 0; cursor: pointer; font-size: 12px;
-  color: var(--text-dim); background: var(--bg-card); max-width: 220px;
-  white-space: nowrap; overflow: hidden;
+  display: flex; align-items: center; gap: 6px; height: 29px;
+  padding: 0 6px 0 9px; border: 1px solid var(--border); border-bottom: none;
+  border-radius: 8px 8px 0 0; cursor: pointer; font-size: 12px;
+  color: var(--text-dim); background: var(--bg-card); max-width: 225px;
+  white-space: nowrap; overflow: hidden; position: relative;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
 }
-.dbw-tab.active { color: var(--text); background: var(--bg); border-color: var(--border-strong); }
+.dbw-tab::before {
+  content: ''; position: absolute; inset: 0 8px auto; height: 2px; border-radius: 0 0 3px 3px;
+  background: transparent; transition: background .15s ease;
+}
+.dbw-tab:hover { color: var(--text); border-color: var(--border-strong); }
+.dbw-tab.active { color: var(--text); background: var(--bg); border-color: var(--border-strong); box-shadow: 0 -1px 0 var(--accent) inset; }
+.dbw-tab.active::before { background: transparent; }
+.dbw-tab.query.active { box-shadow: 0 -2px 0 var(--accent) inset; }
+.dbw-tab.table.active { box-shadow: 0 -2px 0 var(--green) inset; }
+.dbw-tab.info.active { box-shadow: 0 -2px 0 color-mix(in srgb, var(--accent) 60%, var(--green)) inset; }
+.dbw-tab-icon { color: var(--text-faint); font-size: 10px; flex-shrink: 0; }
+.dbw-tab.active .dbw-tab-icon { color: var(--accent); }
+.dbw-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dbw-tab-close {
+  width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 4px; background: transparent; color: var(--text-faint);
+  cursor: pointer; font-size: 10px; flex-shrink: 0;
+}
+.dbw-tab-close:hover { background: var(--red-dim, rgba(220, 38, 38, .12)); color: var(--red); }
 .dbw-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.dbw-empty { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--text-faint); font-size: 13px; line-height: 2; }
+.dbw-empty { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: var(--text-faint); font-size: 13px; line-height: 1.6; text-align: center; padding: 20px; }
+.dbw-empty b { color: var(--text); font-size: 15px; }
+.dbw-empty-icon {
+  width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;
+  border-radius: 14px; border: 1px solid var(--border); background: var(--accent-dim);
+  color: var(--accent); font-family: var(--mono); font-size: 13px; font-weight: 700; margin-bottom: 3px;
+}
 .dbw-empty.dim, .dim { color: var(--text-faint); font-size: 12px; }
 .mini-btn {
-  border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim);
-  border-radius: 6px; font-size: 11px; padding: 1px 7px; cursor: pointer; flex-shrink: 0; font-family: inherit;
+  height: 24px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim);
+  border-radius: 6px; font-size: 11px; padding: 0 8px; cursor: pointer; flex-shrink: 0; font-family: inherit;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
 }
 .mini-btn:hover { color: var(--accent); border-color: var(--accent); }
+.mini-btn.primary { border-color: transparent; background: var(--accent); color: #fff; font-weight: 700; }
+.mini-btn.primary:hover { color: #fff; filter: brightness(1.08); }
 </style>

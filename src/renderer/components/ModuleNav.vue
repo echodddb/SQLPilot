@@ -45,6 +45,7 @@ const { theme, toggle: toggleTheme } = inject<{ theme: { value: 'dark' | 'light'
 /** 一级功能模块：只做导航切换，模块内容渲染在 App.vue 按 module 分发 */
 const modules = [
   { key: 'agent', icon: '◆', label: 'AI 助手', desc: 'AI 对话 · 数据库工作台 · SSH 终端（会话/项目/连接管理）' },
+  { key: 'masking', icon: '⛨', label: '脱敏工具', desc: '本地脱敏 Oracle AWR 等运维文件，规则按文件类型独立配置' },
   { key: 'report', icon: '▤', label: '巡检报告', desc: '基于模板的数据库巡检报告生成（规划中，与 AI 无关）' }
 ] as const
 </script>

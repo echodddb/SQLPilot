@@ -446,7 +446,7 @@ const TYPE_LABELS: Record<string, string> = {
   oracle: 'Oracle',
   mysql: 'MySQL',
   'ob-mysql': 'OceanBase 4.x（MySQL 租户）',
-  'ob-oracle': 'OceanBase（Oracle 租户，暂未接入）'
+  'ob-oracle': 'OceanBase（Oracle 租户）'
 }
 
 const MODE_LINES: Record<PermissionMode, string> = {
@@ -526,7 +526,13 @@ function kickVersionRefresh(connections: ConnProfile[], globalClientDir?: string
 
 function fmtConnLine(c: ConnProfile, tag?: string, mask = false, ver?: string): string {
   // 脱敏：不发送服务名/库名（连接按名称寻址，明细不进提示词）；版本号不敏感，始终携带
-  const target = mask ? '' : c.type === 'oracle' ? `service=${c.serviceName}` : `db=${c.database || '(未指定)'}`
+  const target = mask
+    ? ''
+    : c.type === 'oracle'
+      ? `service=${c.serviceName}`
+      : c.type === 'ob-oracle'
+        ? `tenant=${c.obTenant || c.user.split('@')[1]?.split('#')[0] || '(未指定)'}`
+        : `db=${c.database || '(未指定)'}`
   return `- ${tag ? `[${tag}] ` : ''}${c.name}: ${TYPE_LABELS[c.type]}${target ? ` ${target}` : ''}${ver ? ` [${ver}]` : ''} [${c.role === 'readonly' ? '只读账号' : '管理账号'}]`
 }
 
@@ -591,8 +597,11 @@ function buildSystemPrompt(connections: ConnProfile[], mode: PermissionMode, pro
     : '（当前未配置任何数据库连接：数据库类任务请提示用户先在左侧添加连接；文件读写（fs_*）与技能类任务可正常进行，无需数据库。）'
 
   const dialects: string[] = []
-  if (connections.some((c) => c.type === 'oracle')) {
+  if (connections.some((c) => c.type === 'oracle' || c.type === 'ob-oracle')) {
     dialects.push('- Oracle：11g 及以下不支持 FETCH FIRST/LIMIT，分页用 ROWNUM；12c+ 两者皆可——以连接行标注的实际版本为准。动态 SQL 用绑定变量。v$ 视图无权限时给出替代方案并说明。')
+  }
+  if (connections.some((c) => c.type === 'ob-oracle')) {
+    dialects.push('- OB Oracle 租户：使用 Oracle 语法/绑定变量与大小写规范化；分布式事务后用只读查询核实结果，不要盲目重试。')
   }
   if (connections.some((c) => c.type === 'ob-mysql' || c.type === 'mysql')) {
     dialects.push('- MySQL/OB MySQL 租户：用标准 MySQL 语法；OB 特有信息可查 oceanbase.GV$ 系统视图（如 GV$OB_SERVERS、CDB_OB_TENANTS 等，视权限而定）。')
