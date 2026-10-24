@@ -1,10 +1,50 @@
 import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { AppConfig, ConnProfile, ProjectConfig } from './types'
+import type { AppConfig, ConnProfile, ProjectConfig, TermPrefs } from './types'
 import { setPassword, getPassword, deletePassword, secretsAvailable } from './secrets'
 import { writeFileAtomic } from './atomic'
 import { defaultMaskingConfig, normalizeMaskingConfig } from './masking'
+
+/** 终端外观默认值：与渲染层 server/prefs.ts 的兜底保持一致（配置缺项时两边都不会崩） */
+export function defaultTermPrefs(): TermPrefs {
+  return {
+    fontSize: 13,
+    fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, monospace',
+    lineHeight: 1.2,
+    cursorStyle: 'block',
+    cursorBlink: true,
+    scheme: 'follow',
+    scrollback: 5000,
+    copyOnSelect: false,
+    rightClickPaste: false,
+    confirmMultilinePaste: true,
+    encoding: 'utf-8'
+  }
+}
+
+/** 缺失/非法字段逐个回填，避免旧配置里半套 termPrefs 让 xterm 拿到 undefined */
+function normalizeTermPrefs(v: any): TermPrefs {
+  const d = defaultTermPrefs()
+  if (!v || typeof v !== 'object') return d
+  const num = (x: any, min: number, max: number, fb: number) => {
+    const n = Number(x)
+    return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fb
+  }
+  return {
+    fontSize: num(v.fontSize, 8, 32, d.fontSize),
+    fontFamily: String(v.fontFamily || d.fontFamily),
+    lineHeight: num(v.lineHeight, 1, 2, d.lineHeight),
+    cursorStyle: ['block', 'bar', 'underline'].includes(v.cursorStyle) ? v.cursorStyle : d.cursorStyle,
+    cursorBlink: typeof v.cursorBlink === 'boolean' ? v.cursorBlink : d.cursorBlink,
+    scheme: ['follow', 'github', 'mobaxterm', 'solarized-light', 'monokai', 'dracula'].includes(v.scheme) ? v.scheme : d.scheme,
+    scrollback: num(v.scrollback, 200, 200_000, d.scrollback),
+    copyOnSelect: typeof v.copyOnSelect === 'boolean' ? v.copyOnSelect : d.copyOnSelect,
+    rightClickPaste: typeof v.rightClickPaste === 'boolean' ? v.rightClickPaste : d.rightClickPaste,
+    confirmMultilinePaste: typeof v.confirmMultilinePaste === 'boolean' ? v.confirmMultilinePaste : d.confirmMultilinePaste,
+    encoding: ['utf-8', 'gbk', 'gb18030', 'big5', 'latin1'].includes(v.encoding) ? v.encoding : d.encoding
+  }
+}
 
 const DEFAULT: AppConfig = {
   connections: [],
@@ -14,7 +54,10 @@ const DEFAULT: AppConfig = {
   projects: [],
   servers: [],
   skillsEnabled: {},
-  masking: defaultMaskingConfig()
+  masking: defaultMaskingConfig(),
+  cloudPlatforms: [],
+  lockIdleMin: 3,
+  termPrefs: defaultTermPrefs()
 }
 
 // API Key 不落明文盘：config.json 里置空，真实值经 DPAPI(safeStorage) 加密存 secrets.json
@@ -49,8 +92,10 @@ export function loadConfig(): AppConfig {
   if (!Array.isArray(cfg.servers)) cfg.servers = []
   if (!Array.isArray(cfg.connections)) cfg.connections = []
   if (!Array.isArray(cfg.providers)) cfg.providers = []
+  if (!Array.isArray(cfg.cloudPlatforms)) cfg.cloudPlatforms = []
   if (!cfg.skillsEnabled || typeof cfg.skillsEnabled !== 'object') cfg.skillsEnabled = {}
   cfg.masking = normalizeMaskingConfig(cfg.masking)
+  cfg.termPrefs = normalizeTermPrefs(cfg.termPrefs)
   // 一次性迁移：旧版服务器内联在项目里 → 折叠进全局注册表，项目改为 serverIds 引用。
   // 密码键本来就是全局的 server:<id>，迁移后原密码直接生效；迁移幂等，落盘一次后此分支不再进
   if (cfg.projects.some((p) => Array.isArray(p.servers) && p.servers.length)) {

@@ -1,9 +1,32 @@
 <template>
-  <div class="layout" v-if="store.ready && curSession()">
+  <SplashOverlay
+    v-if="showSplash"
+    :app-ready="splashAppReady"
+    @exiting="appRevealed = true"
+    @close="onSplashClosed"
+  />
+  <!-- 空闲锁屏：复用开机动画，必须手动点「解锁进入」才放行；挂在根上，所有模块都覆盖 -->
+  <SplashOverlay
+    v-if="locked"
+    mode="lock"
+    :app-ready="true"
+    :idle-min="idleLimitMin"
+    @close="unlock"
+  />
+  <div
+    class="layout"
+    :class="{ 'app-revealed': appRevealed }"
+    :inert="locked ? '' : null"
+    v-if="store.ready && curSession()"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
+  >
     <ModuleNav />
     <Sidebar v-if="store.module === 'agent'" />
     <div class="main-area">
-      <div class="topbar">
+      <!-- 文本编辑有自己的菜单栏与状态栏，不需要顶栏品牌标识，直接让编辑区占满 -->
+      <div class="topbar" v-if="store.module !== 'editor'">
         <span class="logo">◆ SQLPilot</span>
 
         <span
@@ -22,6 +45,20 @@
         >⚠ 未选择项目</span>
 
         <span class="spacer"></span>
+
+        <!-- 数据库控制台：独立一级模块，顶栏只保留模块标识与连接入口 -->
+        <span
+          v-if="store.module === 'db'"
+          class="badge blue"
+          title="独立模块：对象树 / 查询窗口 / 表数据编辑 / 库信息；每个查询标签页是独立数据库会话"
+        >数据库控制台</span>
+
+        <!-- 云管平台：OCP（调接口）与 Oracle（直连查库）两种平台，导航与切换在模块内部 -->
+        <span
+          v-if="store.module === 'cloud'"
+          class="badge blue"
+          :title="cloudBadgeTitle"
+        >{{ cloudBadge }}</span>
 
         <!-- 未配置厂商时给一个明确 CTA，替代不可用的空下拉 -->
         <button
@@ -42,26 +79,22 @@
         </select>
 
         <button
-          v-if="store.module === 'agent'"
+          v-if="store.module === 'db'"
           class="btn ghost"
-          :class="{ 'term-active': store.view === 'db' }"
-          title="数据库工作台（查询窗口 / 对象树 / 表数据编辑；再点返回对话）"
-          @click="onDbButton">
-          数据库
-        </button>
+          title="新增数据库连接（Oracle 11g/19c · OceanBase · MySQL）"
+          @click="openConnModal()"
+        >＋ 新建连接</button>
 
 
       </div>
 
-      <!-- 数据库工作台用 v-show 保活：切到聊天/设置再回来，查询窗口/表数据 tab 不丢 -->
-      <!-- 三主视图统一 v-show 保活：切换回来时聊天滚动位置 / 工作台 tab / 设置表单草稿都不丢 -->
+      <!-- AI 助手：对话为主视图；SSH 终端面板与任务栏挂在本模块下 -->
       <template v-if="store.module === 'agent'">
         <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
-             改由宿主 div 承担 v-show 与布局，子组件只管内容 -->
-        <div v-show="store.view === 'chat'" class="chat-view-host">
+             改由宿主 div 承担布局，子组件只管内容 -->
+        <div class="chat-view-host">
           <ChatView />
         </div>
-      <DbWorkbenchView v-if="store.dbOpen" v-show="store.view === 'db'" style="flex: 1; min-height: 0" />
 
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
            SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
@@ -69,7 +102,13 @@
         <Taskbar />
       </template>
       <ReportView v-else-if="store.module === 'report'" style="flex: 1; min-height: 0" />
-      <MaskingView v-else style="flex: 1; min-height: 0" />
+      <TextEditorView v-else-if="store.module === 'editor'" style="flex: 1; min-height: 0" />
+      <MaskingView v-else-if="store.module === 'masking'" style="flex: 1; min-height: 0" />
+      <CloudView v-else-if="store.module === 'cloud'" style="flex: 1; min-height: 0" />
+
+      <!-- 数据库控制台（独立一级模块）：v-show 保活——切到别的模块处理完再回来，
+           查询标签页 / 结果集 / 未提交事务全部还在；只有 ✕ 关闭控制台才销毁 -->
+      <DbWorkbenchView v-if="store.dbOpen" v-show="store.module === 'db'" style="flex: 1; min-height: 0" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
@@ -95,6 +134,10 @@
       <div v-for="t in store.toasts" :key="t.id" class="ui-toast">{{ t.text }}</div>
     </transition-group>
   </div>
+  <!-- 拖入文件：松手用文本编辑器打开 -->
+  <div v-if="dragActive" class="drop-hint">
+    <div class="drop-box">松开鼠标，用「文本编辑」打开<div class="drop-sub">文件直接打开；文件夹会作为左侧文件夹树打开</div></div>
+  </div>
   <!-- 归档进行中的前台提示（阶段事件驱动，done/error 自动消失） -->
   <div v-if="store.archiveProgress" class="archive-toast">
     <span class="spinner"></span>{{ store.archiveProgress.note }}
@@ -102,16 +145,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, provide, ref, watch } from 'vue'
-import { store, curSession, init, setSessionProvider, toPlain, createSessionInProject, bindSessionProject, openDbTask } from './store'
+import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
+import { store, curSession, init, setSessionProvider, toPlain, createSessionInProject, bindSessionProject } from './store'
+import SplashOverlay from './components/SplashOverlay.vue'
 import Sidebar from './components/Sidebar.vue'
 import ModuleNav from './components/ModuleNav.vue'
 import ReportView from './components/ReportView.vue'
 import MaskingView from './components/MaskingView.vue'
 import Taskbar from './components/Taskbar.vue'
 import ChatView from './components/ChatView.vue'
+import TextEditorView from './components/TextEditorView.vue'
 import SettingsView from './components/SettingsView.vue'
 import DbWorkbenchView from './components/DbWorkbenchView.vue'
+import CloudView from './components/cloud/CloudView.vue'
+import { engineOf } from './cloud/engines'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
 import ConnManager from './components/ConnManager.vue'
 import ServerManager from './components/ServerManager.vue'
@@ -121,16 +168,146 @@ import ArchiveModal from './components/ArchiveModal.vue'
 import ProjectModal from './components/ProjectModal.vue'
 import ProjectEditor from './components/ProjectEditor.vue'
 import SessionModal from './components/SessionModal.vue'
+import { edState } from './editor/session'
+import { cloud } from './cloud/state'
 
 const connModal = ref(false)
 const connModalEditing = ref<any>(null)
 const serverModal = ref(false)
 const serverModalEditing = ref<any>(null)
 const theme = ref<'dark' | 'light'>('dark')
+
+// 启动画面：主进程用 SQLPILOT_NO_SPLASH=1 时会带 ?nosplash=1（开发时反复重启省得等 3 秒）
+const showSplash = ref(new URLSearchParams(location.search).get('nosplash') !== '1')
+// 主界面是否已放行：启动遮罩开始退场的同时翻成 true，两段动画叠成一次交叉溶解
+const appRevealed = ref(!showSplash.value)
+// 「应用已可用」= 配置读完且当前会话能渲染出来，否则收起启动画面会露出空窗口
+const splashAppReady = computed(() => store.ready && !!curSession())
+
+function onSplashClosed(): void {
+  showSplash.value = false
+  appRevealed.value = true
+  // 从这一刻开始算空闲，别把用户停在启动画面上的时间也算进去
+  lastActive = Date.now()
+}
+
+/* ---------------- 空闲锁屏 ----------------
+   只要没操作（鼠标 / 键盘 / 滚轮 / 触摸）到点，就盖上开机动画；
+   解锁只有一条路：手动点「解锁进入」（Esc 等效）。对全部模块生效，因为遮罩挂在根上。 */
+const locked = ref(false)
+/** 阈值来自配置（分钟，0 = 关闭） */
+const idleLimitMin = computed(() => {
+  const v = store.cfg?.lockIdleMin
+  return typeof v === 'number' && v >= 0 ? v : 3
+})
+
+let lastActive = Date.now()
+let idleTimer = 0
+const ACTIVITY = ['mousemove', 'mousedown', 'pointerdown', 'keydown', 'wheel', 'touchstart'] as const
+
+function markActive(): void {
+  // 锁屏状态下不续命：遮罩上的任何操作都不算「已回来」，必须走按钮
+  if (locked.value) return
+  lastActive = Date.now()
+}
+
+function checkIdle(): void {
+  if (locked.value || showSplash.value || !store.ready) return
+  const min = idleLimitMin.value
+  if (!min) return
+  if (Date.now() - lastActive >= min * 60_000) locked.value = true
+}
+
+function lockNow(): void {
+  if (locked.value || showSplash.value || !store.ready) return
+  locked.value = true
+}
+
+function unlock(): void {
+  locked.value = false
+  lastActive = Date.now()
+}
+
+// 设置里改了阈值：从当下重新计时，避免刚放宽就立刻被锁
+watch(idleLimitMin, () => (lastActive = Date.now()))
+
+onMounted(() => {
+  // index.html 里的极简骨架交给启动画面组件接管，别留着占一层
+  document.getElementById('boot-veil')?.remove()
+
+  ACTIVITY.forEach((e) => window.addEventListener(e, markActive, { passive: true, capture: true }))
+  // 2s 巡检足够准（误差远小于分钟级阈值），比每次移动都重排定时器省
+  idleTimer = window.setInterval(checkIdle, 2000)
+  window.addEventListener('sqlpilot:lock', lockNow)
+})
+
+onBeforeUnmount(() => {
+  ACTIVITY.forEach((e) => window.removeEventListener(e, markActive, { capture: true }))
+  window.clearInterval(idleTimer)
+  window.removeEventListener('sqlpilot:lock', lockNow)
+})
+
+/** 顶栏模块标识：当前接的是 OCP 还是直连 Oracle（平台在模块内切换，这里跟着变） */
+const cloudActiveKind = computed(() => {
+  const list = cloud.platforms
+  const p = list.find((x) => x.id === cloud.activeId) || list[0]
+  return p?.type === 'oracle' ? 'oracle' : 'ocp'
+})
+const cloudBadge = computed(() => {
+  // 只做了架构预览的引擎：顶栏跟着显示它，别挂着 OceanBase
+  if (cloud.preview) return `${engineOf(cloud.preview).name} 体系预览`
+  return cloudActiveKind.value === 'oracle' ? 'Oracle 云管理' : 'OceanBase 云管理'
+})
+const cloudBadgeTitle = computed(() => {
+  const e = cloud.preview ? engineOf(cloud.preview) : null
+  if (e) return `云管平台：${e.name} 还没接真实接口，当前只有架构装配动画与占位页`
+  return cloudActiveKind.value === 'oracle'
+    ? '云管平台：Oracle 直连，直接查 v$ / dba_ 视图（RAC / 实例 / 存储 / 会话 / SQL / 备份 / DG / 作业）'
+    : '云管平台：OceanBase 云平台（OCP）的集群 / 租户 / 主机 / 告警 / 任务'
+})
 const projectModal = ref(false)
 const projectEditorTarget = ref<any>(null)
 const sessionModal = ref<'new' | 'switch' | null>(null)
 const archiveView = ref<{ id: string; name: string } | null>(null)
+const dragActive = ref(false)
+
+// 拖拽文件到窗口任意位置：交给文本编辑器打开（含任意扩展名，绕开文件对话框过滤器）
+function onDragOver(e: DragEvent): void {
+  if (!e.dataTransfer?.types?.includes('Files')) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'copy'
+  dragActive.value = true
+}
+
+function onDragLeave(e: DragEvent): void {
+  if (e.relatedTarget) return
+  dragActive.value = false
+}
+
+async function onDrop(e: DragEvent): Promise<void> {
+  dragActive.value = false
+  const files = Array.from(e.dataTransfer?.files || [])
+  if (!files.length) return
+  const paths = files
+    .map((f) => {
+      try { return window.sqlpilot.getPathForFile(f) } catch { return '' }
+    })
+    .filter(Boolean)
+  if (!paths.length) return
+  // 文件夹 → 左侧文件夹树；文件 → 标签页
+  const dirs: string[] = []
+  const plain: string[] = []
+  for (const p of paths) {
+    try {
+      const st = await window.sqlpilot.editorStatPath(p)
+      if (st.ok && st.isDir) dirs.push(p)
+      else plain.push(p)
+    } catch { plain.push(p) }
+  }
+  if (dirs.length) edState.pendingFolder = dirs[0]
+  if (plain.length) edState.pendingOpens.push(...plain)
+  store.module = 'editor'
+}
 
 // 终端面板首次打开后常驻（v-if 只管挂载，v-show 管显隐）
 const wbEverOpen = ref(false)
@@ -138,17 +315,16 @@ watch(() => store.workbench, (v) => {
   if (v === 'terminal') wbEverOpen.value = true
 })
 
-// 切换会话：非聊天视图（数据库工作台/设置）与终端面板自动隐藏——点会话的意图就是去对话；
-// 组件均保活，重开恢复隐藏前的样子
+// 切换会话：终端面板与设置自动隐藏——点会话的意图就是去对话；
+// 组件均保活，重开恢复隐藏前的样子（数据库控制台是独立模块，切会话不会动它）
 watch(() => store.currentId, () => {
-  if (store.view !== 'chat') store.view = 'chat'
   if (store.workbench) store.workbench = null
   if (store.settingsOpen) store.settingsOpen = false
 })
 
 // 切换一级模块：收起底部工作台面板（终端/资源属于 AI 助手模块的会话上下文）。
-// view 保留——切回 AI 助手时回到离开前的工作台/设置页；确认/预览弹窗不收，
-// 后台任务与审批跨模块仍可响应
+// 数据库控制台与文本编辑状态由各自组件保活，切回来还是离开前的样子；
+// 确认/预览弹窗不收，后台任务与审批跨模块仍可响应
 watch(() => store.module, () => {
   if (store.workbench) store.workbench = null
   if (store.settingsOpen) store.settingsOpen = false
@@ -169,28 +345,6 @@ async function toggleTheme() {
   applyTheme(next)
   store.cfg.theme = next
   await window.sqlpilot.setConfig(toPlain(store.cfg))
-}
-
-/** 顶栏数据库按钮：已存在数据库任务则回到工作台；否则以第一个/最近连接生成任务入口 */
-function onDbButton() {
-  if (store.view === 'db') {
-    store.view = 'chat'
-    return
-  }
-  const dbTask = store.tasks.find((t) => t.kind === 'db')
-  if (dbTask) {
-    store.view = 'db'
-    store.lastDbConn = dbTask.refId
-    store.pendingDbConn = dbTask.refId
-    return
-  }
-  const conn = (store.cfg?.connections || []).find((c: any) => c.id === store.lastDbConn) || (store.cfg?.connections || [])[0]
-  if (conn) {
-    openDbTask(conn)
-    return
-  }
-  store.dbOpen = true
-  store.view = 'db'
 }
 
 async function onProviderChange(e: Event) {
@@ -241,12 +395,63 @@ async function onSessionPick(projectId: string) {
   }
 }
 
-init().then(() => {
+init().then(async () => {
   applyTheme(store.cfg.theme === 'light' ? 'light' : 'dark')
+  // 以文件启动（双击关联/命令行）：直接切到文本编辑并打开
+  try {
+    const pending = await window.sqlpilot.editorPendingOpens()
+    const ws = await window.sqlpilot.editorPendingWorkspace()
+    if (pending?.length) edState.pendingOpens.push(...pending)
+    if (ws) edState.pendingFolder = ws
+    if (pending?.length || ws) store.module = 'editor'
+  } catch { /* 忽略 */ }
+})
+
+// 二次实例再打开文件：同样切到编辑器
+window.sqlpilot.onEditorOpenRequest((p) => {
+  if (p?.paths?.length) edState.pendingOpens.push(...p.paths)
+  if (p?.folder) edState.pendingFolder = p.folder
+  if (p?.paths?.length || p?.folder) store.module = 'editor'
 })
 </script>
 
 <style scoped>
+/* 启动遮罩还在时主界面藏在它后面；遮罩开始退场，这里同步淡入，两段叠成一次交叉溶解。
+   只动 opacity：给 .layout 加 transform 会让内部 position:fixed 的弹层失去视口基准。 */
+.layout {
+  opacity: 0;
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1) 0.14s;
+}
+.layout.app-revealed {
+  opacity: 1;
+}
+
+.drop-hint {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 10, 18, 0.55);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+.drop-box {
+  padding: 26px 38px;
+  border-radius: 16px;
+  border: 1.5px dashed var(--accent);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 15px;
+  text-align: center;
+  box-shadow: var(--shadow-lg);
+}
+.drop-sub {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
 .toast-stack {
   position: fixed;
   right: 18px;

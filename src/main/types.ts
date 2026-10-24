@@ -59,7 +59,34 @@ export interface ProviderConfig {
   contextK?: number
 }
 
-/** 项目挂载的 SSH 远程服务器（密码认证，密码经 DPAPI 加密存 secrets） */
+/**
+ * 终端字符编码。远端 locale 不是 UTF-8 时（老版 CentOS / AIX / 国产化系统常见 GBK），
+ * 主进程按此编解码，xterm 始终吃字符串——否则中文全是乱码。
+ */
+export type TermEncoding = 'utf-8' | 'gbk' | 'gb18030' | 'big5' | 'latin1'
+
+/** 终端配色方案（schemes.ts 里定义具体色板；这里只存 id） */
+export type TermScheme = 'follow' | 'github' | 'mobaxterm' | 'solarized-light' | 'monokai' | 'dracula'
+
+export interface TermPrefs {
+  fontSize: number
+  fontFamily: string
+  lineHeight: number
+  cursorStyle: 'block' | 'bar' | 'underline'
+  cursorBlink: boolean
+  scheme: TermScheme
+  /** 回滚缓冲行数 */
+  scrollback: number
+  /** 选中即复制（MobaXterm/XShell 习惯） */
+  copyOnSelect: boolean
+  /** 右键直接粘贴（否则弹菜单） */
+  rightClickPaste: boolean
+  /** 粘贴多行命令时二次确认，防误执行 */
+  confirmMultilinePaste: boolean
+  encoding: TermEncoding
+}
+
+/** 项目挂载的 SSH 远程服务器（密码/私钥认证，口令经 DPAPI 加密存 secrets） */
 export interface SshServer {
   id: string
   name: string
@@ -69,10 +96,52 @@ export interface SshServer {
   /** 生产/测试等标记，注入提示词提醒模型 */
   tag?: string
   note?: string
+  /** 会话分组（侧栏按组分节；空 = 未分组） */
+  group?: string
+  /** 认证方式：password = 密码；key = 私钥文件 */
+  auth?: 'password' | 'key'
+  /** 私钥文件绝对路径（auth=key 时必填；支持 OpenSSH / PEM） */
+  keyPath?: string
+  /** 设备/系统编码，默认 utf-8 */
+  encoding?: TermEncoding
+  /** SFTP 文件名编码（与终端编码分开：有些机器 locale 是 UTF-8 但文件名是 GBK） */
+  fileEncoding?: TermEncoding
+  /** 登录后自动进入的目录 */
+  cwd?: string
+  /** 该会话的配色方案（缺省跟随全局） */
+  scheme?: TermScheme
+  /** 该会话的字号（缺省跟随全局） */
+  fontSize?: number
+  /** 跳板机：先连这台服务器，再从它转发到目标（ProxyJump） */
+  jumpId?: string
 }
 
-export interface ProjectConfig {
+/**
+ * 云管平台接入（左侧一级模块「云管平台」）。
+ * 目前只接 OceanBase 云平台（OCP）；type 预留，后续加其它云平台时按 type 分发。
+ * 密码不落在这里：DPAPI 加密存 secrets.json，键 cloud:<id>。
+ */
+export interface CloudPlatform {
   id: string
+  name: string
+  /** ocp = 调 OCP 的 REST 接口；oracle = 直连数据库查 v$ / dba_ 视图 */
+  type: 'ocp' | 'oracle'
+  /** OCP 平台地址，形如 http://192.168.1.130:8080（可带 context path，如 /ocp）；oracle 类型不用 */
+  baseUrl?: string
+  /** Oracle 直连：主机 / 端口 / 服务名 */
+  host?: string
+  port?: number
+  serviceName?: string
+  username: string
+  /** 内网自签证书时跳过 TLS 校验 */
+  insecure?: boolean
+  /** Oracle 连接身份（SYSDBA/SYSOPER 需要口令文件与 thick 模式） */
+  role?: 'default' | 'sysdba' | 'sysoper'
+  /** Oracle 11g 等老版本不支持 thin 模式，需要 Instant Client 目录 */
+  instantClientDir?: string
+}
+
+export interface ProjectConfig {  id: string
   name: string
   rootPath: string
   /** 项目说明（注入系统提示词，如注意事项） */
@@ -93,14 +162,20 @@ export interface AppConfig {
   projects: ProjectConfig[]
   /** 全局 SSH 服务器注册表（项目经 serverIds 引用；密码 DPAPI 加密存 secrets，键 server:<id>） */
   servers: SshServer[]
+  /** 终端外观与交互偏好（字体/配色/复制粘贴/编码，全局共享） */
+  termPrefs?: TermPrefs
   /** 技能启用状态（技能本体在 userData/skills/） */
   skillsEnabled: Record<string, boolean>
   /** Oracle Instant Client 目录（全局默认，连接 11g 时需要） */
   instantClientDir?: string
   /** 文件脱敏规则（按文件类型独立配置） */
   masking?: MaskingConfig
+  /** 云管平台清单（目前仅 OCP） */
+  cloudPlatforms?: CloudPlatform[]
   /** 界面主题 */
   theme?: 'dark' | 'light'
+  /** 空闲多久自动锁屏（分钟，0 = 关闭；默认 3）——锁屏走开机动画，需手动进入 */
+  lockIdleMin?: number
   /** 系统提示词脱敏：不发送连接主机/账号、服务器地址、项目路径等明细（默认开启） */
   maskPromptDetails?: boolean
   /** LLM 发送前预览：每次请求弹窗展示完整内容，用户确认后才发出（默认关闭） */

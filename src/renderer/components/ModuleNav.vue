@@ -1,12 +1,12 @@
 <template>
-  <nav class="module-nav" aria-label="功能模块">
+  <nav class="module-nav" :style="navPaint" aria-label="功能模块">
     <button
       v-for="m in modules"
       :key="m.key"
       class="mn-item"
       :class="{ active: store.module === m.key }"
       :title="m.desc"
-      @click="store.module = m.key"
+      @click="go(m.key)"
     >
       <span class="mn-icon">{{ m.icon }}</span>
       <span class="mn-label">{{ m.label }}</span>
@@ -36,18 +36,40 @@
 </template>
 
 <script setup lang="ts">
-import { inject } from 'vue'
-import { store } from '../store'
+import { nextTick, ref, watch, inject } from 'vue'
+import { store, openDbConsole } from '../store'
 
 // 主题状态与切换由 App.vue 持有（applyTheme/setConfig 在那侧），此处仅注入使用
 const { theme, toggle: toggleTheme } = inject<{ theme: { value: 'dark' | 'light' }; toggle: () => void }>('themeState')!
 
+/**
+ * 切主题时这一列（首列独立合成层）出现过"computed 已是新底色、屏幕/截图仍是旧底色"的不同步；
+ * 把主题变量解析后的实际颜色写进行内样式，用行内赋值确保重新绘制。值仍取自主题变量，不硬编码色板。
+ */
+const navPaint = ref<Record<string, string>>({})
+function repaintNav(): void {
+  const cs = getComputedStyle(document.documentElement)
+  const bg = cs.getPropertyValue('--bg-side').trim()
+  const border = cs.getPropertyValue('--border').trim()
+  navPaint.value = bg ? { background: bg, borderRightColor: border || 'transparent' } : {}
+}
+watch(theme, () => { void nextTick(repaintNav) }, { immediate: true })
+
 /** 一级功能模块：只做导航切换，模块内容渲染在 App.vue 按 module 分发 */
 const modules = [
-  { key: 'agent', icon: '◆', label: 'AI 助手', desc: 'AI 对话 · 数据库工作台 · SSH 终端（会话/项目/连接管理）' },
+  { key: 'agent', icon: '◆', label: 'AI 助手', desc: 'AI 对话 · SSH 终端（会话/项目/连接管理）' },
+  { key: 'db', icon: '🗄', label: '数据库', desc: '数据库控制台：对象树 / 查询窗口 / 表数据编辑 / 库信息（独立模块，标签页保活）' },
+  { key: 'cloud', icon: '☁', label: '云管平台', desc: '云管平台：OceanBase（OCP 接口）+ Oracle（直连查 v$ 视图）' },
+  { key: 'editor', icon: '✎', label: '文本编辑', desc: 'Notepad++ 式多标签文本编辑器：大文件秒开 / 语法高亮 / 正则替换 / 编码转换' },
   { key: 'masking', icon: '⛨', label: '脱敏工具', desc: '本地脱敏 Oracle AWR 等运维文件，规则按文件类型独立配置' },
   { key: 'report', icon: '▤', label: '巡检报告', desc: '基于模板的数据库巡检报告生成（规划中，与 AI 无关）' }
 ] as const
+
+/** 数据库控制台首次进入要先挂载（之后由 v-show 保活），其余模块直接切 */
+function go(key: (typeof modules)[number]['key']): void {
+  if (key === 'db') openDbConsole()
+  else store.module = key
+}
 </script>
 
 <style scoped>
@@ -61,6 +83,9 @@ const modules = [
   align-items: stretch;
   padding: 10px 0;
   gap: 4px;
+  /* 与 body 的主题过渡一致；同时保证切主题时该列（独立合成层）每帧重新栅格化，
+     不会残留上一主题的底色 */
+  transition: background-color 0.25s ease, border-color 0.25s ease;
 }
 .mn-item {
   position: relative;

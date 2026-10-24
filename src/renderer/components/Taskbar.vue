@@ -22,9 +22,9 @@
 <script setup lang="ts">
 import { store, activateTask, minimizeTask, closeTask } from '../store'
 
-/** 激活态：数据库任务 = 当前在工作台视图且是最近定位的连接；服务器任务 = 终端面板可见且为当前终端 */
+/** 激活态：数据库任务 = 当前在数据库控制台模块且是最近定位的连接；服务器任务 = 终端面板可见且为当前终端 */
 function isActive(t: { kind: 'db' | 'server'; refId: string }): boolean {
-  if (t.kind === 'db') return store.view === 'db' && store.lastDbConn === t.refId
+  if (t.kind === 'db') return store.module === 'db' && store.lastDbConn === t.refId
   return store.workbench === 'terminal' && store.activeTermServerId === t.refId
 }
 </script>

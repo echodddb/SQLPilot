@@ -2,7 +2,6 @@ import { app } from 'electron'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import extract from 'extract-zip'
 
 // 技能 = 目录（SKILL.md 指令文件 + 可选附属资源），存 userData/skills/<id>/。
 // 启用的技能名称+描述注入系统提示词，模型按需通过 read_skill 工具读取 SKILL.md 全文，
@@ -241,6 +240,8 @@ export async function importSkillPack(srcPath: string): Promise<SkillPackResult>
     if (stat.isFile()) {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlpilot-skill-'))
       // extract 放在 try 内：损坏/加密 zip 抛错时也能走到 finally 清理临时目录
+      // 动态加载：只有导入技能包时才需要它，别让它成为所有模块的静态依赖（CJS 会被打包成 require）
+      const { default: extract } = await import('extract-zip')
       await extract(srcPath, { dir: tmpDir })
       root = tmpDir
     }

@@ -7,6 +7,7 @@
         <option value="TABLE">表</option>
         <option value="VIEW">视图</option>
       </select>
+      <button class="mini-btn" title="新增数据库连接（控制台内直接添加，无需回 AI 助手侧栏）" @click="openConnModal()">＋</button>
     </div>
     <div class="dbt-tree">
       <template v-for="c in connections" :key="c.id">
@@ -46,16 +47,21 @@
           </template>
         </template>
       </template>
-      <div v-if="!connections.length" class="dbt-node dim">
-        还没有数据库连接：左侧"数据库连接"区 ＋ 添加后即可浏览对象。
+      <div v-if="!connections.length" class="dbt-empty">
+        <div class="dim">还没有任何数据库连接</div>
+        <button class="mini-btn primary" @click="openConnModal()">＋ 新建连接</button>
+        <div class="hint">支持 Oracle 11g / 19c、OceanBase（MySQL / Oracle 租户）、MySQL</div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, inject, reactive, ref } from 'vue'
 import { store, TYPE_LABELS } from '../../store'
+
+/** 连接弹窗由 App.vue 全局 provide（控制台不依赖 AI 助手侧栏） */
+const openConnModal = inject<(c?: any) => void>('openConnModal')!
 
 const emit = defineEmits<{
   (e: 'open-table', connId: string, schema: string, table: string): void
@@ -166,4 +172,10 @@ function filteredTables(list: any[]) {
   border-radius: 6px; font-size: 11px; padding: 0 6px; cursor: pointer; flex-shrink: 0; font-family: inherit; line-height: 1.6;
 }
 .mini-btn:hover { color: var(--accent); border-color: var(--accent); }
+.mini-btn.primary { border-color: transparent; background: var(--accent); color: #fff; font-weight: 700; }
+.mini-btn.primary:hover { color: #fff; filter: brightness(1.08); }
+/* 无连接时的空态：控制台自带连接入口 */
+.dbt-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; padding: 18px 14px; }
+.dbt-empty .dim { font-size: 12px; color: var(--text-faint); }
+.dbt-empty .hint { font-size: 11px; color: var(--text-faint); line-height: 1.6; }
 </style>

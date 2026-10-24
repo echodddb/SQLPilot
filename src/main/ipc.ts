@@ -29,6 +29,145 @@ import { listSubagentTasks, onSubtaskChange, stopSubagentTask, stopSubtasksOfSes
 import { readRunAudit } from './agent/subagent-audit'
 import { getSysResources } from './sysinfo'
 import { writeFileAtomic } from './atomic'
+import {
+  listPlatforms,
+  savePlatform,
+  deletePlatform,
+  testPlatform,
+  loginStatus,
+  overview as cloudOverview,
+  clusters as cloudClusters,
+  clusterDetail as cloudClusterDetail,
+  tenants as cloudTenants,
+  tenantDetail as cloudTenantDetail,
+  hosts as cloudHosts,
+  alarms as cloudAlarms,
+  alarmHistory as cloudAlarmHistory,
+  alarmDetail as cloudAlarmDetail,
+  alarmRules as cloudAlarmRules,
+  alarmTrend as cloudAlarmTrend,
+  alarmLevelCounts as cloudAlarmLevelCounts,
+  tasks as cloudTasks,
+  taskDetail as cloudTaskDetail,
+  taskStats as cloudTaskStats,
+  taskCreators as cloudTaskCreators,
+  metrics as cloudMetrics,
+  clusterAction as cloudClusterAction,
+  createTenant as cloudCreateTenant,
+  deleteTenant as cloudDeleteTenant,
+  packages as cloudPackages,
+  clusterPreCheck as cloudClusterPreCheck,
+  clusterCreate as cloudClusterCreate,
+  clusterParams as cloudClusterParams,
+  clusterUpdateParams as cloudClusterUpdateParams,
+  tenantParams as cloudTenantParams,
+  tenantUpdateParams as cloudTenantUpdateParams,
+  tenantChangePassword as cloudTenantChangePassword,
+  tenantModifyWhitelist as cloudTenantModifyWhitelist,
+  tenantModifyReplica as cloudTenantModifyReplica,
+  tenantAddReplica as cloudTenantAddReplica,
+  tenantDeleteReplica as cloudTenantDeleteReplica,
+  tenantSetLocked as cloudTenantSetLocked,
+  tenantSessions as cloudTenantSessions,
+  tenantCloseSessions as cloudTenantCloseSessions,
+  topSql as cloudTopSql,
+  slowSql as cloudSlowSql,
+  sqlText as cloudSqlText,
+  tenantSqlStats as cloudTenantSqlStats,
+  tenantDbs as cloudTenantDbs,
+  tenantTables as cloudTenantTables,
+  tenantTableSchema as cloudTenantTableSchema,
+  tenantTopo as cloudTenantTopo,
+  tenantSessionStats as cloudTenantSessionStats,
+  tenantCloseQuery as cloudTenantCloseQuery,
+  tenantRowLocks as cloudTenantRowLocks,
+  tenantTxns as cloudTenantTxns,
+  tenantCloseTxns as cloudTenantCloseTxns,
+  tenantNewSql as cloudTenantNewSql,
+  tenantHighRiskSql as cloudTenantHighRiskSql,
+  tenantParallelSql as cloudTenantParallelSql,
+  tenantOutlines as cloudTenantOutlines,
+  tenantSqlDiagnosis as cloudTenantSqlDiagnosis,
+  tenantCompactionAll as cloudTenantCompactionAll,
+  tenantUpdateCompactionSettings as cloudTenantUpdateCompactionSettings,
+  tenantCompactionAction as cloudTenantCompactionAction,
+  tenantGatherAll as cloudTenantGatherAll,
+  tenantBackupAll as cloudTenantBackupAll,
+  tenantUsers as cloudTenantUsers,
+  tenantTde as cloudTenantTde,
+  unitSpecs as cloudUnitSpecs,
+  unitSpecCreate as cloudUnitSpecCreate,
+  unitSpecUpdate as cloudUnitSpecUpdate,
+  unitSpecDelete as cloudUnitSpecDelete,
+  tenantClonePreCheck as cloudTenantClonePreCheck,
+  tenantClone as cloudTenantClone,
+  primaryTenantInfo as cloudPrimaryTenantInfo,
+  createStandbyTenant as cloudCreateStandbyTenant,
+  // 备份恢复 / OBProxy / 巡检 / 平台管理
+  backupBundle as cloudBackupBundle,
+  backupTasks as cloudBackupTasks,
+  obproxyBundle as cloudObproxyBundle,
+  obproxyDetail as cloudObproxyDetail,
+  obproxyParams as cloudObproxyParams,
+  inspectionBundle as cloudInspectionBundle,
+  inspectionReport as cloudInspectionReport,
+  inspectionTasks as cloudInspectionTasks,
+  platformBundle as cloudPlatformBundle,
+  platformProperties as cloudPlatformProperties,
+  platformLogins as cloudPlatformLogins,
+  // Oracle 直连云平台（查 v$ / dba_ 视图，不走平台接口）
+  cloudOracleSection,
+  cloudOracleSqlDetail
+} from './cloud/service'
+import {
+  askOraAi,
+  bindOraAiEmitter,
+  deleteOraAiSession,
+  getOraAiSession,
+  listOraAiSessions,
+  refreshOraAiContext,
+  oraAiCatalog,
+  setOraAiSections,
+  stopOraAi
+} from './cloud/oracle/ai'
+import { askEditorAi, bindEditorAiEmitter, deleteEditorAiSession, getEditorAiSession, listEditorAiSessions, stopEditorAi } from './editor-ai'
+import {
+  askCloudAi,
+  bindCloudAiEmitter,
+  deleteCloudAiSession,
+  getCloudAiSession,
+  listCloudAiSessions,
+  refreshCloudAiContext,
+  setCloudAiSections,
+  stopCloudAi,
+  type CloudAiAskInput,
+  type CloudAiEvent,
+  type CloudAiSectionKey
+} from './cloud/ai'
+import {
+  setPendingOpens as editorSetPendingOpens,
+  takePendingOpens as editorTakePendingOpens,
+  takePendingWorkspace as editorTakePendingWorkspace,
+  openDialog as editorOpenDialog,
+  openPath as editorOpenPath,
+  openFolderDialog as editorOpenFolderDialog,
+  listFilesForAi,
+  newDoc as editorNewDoc,
+  readTextForAi,
+  getWindow as editorGetWindow,
+  loadFull as editorLoadFull,
+  saveDoc as editorSaveDoc,
+  saveAsDialog as editorSaveAsDialog,
+  reopen as editorReopen,
+  closeDoc as editorCloseDoc,
+  statDocs as editorStatDocs,
+  findInDoc as editorFindInDoc,
+  findInFiles as editorFindInFiles,
+  listDir as editorListDir,
+  statPath as editorStatPath,
+  listRecents as editorListRecents,
+  clearRecents as editorClearRecents
+} from './editor'
 
 let win: BrowserWindow | null = null
 const pendingApprovals = new Map<string, { resolve: (o: ApprovalOutcome) => void; sessionId: string }>()
@@ -115,6 +254,24 @@ const ARCHIVE_SUMMARY_SYSTEM = '你是会话归档器。把这段 DBA 助手与�
 
 export function registerIpc(): void {
   loadPersistedSessions()
+  // 云管 AI 的流式事件与 agent 事件共用同一个窗口通道，但走独立的频道名
+  bindCloudAiEmitter((ev: CloudAiEvent) => {
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('cloud:ai:event', ev) } catch { /* 窗口关闭中 */ }
+    }
+  })
+  // Oracle 的 AI 助手走独立频道（会话与快照来源都不同，互不干扰）
+  bindOraAiEmitter((ev) => {
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('cloud:oraAi:event', ev) } catch { /* 窗口关闭中 */ }
+    }
+  })
+  // 文本编辑器「针对选中文本提问」的流式事件（与前两个助手互不干扰）
+  bindEditorAiEmitter((ev) => {
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('editor:ai:event', ev) } catch { /* 窗口关闭中 */ }
+    }
+  })
 
   // ---------- 配置 ----------
   // API Key 不下发渲染层：真实值仅留在主进程内存，界面凭 hasKey 判断是否已保存
@@ -134,6 +291,9 @@ export function registerIpc(): void {
         if (old?.apiKey) p.apiKey = old.apiKey
       }
     }
+    // 云管平台清单由主进程独立维护（cloud:* ），渲染层的配置副本可能是模块接入前的旧快照；
+    // 整份回存时以主进程为准，避免切主题之类的操作把平台配置抹掉
+    cfg.cloudPlatforms = cur.cloudPlatforms
     saveConfig(cfg)
     return { ok: true }
   })
@@ -1005,9 +1165,53 @@ export function registerIpc(): void {
   })
 
   // ---------- 数据库信息面板（Navicat 式概览，逐项容错：无权限的项自动略过） ----------
-  interface InfoSection { title: string; rows: { k: string; v: string }[] }
-  interface InfoTable { title: string; columns: string[]; rows: any[][] }
+  interface InfoSection { title: string; rows: { k: string; v: string }[]; group?: string }
+  interface InfoTable { title: string; columns: string[]; rows: any[][]; group?: string }
+  /** 顶部 KPI 磁贴：给 DBA 一眼看到状态，数值型指标同时以图表呈现 */
+  interface InfoKpi { label: string; value: string; sub?: string; tone?: 'ok' | 'warn' | 'bad' }
+  interface InfoChartItem { label: string; value: number; hint?: string }
+  /** 图形化指标：gauge=单值占比环 / donut=分类占比环 / bars=横向条形 / stack=单条堆叠
+   *  group：与同组 sections/tables 在同一张卡片里展示（图表与明细必须挨在一起，不单独成区） */
+  interface InfoChart {
+    id: string
+    title: string
+    kind: 'gauge' | 'donut' | 'bars' | 'stack'
+    unit?: string
+    /** gauge 用：value / total（渲染层据此算百分比，不再回传 pct 字符串） */
+    value?: number
+    total?: number
+    caption?: string
+    items: InfoChartItem[]
+    note?: string
+    group?: string
+  }
+  interface InfoData { sections: InfoSection[]; tables: InfoTable[]; charts: InfoChart[]; kpis: InfoKpi[] }
   const businessSchemaFilter = `table_schema NOT IN (${[...MYSQL_SYSTEM_SCHEMAS].map((s) => `'${s}'`).join(', ')})`
+
+  // 图表取数辅助：数据库驱动返回的可能是字符串/Decimal，统一转数字，异常值归零
+  const toNum = (v: any): number => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : 0
+  }
+  const fmtCap = (mb: number): string =>
+    mb >= 1024 ? `${(mb / 1024).toFixed(mb >= 10240 ? 0 : 1)} GB` : `${mb.toFixed(0)} MB`
+  /** 时间值归一：驱动可能给 Date，也可能给字符串；KPI 副标题里统一成 YYYY-MM-DD HH:mm */
+  const fmtTime = (v: any): string => {
+    if (v instanceof Date) {
+      const p = (n: number) => String(n).padStart(2, '0')
+      return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())} ${p(v.getHours())}:${p(v.getMinutes())}`
+    }
+    const s = String(v ?? '')
+    return s.length >= 16 ? s.slice(0, 16) : s
+  }
+  const toneOf = (pct: number): 'ok' | 'warn' | 'bad' => (pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok')
+  /** 分类项过多时合并尾部为「其他」，避免环图碎片化 */
+  const foldItems = (items: InfoChartItem[], keep = 6): InfoChartItem[] => {
+    const sorted = [...items].sort((a, b) => b.value - a.value)
+    if (sorted.length <= keep + 1) return sorted
+    const rest = sorted.slice(keep)
+    return [...sorted.slice(0, keep), { label: '其他', value: rest.reduce((s, r) => s + r.value, 0) }]
+  }
 
   async function tryQuery(adapter: any, sql: string): Promise<any[][] | null> {
     try {
@@ -1046,9 +1250,11 @@ export function registerIpc(): void {
     return d > 0 ? `${d} 天 ${h} 小时` : `${h} 小时 ${Math.floor((s % 3600) / 60)} 分`
   }
 
-  async function oracleInfo(adapter: any, profile: ConnProfile): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
+  async function oracleInfo(adapter: any, profile: ConnProfile): Promise<InfoData> {
     const sections: InfoSection[] = []
     const tables: InfoTable[] = []
+    const charts: InfoChart[] = []
+    const kpis: InfoKpi[] = []
 
     const isObOracle = profile.type === 'ob-oracle'
     const banner = isObOracle
@@ -1095,6 +1301,7 @@ export function registerIpc(): void {
     if (sess) {
       sections.push({
         title: '会话',
+        group: 'sessions',
         rows: [
           { k: '会话总数', v: String(sess[0][0]) },
           { k: '活跃会话', v: `${sess[0][1]}（非 Idle 且有用户名，详见下方列表）` }
@@ -1111,21 +1318,85 @@ export function registerIpc(): void {
       LEFT JOIN (SELECT tablespace_name, SUM(bytes) / 1048576 mb FROM dba_free_space GROUP BY tablespace_name) fr
         ON df.tablespace_name = fr.tablespace_name
       ORDER BY (df.mb - NVL(fr.mb, 0)) DESC`)
-    if (ts) tables.push({ title: '表空间使用（需 DBA 视图权限）', columns: ['表空间', '总量 MB', '空闲 MB', '已用 %'], rows: ts })
+    if (ts) tables.push({ title: '表空间使用（需 DBA 视图权限）', group: 'ts', columns: ['表空间', '总量 MB', '空闲 MB', '已用 %'], rows: ts })
 
     const objs = await tryQuery(adapter, `SELECT object_type, COUNT(*) FROM user_objects GROUP BY object_type ORDER BY 1`)
-    if (objs) tables.push({ title: '当前用户对象统计', columns: ['对象类型', '数量'], rows: objs })
+    if (objs) tables.push({ title: '当前用户对象统计', group: 'objects', columns: ['对象类型', '数量'], rows: objs })
 
     const sga = await tryQuery(adapter, `SELECT name, value FROM v$sgainfo WHERE name IN ('Buffer Cache Size','Shared Pool Size','Large Pool Size','Java Pool Size','Maximum SGA Size')`)
     if (sga) {
-      sections.push({ title: '内存（SGA）', rows: sga.map((r) => ({ k: String(r[0]), v: fmtMB(r[1]) })) })
+      sections.push({ title: '内存（SGA）', group: 'sga', rows: sga.map((r) => ({ k: String(r[0]), v: fmtMB(r[1]) })) })
     }
-    return { sections, tables }
+
+    // ---------- 图形化看板（与上面表格同源，只是把关键指标算成图） ----------
+    if (inst?.length) {
+      const st = String(inst[0][2] || '').toUpperCase()
+      kpis.push({ label: '实例状态', value: st || '—', sub: String(inst[0][0] || ''), tone: st === 'OPEN' ? 'ok' : 'warn' })
+    }
+    if (db?.length) {
+      const arch = String(db[0][2] || '').toUpperCase()
+      kpis.push({ label: '归档模式', value: arch || '—', sub: String(db[0][3] || ''), tone: arch === 'ARCHIVELOG' ? 'ok' : 'warn' })
+    }
+    if (sess?.length) {
+      const totalSession = toNum(sess[0][0])
+      const activeSession = toNum(sess[0][1])
+      kpis.push({
+        label: '会话', value: `${activeSession} / ${totalSession}`, sub: '活跃 / 总数',
+        tone: totalSession > 0 && activeSession / totalSession >= 0.6 ? 'warn' : 'ok'
+      })
+      charts.push({
+        id: 'sessions', title: '会话构成', kind: 'donut', unit: '个', group: 'sessions',
+        items: [{ label: '活跃', value: activeSession }, { label: '空闲/非活跃', value: Math.max(0, totalSession - activeSession) }]
+      })
+    }
+    if (ts?.length) {
+      const tsRows = ts.map((r) => ({
+        name: String(r[0]),
+        total: toNum(r[1]),
+        used: Math.max(0, toNum(r[1]) - toNum(r[2])),
+        pct: toNum(r[3])
+      })).filter((r) => r.total > 0)
+      const totalMb = tsRows.reduce((s, r) => s + r.total, 0)
+      const usedMb = tsRows.reduce((s, r) => s + r.used, 0)
+      const overall = totalMb > 0 ? (usedMb / totalMb) * 100 : 0
+      kpis.push({
+        label: '表空间使用率', value: `${overall.toFixed(1)}%`,
+        sub: `${fmtCap(usedMb)} / ${fmtCap(totalMb)}`, tone: toneOf(overall)
+      })
+      if (totalMb > 0) {
+        charts.push({
+          id: 'ts-total', title: '表空间总体使用', kind: 'gauge', unit: '%', group: 'ts',
+          value: usedMb, total: totalMb,
+          caption: `${fmtCap(usedMb)} 已用 · ${fmtCap(Math.max(0, totalMb - usedMb))} 空闲`,
+          items: []
+        })
+      }
+      charts.push({
+        id: 'ts-top', title: '表空间使用率 TOP 8', kind: 'bars', unit: '%', group: 'ts',
+        items: tsRows.sort((a, b) => b.pct - a.pct).slice(0, 8)
+          .map((r) => ({ label: r.name, value: Number(r.pct.toFixed(1)), hint: `${fmtCap(r.used)} / ${fmtCap(r.total)}` }))
+      })
+    }
+    if (sga?.length) {
+      const parts = sga
+        .map((r) => ({ label: String(r[0]).replace(/\s*Size$/, ''), value: Math.round(toNum(r[1]) / 1048576) }))
+        .filter((p) => p.value > 0 && p.label !== 'Maximum SGA')
+      if (parts.length) charts.push({ id: 'sga', title: 'SGA 内存组成', kind: 'stack', unit: 'MB', group: 'sga', items: parts })
+    }
+    if (objs?.length) {
+      charts.push({
+        id: 'objects', title: '对象类型分布（当前用户）', kind: 'donut', unit: '个', group: 'objects',
+        items: foldItems(objs.map((r) => ({ label: String(r[0]), value: toNum(r[1]) })))
+      })
+    }
+    return { sections, tables, charts, kpis }
   }
 
-  async function obOracleInfo(adapter: any, profile: ConnProfile): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
+  async function obOracleInfo(adapter: any, profile: ConnProfile): Promise<InfoData> {
     const sections: InfoSection[] = []
     const tables: InfoTable[] = []
+    const charts: InfoChart[] = []
+    const kpis: InfoKpi[] = []
     const diagnostics: string[] = []
 
     const version = await tryQuery(adapter, 'SELECT banner FROM v$version WHERE ROWNUM <= 2')
@@ -1165,6 +1436,7 @@ export function registerIpc(): void {
     if (sessions?.length) {
       sections.push({
         title: '会话',
+        group: 'sessions',
         rows: [
           { k: '会话总数', v: String(sessions[0][0]) },
           { k: '活跃会话', v: `${sessions[0][1]}（GV$OB_PROCESSLIST，详见下方列表）` }
@@ -1184,7 +1456,7 @@ export function registerIpc(): void {
 
     const objects = await tryQuery(adapter, `
       SELECT object_type, COUNT(*) FROM user_objects GROUP BY object_type ORDER BY 1`)
-    if (objects) tables.push({ title: '当前用户对象统计', columns: ['对象类型', '数量'], rows: objects })
+    if (objects) tables.push({ title: '当前用户对象统计', group: 'objects', columns: ['对象类型', '数量'], rows: objects })
 
     const logStreams = await tryQuery(adapter, `
       SELECT ls_id, status, primary_zone, unit_group_id, ls_group_id, sync_scn, readable_scn
@@ -1209,6 +1481,7 @@ export function registerIpc(): void {
       FROM SYS.DBA_OB_TABLE_LOCATIONS GROUP BY zone, role ORDER BY zone, role`)
     if (replicaDistribution) tables.push({
       title: '表副本分布（按 Zone/角色）',
+      group: 'replica',
       columns: ['Zone', '角色', '副本记录数'],
       rows: replicaDistribution
     })
@@ -1218,6 +1491,7 @@ export function registerIpc(): void {
       FROM SYS.DBA_OB_TABLET_REPLICAS GROUP BY svr_ip ORDER BY svr_ip`)
     if (tabletStorage) tables.push({
       title: 'Tablet 存储分布',
+      group: 'storage',
       columns: ['服务器', 'Tablet 副本数', '数据量 MB', '占用 MB'],
       rows: tabletStorage
     })
@@ -1280,14 +1554,79 @@ export function registerIpc(): void {
       diagnostics.push(`${label}：当前 Oracle 租户账号不可见 ${view}；请使用 sys 租户或集群级监控查看。`)
     }
     sections.push({ title: '采集诊断', rows: diagnostics.map((message) => ({ k: '提示', v: message })) })
-    return { sections, tables }
+
+    // ---------- 图形化看板 ----------
+    if (tenant?.length) {
+      const st = String(tenant[0][6] || '').toUpperCase()
+      kpis.push({ label: '租户状态', value: st || '—', sub: String(tenant[0][1] || ''), tone: st === 'NORMAL' ? 'ok' : 'warn' })
+      const tenantType = String(tenant[0][2] || '').toUpperCase()
+      const typeLabel = tenantType === 'SYS' ? '系统租户' : tenantType === 'USER' ? '用户租户' : tenantType
+      kpis.push({ label: 'Unit 数', value: String(tenant[0][10] ?? '—'), sub: typeLabel || '租户规格' })
+    }
+    if (sessions?.length) {
+      const totalSession = toNum(sessions[0][0])
+      const activeSession = toNum(sessions[0][1])
+      kpis.push({
+        label: '会话', value: `${activeSession} / ${totalSession}`, sub: '活跃 / 总数',
+        tone: totalSession > 0 && activeSession / totalSession >= 0.6 ? 'warn' : 'ok'
+      })
+      charts.push({
+        id: 'sessions', title: '会话构成', kind: 'donut', unit: '个', group: 'sessions',
+        items: [{ label: '活跃', value: activeSession }, { label: '空闲/非活跃', value: Math.max(0, totalSession - activeSession) }]
+      })
+    }
+    if (compaction?.length) {
+      const st = String(compaction[0][5] || '').toUpperCase()
+      // last_finish_time 各版本可能给 Date、字符串或 SCN 数字——数字时不要假装成时间
+      const finish = compaction[0][3]
+      const finishText = finish instanceof Date || /^\d{4}-\d\d-\d\d/.test(String(finish ?? ''))
+        ? `完成 ${fmtTime(finish)}`
+        : finish != null ? `Last Finish SCN ${finish}` : 'Major Compaction'
+      kpis.push({
+        label: '合并状态', value: st || '—', sub: finishText,
+        tone: st === 'IDLE' || st === 'FINISH' ? 'ok' : 'warn'
+      })
+    }
+    if (tabletStorage?.length) {
+      charts.push({
+        id: 'tablet', title: 'Tablet 占用分布', kind: 'bars', unit: 'MB', group: 'storage',
+        items: tabletStorage
+          .map((r) => ({ label: String(r[0]), value: Math.round(toNum(r[3])), hint: `${toNum(r[1])} 个副本` }))
+          .sort((a, b) => b.value - a.value)
+      })
+    }
+    if (replicaDistribution?.length) {
+      const byZone = new Map<string, number>()
+      for (const r of replicaDistribution) {
+        const zone = String(r[0])
+        byZone.set(zone, (byZone.get(zone) || 0) + toNum(r[2]))
+      }
+      charts.push({
+        id: 'replica-zone', title: '表副本分布（按 Zone）', kind: 'donut', unit: '条', group: 'replica',
+        items: foldItems([...byZone].map(([label, value]) => ({ label, value })))
+      })
+    }
+    if (objects?.length) {
+      charts.push({
+        id: 'objects', title: '对象类型分布（当前用户）', kind: 'donut', unit: '个', group: 'objects',
+        items: foldItems(objects.map((r) => ({ label: String(r[0]), value: toNum(r[1]) })))
+      })
+    }
+    return { sections, tables, charts, kpis }
   }
 
-  async function mysqlInfo(adapter: any, profile: ConnProfile): Promise<{ sections: InfoSection[]; tables: InfoTable[] }> {
+  async function mysqlInfo(adapter: any, profile: ConnProfile): Promise<InfoData> {
     const sections: InfoSection[] = []
     const tables: InfoTable[] = []
+    const charts: InfoChart[] = []
+    const kpis: InfoKpi[] = []
     const isOb = profile.type === 'ob-mysql'
     const diagnostics: string[] = []
+    /** OB 块内采集到的事务 / 锁等待 / 活跃会话 / 合并状态（KPI 与图表统一在末尾输出） */
+    let trxCount = -1
+    let lockWaitCount = -1
+    let obActive: any[][] | null = null
+    let compactionRow: any[] | null = null
 
     const ver = await tryQuery(adapter, `SELECT VERSION()`)
     const rows: { k: string; v: string }[] = []
@@ -1320,7 +1659,7 @@ export function registerIpc(): void {
     }
     if (rows.length) sections.push({ title: '服务器', rows })
 
-    const st = await tryQuery(adapter, `SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Threads_connected','Threads_running','Max_used_connections','Questions','Slow_queries','Aborted_connects')`)
+    const st = await tryQuery(adapter, `SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Threads_connected','Threads_running','Max_used_connections','Questions','Slow_queries','Aborted_connects','Innodb_buffer_pool_read_requests','Innodb_buffer_pool_reads')`)
     if (st) {
       const map = new Map(st.map((r) => [String(r[0]), r[1]]))
       const label: [string, string, ((v: any) => string) | null][] = [
@@ -1337,7 +1676,7 @@ export function registerIpc(): void {
       FROM information_schema.tables
       WHERE ${businessSchemaFilter}
       GROUP BY table_schema ORDER BY SUM(data_length + index_length) DESC LIMIT 15`)
-    if (size) tables.push({ title: '库容量 TOP 15', columns: ['数据库', '表数', '数据量 MB'], rows: size })
+    if (size) tables.push({ title: '库容量 TOP 15', group: 'capacity', columns: ['数据库', '表数', '数据量 MB'], rows: size })
 
     if (isOb) {
       const tenant = await tryQuery(adapter, `
@@ -1415,9 +1754,18 @@ export function registerIpc(): void {
         WHERE tenant_id = (SELECT effective_tenant_id()) ORDER BY svr_ip`)
       if (memstore) tables.push({
         title: 'MemStore / 转储压力',
+        group: 'memstore',
         columns: ['服务器', 'Active', 'Hold', 'Freeze 次数', '使用率 %'],
         rows: memstore
       })
+      if (memstore?.length) {
+        charts.push({
+          id: 'memstore', title: 'MemStore 使用率', kind: 'bars', unit: '%', group: 'memstore',
+          items: memstore
+            .map((r) => ({ label: String(r[0]), value: toNum(r[4]), hint: `Freeze ${toNum(r[3])} 次` }))
+            .sort((a, b) => b.value - a.value)
+        })
+      }
 
       const compaction = await tryQuery(adapter, `
         SELECT status, frozen_scn, last_scn, last_finish_time
@@ -1427,6 +1775,7 @@ export function registerIpc(): void {
         columns: ['状态', 'Frozen SCN', 'Last SCN', '完成时间'],
         rows: compaction
       })
+      compactionRow = compaction?.length ? compaction[0] : null
 
       const activeSessions = await tryQuery(adapter, `
         SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE
@@ -1434,9 +1783,11 @@ export function registerIpc(): void {
         WHERE COMMAND <> 'Sleep' ORDER BY TIME DESC LIMIT 50`)
       if (activeSessions) tables.push({
         title: '活跃会话 TOP 50',
+        group: 'active',
         columns: ['连接 ID', '用户', '客户端', '数据库', '命令', '持续秒', '状态'],
         rows: activeSessions
       })
+      obActive = activeSessions
 
       const trx = await tryQuery(adapter, `
         SELECT trx_id, trx_state, trx_started, trx_mysql_thread_id, trx_query
@@ -1446,6 +1797,7 @@ export function registerIpc(): void {
         columns: ['事务 ID', '状态', '开始时间', '连接 ID', 'SQL'],
         rows: trx
       })
+      trxCount = trx ? trx.length : -1
 
       const lockWaits = await tryQuery(adapter, `
         SELECT requesting_trx_id, requested_lock_id, blocking_trx_id, blocking_lock_id
@@ -1455,6 +1807,7 @@ export function registerIpc(): void {
         columns: ['等待事务', '请求锁', '阻塞事务', '阻塞锁'],
         rows: lockWaits
       })
+      lockWaitCount = lockWaits ? lockWaits.length : -1
 
       const params = await tryQuery(adapter, `
         SHOW VARIABLES WHERE Variable_name IN (
@@ -1465,7 +1818,116 @@ export function registerIpc(): void {
       if (params) sections.push({ title: 'OceanBase 关键参数', rows: params.map((r) => ({ k: String(r[0]), v: String(r[1]) })) })
       if (diagnostics.length) sections.push({ title: '采集诊断', rows: diagnostics.map((message) => ({ k: '提示', v: message })) })
     }
-    return { sections, tables }
+
+    // ---------- 图形化看板 ----------
+    const varMap = new Map<string, any>((vc || []).map((r: any[]) => [String(r[0]), r[1]]))
+    const statusMap = new Map<string, any>((st || []).map((r: any[]) => [String(r[0]), r[1]]))
+    const connected = toNum(statusMap.get('Threads_connected'))
+    const running = toNum(statusMap.get('Threads_running'))
+    const maxConn = toNum(varMap.get('max_connections'))
+    const uptime = toNum(statusMap.get('Uptime'))
+    const questions = toNum(statusMap.get('Questions'))
+
+    if (uptime > 0) kpis.push({ label: '运行时长', value: fmtUptime(uptime) })
+    // OceanBase 的 max_connections 是巨型占位值（2147483647），此时"连接使用率"没有意义，
+    // 改看「活跃连接占比」——多少连接真正在干活，对 DBA 更有信息量
+    const saneMax = maxConn > 0 && maxConn < 1_000_000
+    if (saneMax) {
+      const usage = (connected / maxConn) * 100
+      kpis.push({ label: '连接数', value: `${connected} / ${maxConn}`, sub: `${running} 个活跃`, tone: toneOf(usage) })
+      charts.push({
+        id: 'conn-usage', title: '连接使用率', kind: 'gauge', unit: '%',
+        value: connected, total: maxConn,
+        caption: `${connected} / ${maxConn} · 活跃 ${running}`,
+        items: []
+      })
+    } else if (connected > 0) {
+      // OB 的 max_connections 不可用：改看连接池里有多少连接正在干活（0 活跃时也是完整的一环，不会出现空环）
+      kpis.push({ label: '连接数', value: String(connected), sub: `${running} 个活跃` })
+      charts.push({
+        id: 'conn-state', title: '连接状态', kind: 'donut', unit: '个',
+        note: `${running} 活跃 / ${connected} 已连接`,
+        items: [
+          { label: '活跃', value: running },
+          { label: '空闲', value: Math.max(0, connected - running) }
+        ]
+      })
+    }
+    // 缓冲池命中率：低于 95% 就要怀疑缓冲池偏小或全表扫描（OB 无此状态变量时自动跳过）
+    const bpReq = toNum(statusMap.get('Innodb_buffer_pool_read_requests'))
+    const bpReads = toNum(statusMap.get('Innodb_buffer_pool_reads'))
+    if (bpReq > 0) {
+      const hit = Math.max(0, Math.min(100, (1 - bpReads / bpReq) * 100))
+      kpis.push({ label: '缓冲池命中率', value: `${hit.toFixed(2)}%`, sub: `物理读 ${bpReads}`, tone: hit >= 99 ? 'ok' : hit >= 95 ? 'warn' : 'bad' })
+      charts.push({
+        id: 'bp-hit', title: 'InnoDB 缓冲池命中率', kind: 'gauge', unit: '%',
+        value: hit, total: 100,
+        caption: `请求 ${bpReq.toLocaleString('en-US')} · 物理读 ${bpReads.toLocaleString('en-US')}`,
+        items: []
+      })
+    }
+    if (questions > 0 && uptime > 0) {
+      const qps = questions / uptime
+      kpis.push({ label: '平均 QPS', value: qps >= 100 ? qps.toFixed(0) : qps.toFixed(1), sub: '自启动以来均值' })
+    }
+    if (statusMap.has('Slow_queries')) {
+      const slow = toNum(statusMap.get('Slow_queries'))
+      kpis.push({ label: '慢查询', value: String(slow), sub: `累计查询 ${questions.toLocaleString('en-US')}`, tone: slow > 0 ? 'warn' : 'ok' })
+    }
+    if (trxCount >= 0) kpis.push({ label: '当前事务', value: String(trxCount), sub: '未提交事务数', tone: trxCount > 20 ? 'warn' : 'ok' })
+    if (lockWaitCount >= 0) kpis.push({ label: '锁等待', value: String(lockWaitCount), sub: '行锁阻塞', tone: lockWaitCount > 0 ? 'bad' : 'ok' })
+    if (compactionRow) {
+      const st = String(compactionRow[0] || '').toUpperCase()
+      kpis.push({
+        label: '合并状态', value: st || '—',
+        sub: compactionRow[3] ? `完成 ${fmtTime(compactionRow[3])}` : 'Major Compaction',
+        tone: st === 'IDLE' || st === 'FINISH' ? 'ok' : 'warn'
+      })
+    }
+    // 活跃会话按用户分布：谁在压库一眼可见（OB 的 PROCESSLIST 列：ID, USER, HOST, DB, ...）
+    if (obActive?.length) {
+      const byUser = new Map<string, number>()
+      for (const row of obActive) {
+        const user = String(row[1] ?? '未知')
+        byUser.set(user, (byUser.get(user) || 0) + 1)
+      }
+      charts.push({
+        id: 'sessions-user', title: '活跃会话按用户', kind: 'donut', unit: '个', group: 'active',
+        note: `共 ${obActive.length} 个非 Sleep 会话`,
+        items: foldItems([...byUser].map(([label, value]) => ({ label, value })))
+      })
+    }
+
+    // 库容量与表数量：OB 租户里 data_length 可能为 0，容量图会空——此时退回按表数量排行
+    const schemaRows = (size || []).map((r) => ({
+      label: String(r[0]),
+      mb: toNum(r[2]),
+      tables: toNum(r[1])
+    }))
+    const capacity = schemaRows.filter((r) => r.mb > 0)
+    if (capacity.length) {
+      const totalMb = capacity.reduce((s, r) => s + r.mb, 0)
+      charts.push({
+        id: 'schema-capacity', title: '库容量 TOP 10', kind: 'bars', unit: 'MB', group: 'capacity',
+        note: `合计 ${fmtCap(totalMb)}（不含系统库）`,
+        items: capacity.slice(0, 10).map((r) => ({ label: r.label, value: Math.round(r.mb), hint: `${r.tables} 张表` }))
+      })
+    }
+    const tableRows = schemaRows.filter((r) => r.tables > 0)
+    if (tableRows.length) {
+      charts.push({
+        id: 'schema-tables',
+        title: capacity.length ? '各库表数量分布' : '各库表数量 TOP 8',
+        kind: capacity.length ? 'donut' : 'bars',
+        unit: '张',
+        group: 'capacity',
+        items: capacity.length
+          ? foldItems(tableRows.map((r) => ({ label: r.label, value: r.tables })))
+          : tableRows.slice(0, 8).map((r) => ({ label: r.label, value: r.tables }))
+      })
+    }
+
+    return { sections, tables, charts, kpis }
   }
 
   ipcMain.handle('conn:info', async (_e, { id }: { id: string }) => {
@@ -1667,8 +2129,221 @@ export function registerIpc(): void {
     }
   })
 
-  // ---------- 剪贴板 / 外部链接 ----------
-  // 本机资源（资源面板 2s 轮询；CPU 占用为两次请求的差分，首次返回 null）
+  // ---------- 云管平台（目前对接 OceanBase OCP） ----------
+  // 平台配置与密码分离：配置走 config.json，密码走 DPAPI；所有业务接口统一返回 { ok, data?, error? }
+  ipcMain.handle('cloud:list', () => listPlatforms())
+  ipcMain.handle('cloud:save', (_e, { platform, password }: { platform: any; password?: string }) => savePlatform(platform, password))
+  ipcMain.handle('cloud:delete', (_e, { id }: { id: string }) => deletePlatform(String(id || '')))
+  ipcMain.handle('cloud:test', (_e, { platform, password }: { platform: any; password?: string }) => testPlatform(platform, password))
+  ipcMain.handle('cloud:status', (_e, { id }: { id: string }) => loginStatus(String(id || '')))
+  // ---- Oracle 直连云平台 ----
+  // 一个通用分区入口：section 决定查哪些视图，避免为每个页面单开一个 IPC
+  ipcMain.handle('cloud:oraSection', (_e, { id, section, opts, force }: { id: string; section: any; opts?: any; force?: boolean }) =>
+    cloudOracleSection(String(id || ''), section, opts || {}, !!force))
+  ipcMain.handle('cloud:oraSqlDetail', (_e, { id, sqlId }: { id: string; sqlId: string }) =>
+    cloudOracleSqlDetail(String(id || ''), String(sqlId || '')))
+  ipcMain.handle('cloud:overview', (_e, { id }: { id: string }) => cloudOverview(String(id || '')))
+  ipcMain.handle('cloud:clusters', (_e, { id }: { id: string }) => cloudClusters(String(id || '')))
+  ipcMain.handle('cloud:cluster', (_e, { id, clusterId }: { id: string; clusterId: number }) => cloudClusterDetail(String(id || ''), Number(clusterId)))
+  ipcMain.handle('cloud:tenants', (_e, { id }: { id: string }) => cloudTenants(String(id || '')))
+  ipcMain.handle('cloud:tenant', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantDetail(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:hosts', (_e, { id }: { id: string }) => cloudHosts(String(id || '')))
+  ipcMain.handle('cloud:alarms', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudAlarms(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:alarmHistory', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudAlarmHistory(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:alarmDetail', (_e, { id, alarmId }: { id: string; alarmId: number }) =>
+    cloudAlarmDetail(String(id || ''), Number(alarmId)))
+  ipcMain.handle('cloud:alarmRules', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudAlarmRules(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:alarmTrend', (_e, { id, hours }: { id: string; hours?: number }) =>
+    cloudAlarmTrend(String(id || ''), Number(hours) || 24))
+  ipcMain.handle('cloud:alarmLevelCounts', (_e, { id }: { id: string }) => cloudAlarmLevelCounts(String(id || '')))
+  ipcMain.handle('cloud:tasks', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudTasks(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:taskDetail', (_e, { id, taskId }: { id: string; taskId: number }) =>
+    cloudTaskDetail(String(id || ''), Number(taskId)))
+  ipcMain.handle('cloud:taskStats', (_e, { id }: { id: string }) => cloudTaskStats(String(id || '')))
+  ipcMain.handle('cloud:taskCreators', (_e, { id }: { id: string }) => cloudTaskCreators(String(id || '')))
+  // 告警事件 / 任务列表导出 CSV：渲染层给列定义与行数据，主进程落盘
+  ipcMain.handle('cloud:exportCsv', async (_e, { fileName, columns, rows }: { fileName: string; columns: string[]; rows: any[][] }) => {
+    if (!Array.isArray(columns) || !Array.isArray(rows)) return { ok: false, error: '导出数据无效' }
+    const safe = String(fileName || '导出').replace(/[\\/:*?"<>|]/g, '_')
+    const defaultPath = `${safe}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.csv`
+    const filters = [{ name: 'CSV（Excel 可直接打开）', extensions: ['csv'] }]
+    const r = win ? await dialog.showSaveDialog(win, { defaultPath, filters }) : await dialog.showSaveDialog({ defaultPath, filters })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      writeFileAtomic(r.filePath, buildCsv(columns, rows, columns))
+      return { ok: true, path: r.filePath, count: rows.length }
+    } catch (e: any) {
+      return { ok: false, error: `写出失败：${e?.message || e}` }
+    }
+  })
+  ipcMain.handle('cloud:metrics', (_e, { id, query }: { id: string; query: any }) => cloudMetrics(String(id || ''), query))
+  ipcMain.handle('cloud:clusterAction', (_e, { id, clusterId, action }: { id: string; clusterId: number; action: string }) =>
+    cloudClusterAction(String(id || ''), Number(clusterId), String(action)))
+  ipcMain.handle('cloud:createTenant', (_e, { id, clusterId, input }: { id: string; clusterId: number; input: any }) =>
+    cloudCreateTenant(String(id || ''), Number(clusterId), input))
+  ipcMain.handle('cloud:deleteTenant', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudDeleteTenant(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:packages', (_e, { id }: { id: string }) => cloudPackages(String(id || '')))
+  ipcMain.handle('cloud:clusterPreCheck', (_e, { id, input }: { id: string; input: any }) => cloudClusterPreCheck(String(id || ''), input))
+  ipcMain.handle('cloud:clusterCreate', (_e, { id, input, checkId }: { id: string; input: any; checkId?: string }) =>
+    cloudClusterCreate(String(id || ''), input, checkId))
+  ipcMain.handle('cloud:clusterParams', (_e, { id, clusterId }: { id: string; clusterId: number }) => cloudClusterParams(String(id || ''), Number(clusterId)))
+  ipcMain.handle('cloud:clusterUpdateParams', (_e, { id, clusterId, items }: { id: string; clusterId: number; items: { name: string; value: string }[] }) =>
+    cloudClusterUpdateParams(String(id || ''), Number(clusterId), Array.isArray(items) ? items : []))
+  ipcMain.handle('cloud:tenantParams', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantParams(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantUpdateParams', (_e, { id, clusterId, tenantId, items }: { id: string; clusterId: number; tenantId: number; items: { name: string; value: string }[] }) =>
+    cloudTenantUpdateParams(String(id || ''), Number(clusterId), Number(tenantId), Array.isArray(items) ? items : []))
+  ipcMain.handle('cloud:tenantChangePassword', (_e, { id, clusterId, tenantId, newPassword }: { id: string; clusterId: number; tenantId: number; newPassword: string }) =>
+    cloudTenantChangePassword(String(id || ''), Number(clusterId), Number(tenantId), String(newPassword || '')))
+  ipcMain.handle('cloud:tenantModifyWhitelist', (_e, { id, clusterId, tenantId, whitelist }: { id: string; clusterId: number; tenantId: number; whitelist: string }) =>
+    cloudTenantModifyWhitelist(String(id || ''), Number(clusterId), Number(tenantId), String(whitelist || '')))
+  ipcMain.handle('cloud:tenantModifyReplica', (_e, { id, clusterId, tenantId, replicas }: { id: string; clusterId: number; tenantId: number; replicas: any[] }) =>
+    cloudTenantModifyReplica(String(id || ''), Number(clusterId), Number(tenantId), Array.isArray(replicas) ? replicas : []))
+  ipcMain.handle('cloud:tenantAddReplica', (_e, { id, clusterId, tenantId, replicas }: { id: string; clusterId: number; tenantId: number; replicas: any[] }) =>
+    cloudTenantAddReplica(String(id || ''), Number(clusterId), Number(tenantId), Array.isArray(replicas) ? replicas : []))
+  ipcMain.handle('cloud:tenantDeleteReplica', (_e, { id, clusterId, tenantId, zones }: { id: string; clusterId: number; tenantId: number; zones: string[] }) =>
+    cloudTenantDeleteReplica(String(id || ''), Number(clusterId), Number(tenantId), Array.isArray(zones) ? zones.map(String) : []))
+  ipcMain.handle('cloud:tenantSetLocked', (_e, { id, clusterId, tenantId, locked }: { id: string; clusterId: number; tenantId: number; locked: boolean }) =>
+    cloudTenantSetLocked(String(id || ''), Number(clusterId), Number(tenantId), !!locked))
+  ipcMain.handle('cloud:tenantSessions', (_e, { id, clusterId, tenantId, page, size }: { id: string; clusterId: number; tenantId: number; page?: number; size?: number }) =>
+    cloudTenantSessions(String(id || ''), Number(clusterId), Number(tenantId), Number(page) || 1, Number(size) || 200))
+  ipcMain.handle('cloud:tenantCloseSessions', (_e, { id, clusterId, tenantId, sessionIds }: { id: string; clusterId: number; tenantId: number; sessionIds: number[] }) =>
+    cloudTenantCloseSessions(String(id || ''), Number(clusterId), Number(tenantId), Array.isArray(sessionIds) ? sessionIds.map(Number) : []))
+
+  // ---------- SQL 诊断 ----------
+  ipcMain.handle('cloud:topSql', (_e, { id, clusterId, tenantId, opts }: { id: string; clusterId: number; tenantId: number; opts: { from: number; to: number; sqlText?: string; limit?: number } }) =>
+    cloudTopSql(String(id || ''), Number(clusterId), Number(tenantId), opts))
+  ipcMain.handle('cloud:slowSql', (_e, { id, clusterId, tenantId, opts }: { id: string; clusterId: number; tenantId: number; opts: { from: number; to: number } }) =>
+    cloudSlowSql(String(id || ''), Number(clusterId), Number(tenantId), opts))
+  ipcMain.handle('cloud:sqlText', (_e, { id, clusterId, tenantId, sqlId, opts }: { id: string; clusterId: number; tenantId: number; sqlId: string; opts: { from: number; to: number } }) =>
+    cloudSqlText(String(id || ''), Number(clusterId), Number(tenantId), String(sqlId || ''), opts))
+  ipcMain.handle('cloud:tenantSqlStats', (_e, { id, clusterId, from, to }: { id: string; clusterId: number; from: number; to: number }) =>
+    cloudTenantSqlStats(String(id || ''), Number(clusterId), Number(from), Number(to)))
+
+  // ---------- 租户详情页（对齐 OCP 各 tab） ----------
+  ipcMain.handle('cloud:tenantDbs', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantDbs(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantTables', (_e, { id, clusterId, tenantId, db }: { id: string; clusterId: number; tenantId: number; db: string }) =>
+    cloudTenantTables(String(id || ''), Number(clusterId), Number(tenantId), String(db || '')))
+  ipcMain.handle('cloud:tenantTableSchema', (_e, { id, clusterId, tenantId, db, table }: { id: string; clusterId: number; tenantId: number; db: string; table: string }) =>
+    cloudTenantTableSchema(String(id || ''), Number(clusterId), Number(tenantId), String(db || ''), String(table || '')))
+  ipcMain.handle('cloud:tenantTopo', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantTopo(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantSessionStats', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantSessionStats(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantCloseQuery', (_e, { id, clusterId, tenantId, sessionIds }: { id: string; clusterId: number; tenantId: number; sessionIds: number[] }) =>
+    cloudTenantCloseQuery(String(id || ''), Number(clusterId), Number(tenantId), (sessionIds || []).map(Number)))
+  ipcMain.handle('cloud:tenantRowLocks', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantRowLocks(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantTxns', (_e, { id, clusterId, tenantId, thresholdMs }: { id: string; clusterId: number; tenantId: number; thresholdMs?: number }) =>
+    cloudTenantTxns(String(id || ''), Number(clusterId), Number(tenantId), Number(thresholdMs) || 0))
+  ipcMain.handle('cloud:tenantCloseTxns', (_e, { id, clusterId, tenantId, list }: { id: string; clusterId: number; tenantId: number; list: { sessionId: number; transId?: string }[] }) =>
+    cloudTenantCloseTxns(String(id || ''), Number(clusterId), Number(tenantId), list || []))
+  ipcMain.handle('cloud:tenantNewSql', (_e, { id, clusterId, tenantId, from, to, limit }: { id: string; clusterId: number; tenantId: number; from: number; to: number; limit?: number }) =>
+    cloudTenantNewSql(String(id || ''), Number(clusterId), Number(tenantId), Number(from), Number(to), limit ? Number(limit) : undefined))
+  ipcMain.handle('cloud:tenantHighRiskSql', (_e, { id, clusterId, tenantId, from, to, limit }: { id: string; clusterId: number; tenantId: number; from: number; to: number; limit?: number }) =>
+    cloudTenantHighRiskSql(String(id || ''), Number(clusterId), Number(tenantId), Number(from), Number(to), limit ? Number(limit) : undefined))
+  ipcMain.handle('cloud:tenantParallelSql', (_e, { id, clusterId, tenantId, from, to, limit }: { id: string; clusterId: number; tenantId: number; from: number; to: number; limit?: number }) =>
+    cloudTenantParallelSql(String(id || ''), Number(clusterId), Number(tenantId), Number(from), Number(to), limit ? Number(limit) : undefined))
+  ipcMain.handle('cloud:tenantOutlines', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantOutlines(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantSqlDiagnosis', (_e, { id, clusterId, tenantId, sqlId, from, to }: { id: string; clusterId: number; tenantId: number; sqlId: string; from: number; to: number }) =>
+    cloudTenantSqlDiagnosis(String(id || ''), Number(clusterId), Number(tenantId), String(sqlId || ''), Number(from), Number(to)))
+  ipcMain.handle('cloud:tenantCompaction', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantCompactionAll(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantCompactionAction', (_e, { id, clusterId, tenantId, action }: { id: string; clusterId: number; tenantId: number; action: 'trigger' | 'suspend' | 'resume' | 'clearError' }) =>
+    cloudTenantCompactionAction(String(id || ''), Number(clusterId), Number(tenantId), action))
+  ipcMain.handle('cloud:tenantUpdateCompactionSettings', (_e, { id, clusterId, tenantId, patch }: { id: string; clusterId: number; tenantId: number; patch: any }) =>
+    cloudTenantUpdateCompactionSettings(String(id || ''), Number(clusterId), Number(tenantId), patch || {}))
+  ipcMain.handle('cloud:tenantGather', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantGatherAll(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantBackup', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantBackupAll(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantUsers', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantUsers(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantTde', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantTde(String(id || ''), Number(clusterId), Number(tenantId)))
+
+  // ---------- Unit 规格 / 克隆租户 / 创建备租户 ----------
+  ipcMain.handle('cloud:unitSpecs', (_e, { id }: { id: string }) => cloudUnitSpecs(String(id || '')))
+  ipcMain.handle('cloud:unitSpecCreate', (_e, { id, input }: { id: string; input: any }) =>
+    cloudUnitSpecCreate(String(id || ''), input || {}))
+  ipcMain.handle('cloud:unitSpecUpdate', (_e, { id, specId, input }: { id: string; specId: number; input: any }) =>
+    cloudUnitSpecUpdate(String(id || ''), Number(specId), input || {}))
+  ipcMain.handle('cloud:unitSpecDelete', (_e, { id, specId }: { id: string; specId: number }) =>
+    cloudUnitSpecDelete(String(id || ''), Number(specId)))
+  ipcMain.handle('cloud:tenantClonePreCheck', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantClonePreCheck(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantClone', (_e, { id, clusterId, tenantId, input }: { id: string; clusterId: number; tenantId: number; input: any }) =>
+    cloudTenantClone(String(id || ''), Number(clusterId), Number(tenantId), input || {}))
+  ipcMain.handle('cloud:primaryTenantInfo', (_e, { id, clusterId, primaryTenantId }: { id: string; clusterId: number; primaryTenantId: number }) =>
+    cloudPrimaryTenantInfo(String(id || ''), Number(clusterId), Number(primaryTenantId)))
+  ipcMain.handle('cloud:createStandbyTenant', (_e, { id, clusterId, input }: { id: string; clusterId: number; input: any }) =>
+    cloudCreateStandbyTenant(String(id || ''), Number(clusterId), input || {}))
+
+  // ---------- 备份恢复 / OBProxy / 巡检 / 平台管理 ----------
+  ipcMain.handle('cloud:backupBundle', (_e, { id }: { id: string }) => cloudBackupBundle(String(id || '')))
+  ipcMain.handle('cloud:backupTasks', (_e, { id, kind, size }: { id: string; kind: string; size?: number }) =>
+    cloudBackupTasks(String(id || ''), String(kind || 'data') as 'data' | 'log' | 'restore' | 'clean', Number(size) || 50))
+  ipcMain.handle('cloud:obproxyBundle', (_e, { id }: { id: string }) => cloudObproxyBundle(String(id || '')))
+  ipcMain.handle('cloud:obproxyDetail', (_e, { id, clusterId }: { id: string; clusterId: number }) =>
+    cloudObproxyDetail(String(id || ''), Number(clusterId)))
+  ipcMain.handle('cloud:obproxyParams', (_e, { id, clusterId }: { id: string; clusterId: number }) =>
+    cloudObproxyParams(String(id || ''), Number(clusterId)))
+  ipcMain.handle('cloud:inspectionBundle', (_e, { id }: { id: string }) => cloudInspectionBundle(String(id || '')))
+  ipcMain.handle('cloud:inspectionReport', (_e, { id, reportId }: { id: string; reportId: number }) =>
+    cloudInspectionReport(String(id || ''), Number(reportId)))
+  ipcMain.handle('cloud:inspectionTasks', (_e, { id, page, size }: { id: string; page?: number; size?: number }) =>
+    cloudInspectionTasks(String(id || ''), Number(page) || 1, Number(size) || 20))
+  ipcMain.handle('cloud:platformBundle', (_e, { id }: { id: string }) => cloudPlatformBundle(String(id || '')))
+  ipcMain.handle('cloud:platformProperties', (_e, { id, page, size }: { id: string; page?: number; size?: number }) =>
+    cloudPlatformProperties(String(id || ''), Number(page) || 1, Number(size) || 100))
+  ipcMain.handle('cloud:platformLogins', (_e, { id, page, size }: { id: string; page?: number; size?: number }) =>
+    cloudPlatformLogins(String(id || ''), Number(page) || 1, Number(size) || 50))
+
+  // ---------- 云管 AI 助手（子模块数据快照 + 会话历史） ----------
+  ipcMain.handle('cloud:aiSessions', (_e, { platformId }: { platformId?: string }) =>
+    listCloudAiSessions(platformId ? String(platformId) : undefined))
+  ipcMain.handle('cloud:aiSession', (_e, { id }: { id: string }) => getCloudAiSession(String(id || '')))
+  ipcMain.handle('cloud:aiAsk', (_e, input: any) =>
+    askCloudAi({
+      sessionId: input?.sessionId ? String(input.sessionId) : null,
+      platformId: String(input?.platformId || ''),
+      platformName: input?.platformName ? String(input.platformName) : undefined,
+      sections: Array.isArray(input?.sections) ? (input.sections.map(String) as CloudAiSectionKey[]) : undefined,
+      skills: Array.isArray(input?.skills) ? input.skills.map(String) : undefined,
+      text: String(input?.text || '')
+    } as CloudAiAskInput))
+  ipcMain.handle('cloud:aiStop', (_e, { id }: { id: string }) => stopCloudAi(String(id || '')))
+  ipcMain.handle('cloud:aiDelete', (_e, { id }: { id: string }) => deleteCloudAiSession(String(id || '')))
+  ipcMain.handle('cloud:aiRefresh', (_e, { id }: { id: string }) => refreshCloudAiContext(String(id || '')))
+  ipcMain.handle('cloud:aiSetSections', (_e, { id, sections }: { id: string; sections: string[] }) =>
+    setCloudAiSections(String(id || ''), (sections || []).map(String) as CloudAiSectionKey[]))
+
+  // ---------- Oracle AI 助手（读 v$ / dba_ 的分区快照 + 会话历史） ----------
+  ipcMain.handle('cloud:oraAiCatalog', () => oraAiCatalog())
+  ipcMain.handle('cloud:oraAiSessions', () => listOraAiSessions())
+  ipcMain.handle('cloud:oraAiSession', (_e, { id }: { id: string }) => getOraAiSession(String(id || '')))
+  ipcMain.handle('cloud:oraAiAsk', (_e, input: any) =>
+    askOraAi({
+      sessionId: input?.sessionId ? String(input.sessionId) : null,
+      sections: Array.isArray(input?.sections) ? input.sections.map(String) : undefined,
+      skills: Array.isArray(input?.skills) ? input.skills.map(String) : undefined,
+      text: String(input?.text || '')
+    }))
+  ipcMain.handle('cloud:oraAiStop', (_e, { id }: { id: string }) => stopOraAi(String(id || '')))
+  ipcMain.handle('cloud:oraAiDelete', (_e, { id }: { id: string }) => deleteOraAiSession(String(id || '')))
+  ipcMain.handle('cloud:oraAiRefresh', (_e, { id }: { id: string }) => refreshOraAiContext(String(id || '')))
+  ipcMain.handle('cloud:oraAiSetSections', (_e, { id, sections }: { id: string; sections: string[] }) =>
+    setOraAiSections(String(id || ''), (sections || []).map(String)))
+
+  // ---------- 剪贴板 / 外部链接 ----------  // 本机资源（资源面板 2s 轮询；CPU 占用为两次请求的差分，首次返回 null）
   ipcMain.handle('sys:resources', () => getSysResources())
 
   ipcMain.handle('clipboard:write', (_e, { text }: { text: string }) => {
@@ -1685,6 +2360,54 @@ export function registerIpc(): void {
     if (/^[a-zA-Z]:[\\/]/.test(String(p)) || String(p).startsWith('\\\\')) shell.openPath(String(p))
     return { ok: true }
   })
+
+  // ---------- 文本编辑器（Notepad++ 式多标签编辑） ----------
+  ipcMain.handle('editor:openDialog', () => editorOpenDialog())
+  ipcMain.handle('editor:openPath', (_e, { p }: { p: string }) => editorOpenPath(String(p)))
+  ipcMain.handle('editor:openFolder', () => editorOpenFolderDialog())
+  ipcMain.handle('editor:listDir', (_e, { dir }: { dir: string }) => editorListDir(String(dir || '')))
+  ipcMain.handle('editor:statPath', (_e, { p }: { p: string }) => editorStatPath(String(p || '')))
+  ipcMain.handle('editor:new', (_e, { name, encoding, eol }: { name?: string; encoding?: any; eol?: any }) =>
+    editorNewDoc(name || '未命名', encoding, eol))
+  ipcMain.handle('editor:window', (_e, { id, start, count }: { id: string; start: number; count: number }) =>
+    editorGetWindow(id, start, count))
+  ipcMain.handle('editor:loadFull', (_e, { id }: { id: string }) => editorLoadFull(id))
+  ipcMain.handle('editor:save', (_e, p: any) => editorSaveDoc(p))
+  ipcMain.handle('editor:saveAs', (_e, { id, suggested }: { id: string; suggested?: string }) => editorSaveAsDialog(id, suggested))
+  ipcMain.handle('editor:reopen', (_e, { id, encoding }: { id: string; encoding?: any }) => editorReopen(id, encoding))
+  ipcMain.handle('editor:close', (_e, { id }: { id: string }) => editorCloseDoc(id))
+  ipcMain.handle('editor:stat', (_e, { ids }: { ids: string[] }) => editorStatDocs(ids || []))
+  ipcMain.handle('editor:find', (_e, { id, query, opts }: any) => editorFindInDoc(id, query, opts))
+  ipcMain.handle('editor:findInFiles', (_e, p: any) => editorFindInFiles(p))
+  ipcMain.handle('editor:recents', () => editorListRecents())
+  ipcMain.handle('editor:clearRecents', () => { editorClearRecents(); return { ok: true } })
+  ipcMain.handle('editor:clipboardRead', () => clipboard.readText())
+  ipcMain.handle('editor:pendingOpens', () => editorTakePendingOpens())
+  ipcMain.handle('editor:pendingWorkspace', () => editorTakePendingWorkspace())
+  // 编辑器 AI：选中文本问答（流式；不落盘、不改文档）
+  ipcMain.handle('editor:aiAsk', (_e, input: any) => askEditorAi({
+    id: String(input?.id || ''),
+    selection: String(input?.selection || ''),
+    question: String(input?.question || ''),
+    file: input?.file ? String(input.file) : undefined,
+    lang: input?.lang ? String(input.lang) : undefined,
+    lines: input?.lines && Number(input.lines.start) ? { start: Number(input.lines.start), end: Number(input.lines.end) || Number(input.lines.start) } : undefined,
+    truncated: !!input?.truncated,
+    wholeFile: !!input?.wholeFile,
+    files: Array.isArray(input?.files) ? input.files.filter((x: any) => typeof x === 'string') : [],
+    skills: Array.isArray(input?.skills) ? input.skills.map(String) : [],
+    sessionId: input?.sessionId ? String(input.sessionId) : null,
+    history: Array.isArray(input?.history) ? input.history.map((m: any) => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', text: String(m?.text || '') })) : []
+  }))
+  ipcMain.handle('editor:aiStop', (_e, { id }: { id: string }) => stopEditorAi(String(id || '')))
+  ipcMain.handle('editor:readTextForAi', (_e, { path: p, maxChars }: { path: string; maxChars?: number }) =>
+    readTextForAi(String(p || ''), Number(maxChars) > 0 ? Math.min(40000, Number(maxChars)) : undefined)
+  )
+  // 选择文件问 AI：列工作区文件（只读目录，不读内容）
+  ipcMain.handle('editor:listFilesForAi', (_e, { dir }: { dir: string }) => listFilesForAi(String(dir || '')))
+  ipcMain.handle('editor:aiSessions', () => listEditorAiSessions())
+  ipcMain.handle('editor:aiSession', (_e, { id }: { id: string }) => getEditorAiSession(String(id || '')))
+  ipcMain.handle('editor:aiDelete', (_e, { id }: { id: string }) => deleteEditorAiSession(String(id || '')))
 
   ipcMain.handle('confirm:reply', (_e, { requestId, decision, reason }: { requestId: string; decision: ApprovalDecision; reason?: string }) => {
     const p = pendingApprovals.get(requestId)

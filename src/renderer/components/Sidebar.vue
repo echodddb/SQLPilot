@@ -112,8 +112,8 @@
       <template v-for="g in groups" :key="g.type">
         <div class="conn-group-title">{{ g.label }}</div>
         <template v-for="c in g.items" :key="c.id">
-          <!-- 对象浏览在数据库工作台；侧边栏只做连接管理，点行进入工作台 -->
-          <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击打开数据库工作台（任务栏生成入口）`" @click="openDbTask(c)">
+          <!-- 对象浏览在「数据库」模块（独立一级模块）；侧边栏只做连接管理，点行进入控制台 -->
+          <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击打开数据库控制台（左侧「数据库」模块）`" @click="openDbTask(c)">
             <span>🗄</span>
             <span class="name">{{ c.name }}</span>
             <span v-if="projName(c.projectId)" class="sub" style="background: var(--bg-card-hover); color: var(--text-dim)" :title="'已关联项目：' + projName(c.projectId)">{{ projName(c.projectId) }}</span>

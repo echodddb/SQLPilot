@@ -17,8 +17,8 @@
         </div>
         <span style="flex: 1"></span>
         <button class="mini-btn" title="新建查询窗口" @click="newQuery()">＋ 查询</button>
-        <button class="icon-btn" title="隐藏工作台（任务栏可再打开，窗口状态保留）" @click="store.view = 'chat'">−</button>
-        <button class="icon-btn" title="关闭工作台（销毁全部查询/表标签页）" @click="closeDbWorkbench()">✕</button>
+        <button class="icon-btn" title="回到 AI 助手（控制台保活，标签页与未提交事务都保留）" @click="store.module = 'agent'">−</button>
+        <button class="icon-btn" title="关闭控制台（销毁全部查询/表标签页，关闭连接）" @click="closeDbWorkbench()">✕</button>
       </div>
 
       <div class="dbw-body" v-if="cur">
@@ -110,7 +110,7 @@ watch(() => store.pendingDbConn, (cid) => {
 function newQuery(connId?: string) {
   const cid = connId || tabs.value.find((t) => t.kind === 'query')?.connId || (store.cfg?.connections || [])[0]?.id || ''
   if (!cid) {
-    window.sqlpilot.uiAlert('请先在左侧"数据库连接"区添加一个连接')
+    window.sqlpilot.uiAlert('还没有数据库连接：点顶栏「＋ 新建连接」添加，或在左侧对象树点「＋ 新建连接」')
     return
   }
   tabSeq++
@@ -165,9 +165,10 @@ function setQRef(key: string) {
   }
 }
 
-// 本视图用 v-show 保活（切到聊天/设置再回来 tab 不丢），首次可见时让激活的 CodeMirror 排版
+// 控制台以 v-show 挂在 App 上保活（切到别的模块再回来 tab 不丢），
+// 重新可见时让激活的 CodeMirror 重新排版（隐藏期间尺寸变化不感知）
 watch(
-  () => store.view,
+  () => store.module,
   (v) => {
     if (v === 'db') nextTick(() => { if (cur.value?.kind === 'query') qRefs.get(cur.value.key)?.refresh() })
   }

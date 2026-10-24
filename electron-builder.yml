@@ -23,3 +23,8 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: SQLPilot
   artifactName: SQLPilot-Setup-${version}.exe
+
+# 绿色版：单文件 portable exe（双击即用，不写注册表、不需要安装）
+portable:
+  artifactName: SQLPilot-Portable-${version}.exe
+  requestExecutionLevel: user

@@ -1,0 +1,101 @@
+/**
+ * 租户详情工作台各面板的公共样式（前缀 tp-，在 TenantDrawer 里以非 scoped 方式引入）。
+ * 面板组件只写结构和少量局部样式，通用外观全部走这里，避免 13 份重复 CSS。
+ */
+
+.tp-pane { flex: 1; min-width: 0; overflow-y: auto; padding: 13px 16px 22px; display: flex; flex-direction: column; gap: 11px; }
+
+/* 工具条：左侧标题/计数，右侧动作 */
+.tp-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tp-bar .sp { flex: 1; }
+.tp-h { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; margin: 0; }
+.tp-h .cnt {
+  font-family: var(--mono); font-size: 10px; color: var(--text-dim); background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 99px; padding: 0 6px;
+}
+.tp-note { font-size: 10.5px; color: var(--text-faint); line-height: 1.55; }
+
+/* 卡片 / 分块 */
+.tp-card { background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.tp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+
+/* 键值格 */
+.tp-kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px; }
+.tp-kv { background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; min-width: 0; }
+.tp-kv.wide { grid-column: 1 / -1; }
+.tp-kv > span { display: block; font-size: 10.5px; color: var(--text-faint); }
+.tp-kv > b { display: block; font-size: 11.5px; font-weight: 550; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 表格 */
+.tp-tbl-wrap { border: 1px solid var(--border); border-radius: 9px; overflow: auto; background: var(--bg-card); }
+.tp-tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.tp-tbl th {
+  text-align: left; font-weight: 500; font-size: 10.5px; color: var(--text-faint); padding: 7px 9px;
+  background: var(--bg-input); border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; z-index: 1;
+}
+.tp-tbl td { padding: 6px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tp-tbl tbody tr:last-child td { border-bottom: none; }
+.tp-tbl tbody tr.clickable { cursor: pointer; }
+.tp-tbl tbody tr.clickable:hover { background: var(--bg-card-hover); }
+.tp-tbl tbody tr.on { background: var(--accent-dim); }
+.tp-tbl .r { text-align: right; }
+.tp-tbl .ell { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+.tp-tbl .wrap { white-space: pre-wrap; word-break: break-all; max-width: 560px; }
+
+/* 按钮 */
+.tp-btn {
+  border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim); border-radius: 7px;
+  padding: 3px 11px; font-size: 11.5px; font-family: inherit; cursor: pointer;
+}
+.tp-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.tp-btn.primary { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+.tp-btn.ghost { background: transparent; }
+.tp-btn.danger:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+.tp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.tp-btn.sm { padding: 1px 8px; font-size: 10.5px; border-radius: 6px; }
+
+/* 输入 */
+.tp-input, .tp-select, .tp-textarea {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 7px; color: var(--text);
+  font-family: inherit; font-size: 12px; padding: 4px 8px; outline: none;
+}
+.tp-input:focus, .tp-select:focus, .tp-textarea:focus { border-color: var(--accent); }
+.tp-textarea { resize: vertical; width: 100%; }
+.tp-input.mono, .tp-textarea.mono { font-family: var(--mono); }
+.tp-search { width: 210px; }
+
+/* 提示 */
+.tp-empty { color: var(--text-faint); font-size: 12px; padding: 22px; text-align: center; }
+.tp-err { font-size: 11px; color: var(--red); background: var(--red-dim); border-radius: 7px; padding: 6px 9px; }
+.tp-warn { font-size: 11px; color: var(--yellow); background: var(--yellow-dim); border-radius: 7px; padding: 6px 9px; }
+.tp-msg { font-size: 11px; border-radius: 7px; padding: 6px 9px; }
+.tp-msg.ok { color: var(--green); background: var(--green-dim); }
+.tp-msg.err { color: var(--red); background: var(--red-dim); }
+
+/* 杂项 */
+.tp-mono { font-family: var(--mono); }
+.tp-dim { color: var(--text-dim); }
+.tp-faint { color: var(--text-faint); }
+.tp-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-dim);
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
+}
+.tp-chip.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: var(--green-dim); }
+.tp-chip.warn { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); background: var(--yellow-dim); }
+.tp-chip.bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); background: var(--red-dim); }
+.tp-chip.idle { color: var(--text-faint); }
+.tp-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+.tp-dot.warn { background: var(--yellow); }
+.tp-dot.bad { background: var(--red); }
+.tp-bar-meter { height: 5px; border-radius: 99px; background: var(--bg-card); overflow: hidden; border: 1px solid var(--border); }
+.tp-bar-meter > i { display: block; height: 100%; background: var(--accent); }
+.tp-bar-meter > i.warn { background: var(--yellow); }
+.tp-bar-meter > i.bad { background: var(--red); }
+.tp-panes-2 { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 11px; align-items: start; }
+@media (max-width: 1100px) { .tp-panes-2 { grid-template-columns: 1fr; } }
+.tp-scroll-y { overflow-y: auto; max-height: 56vh; }
+.tp-code {
+  font-family: var(--mono); font-size: 11px; line-height: 1.55; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; white-space: pre-wrap;
+  word-break: break-all; max-height: 46vh; overflow: auto; color: var(--text);
+}

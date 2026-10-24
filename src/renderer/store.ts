@@ -67,9 +67,8 @@ export function toPlain<T>(v: T): T {
 
 export const store = reactive({
   ready: false,
-  /** 一级功能模块：AI 助手（对话/工作台/终端）/ 脱敏工具 / 巡检报告（规划中） */
-  module: 'agent' as 'agent' | 'masking' | 'report',
-  view: 'chat' as 'chat' | 'db',
+  /** 一级功能模块：AI 助手（对话/终端）/ 数据库控制台 / 云管平台 / 文本编辑 / 脱敏工具 / 巡检报告（规划中） */
+  module: 'agent' as 'agent' | 'db' | 'cloud' | 'editor' | 'masking' | 'report',
   /** 设置浮窗（横切关注点，不占主视图轨道；对话/工作台保持原样在浮窗下方） */
   settingsOpen: false,
   cfg: null as any,
@@ -88,11 +87,11 @@ export const store = reactive({
   // 侧边栏 schema 树状态: connId -> { expanded, schemas?, loading, tables, opened }
   tree: {} as Record<string, { expanded: boolean; schemas?: string[]; loading: boolean; tables: Record<string, any[]>; opened: string | null }>,
   drafts: {} as Record<string, string>,
-  /** 底部工作台面板：SSH 终端（数据库相关窗口都在数据库工作台视图里） */
+  /** 底部工作台面板：SSH 终端（数据库控制台已独立为一级模块，不在此面板内） */
   workbench: null as 'terminal' | null,
   /** 任务栏（Windows 式）：从连接/服务器打开的窗口入口；− 隐藏保留状态，✕ 关闭销毁 */
   tasks: [] as { id: string; kind: 'db' | 'server'; refId: string; title: string; icon: string }[],
-  /** 数据库工作台是否挂载（✕ 掉最后一个数据库任务时销毁，释放 tab 状态） */
+  /** 数据库控制台是否挂载（独立模块；✕ 掉最后一个数据库任务时销毁，释放 tab 状态） */
   dbOpen: false,
   /** 任务栏激活态：最近的数据库任务连接 / 当前终端服务器 */
   lastDbConn: null as string | null,
@@ -533,13 +532,19 @@ function upsertTask(kind: 'db' | 'server', refId: string, title: string, icon: s
   if (!store.tasks.some((t) => t.id === id)) store.tasks.push({ id, kind, refId, title, icon })
 }
 
-/** 从连接打开数据库工作台任务：挂载工作台 + 切换视图 + 定位该连接 */
+/** 进入数据库控制台（左侧一级模块入口）：首次进入挂载，之后保活 */
+export function openDbConsole(): void {
+  store.dbOpen = true
+  store.module = 'db'
+}
+
+/** 从连接打开数据库控制台任务：挂载控制台 + 切到该模块 + 定位该连接 */
 export function openDbTask(conn: { id: string; name: string }): void {
   upsertTask('db', conn.id, conn.name, '🗄')
   store.lastDbConn = conn.id
   store.dbOpen = true
-  store.view = 'db'
   store.pendingDbConn = conn.id
+  store.module = 'db'
 }
 
 /** 从服务器打开终端任务：确保终端面板打开并激活该服务器 shell */
@@ -555,7 +560,7 @@ export function openServerTask(server: { id: string; name: string }): void {
 export function activateTask(t: { kind: 'db' | 'server'; refId: string }): void {
   if (t.kind === 'db') {
     store.dbOpen = true
-    store.view = 'db'
+    store.module = 'db'
     store.lastDbConn = t.refId
     store.pendingDbConn = t.refId
   } else {
@@ -566,31 +571,32 @@ export function activateTask(t: { kind: 'db' | 'server'; refId: string }): void 
   }
 }
 
-/** 任务栏 −：隐藏窗口（状态保留：工作台 v-show / shell 常驻） */
+/** 任务栏 −：隐藏窗口（状态保留：控制台 v-show 保活 / shell 常驻）
+ *  数据库控制台是独立模块，"隐藏" = 回到 AI 助手，标签页与未提交事务都还在 */
 export function minimizeTask(t: { kind: 'db' | 'server' }): void {
   if (t.kind === 'db') {
-    if (store.view === 'db') store.view = 'chat'
+    if (store.module === 'db') store.module = 'agent'
   } else {
     if (store.workbench) store.workbench = null
   }
 }
 
-/** 关闭整个数据库工作台（窗口 ✕）：移除全部数据库任务并销毁挂载 */
+/** 关闭整个数据库控制台（✕）：移除全部数据库任务并销毁挂载（标签页/会话/事务一并释放） */
 export function closeDbWorkbench(): void {
   store.tasks = store.tasks.filter((t) => t.kind !== 'db')
   store.lastDbConn = null
   store.dbOpen = false
-  if (store.view === 'db') store.view = 'chat'
+  if (store.module === 'db') store.module = 'agent'
 }
 
-/** 任务栏 ✕：关闭并销毁（数据库任务最后一个时销毁工作台；服务器任务关闭对应 shell） */
+/** 任务栏 ✕：关闭并销毁（数据库任务最后一个时销毁控制台；服务器任务关闭对应 shell） */
 export function closeTask(t: { id: string; kind: 'db' | 'server'; refId: string }): void {
   store.tasks = store.tasks.filter((x) => x.id !== t.id)
   if (t.kind === 'db') {
     store.lastDbConn = null
     if (!store.tasks.some((x) => x.kind === 'db')) {
       store.dbOpen = false
-      if (store.view === 'db') store.view = 'chat'
+      if (store.module === 'db') store.module = 'agent'
     }
   } else {
     if (store.activeTermServerId === t.refId) store.activeTermServerId = null

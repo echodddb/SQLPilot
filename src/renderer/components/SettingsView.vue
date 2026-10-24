@@ -143,6 +143,14 @@
           </select>
           <br />密码加密存储（Windows DPAPI）：{{ store.secretsAvailable ? '✓ 可用' : '✗ 不可用' }}
         </div>
+        <div class="lock-cfg">
+          <label>空闲锁屏</label>
+          <select v-model.number="lockMin" @change="saveLock" style="width:auto; padding:3px 8px">
+            <option v-for="m in LOCK_OPTIONS" :key="m" :value="m">{{ m === 0 ? '关闭' : `${m} 分钟` }}</option>
+          </select>
+          <span class="desc">无操作到点后自动进入锁屏（播一遍开机动画），必须手动点「解锁进入」才能继续；对全部模块生效</span>
+          <button class="btn ghost" style="font-size:12px; margin-left:auto" @click="lockNow">立即锁定</button>
+        </div>
         <div class="privacy-cfg">
           <label class="privacy-item">
             <input type="checkbox" :checked="store.cfg?.maskPromptDetails !== false" @change="toggleCfg('maskPromptDetails', $event)" />
@@ -227,6 +235,9 @@ import { VENDOR_CATALOG } from '../../main/agent/catalog'
 
 const editP = ref<any>({ name: '', vendor: 'deepseek', protocol: 'openai', baseUrl: '', apiKey: '', model: '', effort: 'off', contextK: undefined })
 const icDir = ref(store.cfg?.instantClientDir || '')
+/** 空闲锁屏阈值（分钟，0 = 关闭） */
+const LOCK_OPTIONS = [0, 1, 2, 3, 5, 10, 15, 30]
+const lockMin = ref<number>(typeof store.cfg?.lockIdleMin === 'number' ? store.cfg.lockIdleMin : 3)
 const defaultMode = ref(store.cfg?.mode || 'readonly')
 const audit = ref<any[]>([])
 const skills = ref<any[]>([])
@@ -401,6 +412,18 @@ async function saveGeneral() {
   await window.sqlpilot.setConfig(toPlain(store.cfg))
 }
 
+/** 空闲锁屏：即改即存，主界面 watch 配置变化后重排计时 */
+async function saveLock(): Promise<void> {
+  store.cfg.lockIdleMin = Number(lockMin.value)
+  await window.sqlpilot.setConfig(toPlain(store.cfg))
+  pushNotice(lockMin.value === 0 ? '🔓 已关闭空闲锁屏' : `🔒 ${lockMin.value} 分钟无操作将自动锁屏，需手动进入`)
+}
+
+/** 立即锁定：主界面监听这个事件 */
+function lockNow(): void {
+  window.dispatchEvent(new Event('sqlpilot:lock'))
+}
+
 /** 隐私相关开关：即改即存（maskPromptDetails / previewLlm）；预览开关变化时在聊天里给提示 */
 async function toggleCfg(key: 'maskPromptDetails' | 'previewLlm', e: Event) {
   const on = (e.target as HTMLInputElement).checked
@@ -520,6 +543,20 @@ async function doImportUrl() {
 .frow { display: flex; gap: 10px; margin-bottom: 10px; }
 .fitem { flex: 1; min-width: 0; }
 .fitem label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.lock-cfg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.lock-cfg label { color: var(--text); font-size: 12.5px; }
+.lock-cfg .desc { flex: 1; min-width: 220px; font-size: 11.5px; line-height: 1.5; }
+
 .privacy-cfg { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
 .privacy-item { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; line-height: 1.6; }
 .privacy-item em { color: var(--text-faint); font-style: normal; }
