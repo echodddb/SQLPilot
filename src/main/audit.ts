@@ -60,11 +60,18 @@ function rotateIfNeeded(): void {
   } catch { /* 文件不存在或轮转失败都不阻断记录 */ }
 }
 
+/** 审计落盘前脱敏：`CREATE/ALTER USER … IDENTIFIED BY "pwd"`、`SET PASSWORD`、
+ *  `PASSWORD = 'pwd'` 里的口令不能明文进 JSONL（审计面板会原样读出来展示）。
+ *  实现放在 redact.ts（无 electron 依赖，可被单测直接导入）。 */
+import { redactSql } from './redact'
+export { redactSql }
+
 export function appendAudit(e: AuditEntry): void {
   try {
     rotateIfNeeded()
     fs.mkdirSync(path.dirname(auditPath()), { recursive: true })
-    fs.appendFileSync(auditPath(), JSON.stringify({ ...e, ts: new Date().toISOString() }) + '\n', 'utf8')
+    const safe = e.sql ? { ...e, sql: redactSql(e.sql) } : e
+    fs.appendFileSync(auditPath(), JSON.stringify({ ...safe, ts: new Date().toISOString() }) + '\n', 'utf8')
   } catch {
     /* 审计失败不阻断主流程 */
   }

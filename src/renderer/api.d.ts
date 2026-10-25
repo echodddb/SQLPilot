@@ -5,6 +5,35 @@ declare type SkillPackResult = {
 }
 
 declare global {
+// ---------------- SSH 服务器模块（类型单一来源：主进程定义） ----------------
+declare type SshServerCfg = import('../main/types').SshServer
+declare type TermPrefsCfg = import('../main/types').TermPrefs
+declare type TermEncodingCfg = import('../main/types').TermEncoding
+declare type TermSchemeCfg = import('../main/types').TermScheme
+declare type SftpEntryView = import('../main/sftp').SftpEntry
+declare type SftpStatView = import('../main/sftp').SftpEntry & { exists: boolean }
+declare type LocalEntryView = { name: string; path: string; isDir: boolean; hidden: boolean; size: number; mtime: number }
+declare type SshConfigEntryView = import('../main/ssh-config').SshConfigEntry & { duplicate: boolean }
+declare type SftpProgress = {
+  jobId: string
+  /** 上传还是下载（渲染层队列被清空后也能正确归类） */
+  kind?: 'upload' | 'download'
+  phase: 'start' | 'progress' | 'done' | 'error' | 'canceled'
+  /** 当前第几个文件（0 基） */
+  index?: number
+  /** 本批总文件数 */
+  fileCount?: number
+  name?: string
+  /** 当前文件已传字节数 */
+  transferred?: number
+  /** 当前文件总字节数 */
+  total?: number
+  file?: string
+  files?: number
+  bytes?: number
+  error?: string
+}
+
 // ---------------- 云管平台（OceanBase OCP） ----------------
 declare type CloudPlatformView = import('../main/cloud/service').CloudPlatformView
 
@@ -207,18 +236,40 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       pickFolder(): Promise<{ ok: boolean; path?: string }>
       saveProject(project: any): Promise<{ ok: boolean; error?: string }>
       deleteProject(id: string): Promise<{ ok: boolean }>
-      testServer(server: any, password?: string): Promise<{ ok: boolean; label?: string; error?: string }>
-      saveServer(server: any, password?: string): Promise<{ ok: boolean; error?: string }>
+      testServer(server: any, password?: string, keyPassphrase?: string): Promise<{ ok: boolean; label?: string; locale?: string; viaJump?: string; error?: string }>
+      saveServer(server: any, password?: string, keyPassphrase?: string): Promise<{ ok: boolean; id?: string; error?: string }>
       deleteServer(id: string): Promise<{ ok: boolean }>
-      termOpen(termId: string, serverId: string): Promise<{ ok: boolean; error?: string }>
+      forgetHostKey(host: string, port: number): Promise<{ ok: boolean; removed: boolean }>
+      importSshConfig(): Promise<{ ok: boolean; error?: string; path: string; entries: SshConfigEntryView[] }>
+      termOpen(termId: string, serverId: string, opts?: { cols?: number; rows?: number; encoding?: string; cwd?: string; term?: string }): Promise<{ ok: boolean; error?: string }>
       termInput(termId: string, data: string): Promise<{ ok: boolean }>
       termResize(termId: string, cols: number, rows: number): Promise<{ ok: boolean }>
       termClose(termId: string): Promise<{ ok: boolean }>
       onTermData(cb: (p: { termId: string; data: string }) => void): () => void
-      onTermExit(cb: (p: { termId: string }) => void): () => void
+      onTermExit(cb: (p: { termId: string; code?: number | null }) => void): () => void
       sftpList(serverId: string, p: string): Promise<{ ok: boolean; entries?: { name: string; isDir: boolean; size: number; mtime: number }[]; error?: string }>
       sftpDownload(serverId: string, remotePath: string, localDir: string): Promise<{ ok: boolean; local?: string; error?: string }>
       sftpUpload(serverId: string, remoteDir: string): Promise<{ ok: boolean; canceled?: boolean; count?: number; error?: string }>
+      // ---- SFTP 完整面板（服务器模块） ----
+      sftpLs(serverId: string, path: string): Promise<{ ok: boolean; path?: string; entries?: SftpEntryView[]; error?: string }>
+      sftpStat(serverId: string, path: string): Promise<{ ok: boolean; stat?: SftpStatView; error?: string }>
+      sftpHome(serverId: string): Promise<{ ok: boolean; path?: string; error?: string }>
+      sftpMkdir(serverId: string, path: string): Promise<{ ok: boolean; error?: string }>
+      sftpRename(serverId: string, from: string, to: string): Promise<{ ok: boolean; error?: string }>
+      sftpRemove(serverId: string, path: string, recursive?: boolean): Promise<{ ok: boolean; removed?: number; error?: string }>
+      sftpChmod(serverId: string, path: string, mode: number): Promise<{ ok: boolean; error?: string }>
+      sftpRead(serverId: string, path: string, maxBytes?: number, encoding?: string): Promise<{ ok: boolean; content?: string; size?: number; truncated?: boolean; error?: string }>
+      sftpWrite(serverId: string, path: string, content: string, encoding?: string): Promise<{ ok: boolean; bytes?: number; error?: string }>
+      sftpPick(mode: 'files' | 'folder'): Promise<{ ok: boolean; canceled?: boolean; paths?: string[] }>
+      sftpUploadPaths(serverId: string, localPaths: string[], remoteDir: string, jobId: string): Promise<{ ok: boolean; files?: number; bytes?: number; error?: string }>
+      sftpDownloadPaths(serverId: string, remotePaths: string[], localDir: string, jobId: string): Promise<{ ok: boolean; files?: number; bytes?: number; dir?: string; error?: string }>
+      sftpCancel(jobId: string): Promise<{ ok: boolean; found: boolean }>
+      onSftpProgress(cb: (p: SftpProgress) => void): () => void
+      localRoots(): Promise<{ ok: boolean; roots: { name: string; path: string }[]; home: string; quick: { name: string; path: string }[] }>
+      localLs(dir: string): Promise<{ ok: boolean; dir?: string; parent?: string; truncated?: boolean; entries?: LocalEntryView[]; error?: string }>
+      localOpen(p: string): Promise<{ ok: boolean; error?: string }>
+      localSaveText(content: string, suggested?: string): Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>
+      pickFile(title?: string, filters?: { name: string; extensions: string[] }[]): Promise<{ ok: boolean; canceled?: boolean; path?: string }>
       showInFolder(p: string): Promise<{ ok: boolean }>
       // ---- 文本编辑器 ----
       editorOpenDialog(): Promise<{ ok: boolean; canceled?: boolean; docs?: any[]; errors?: string[] }>
@@ -282,6 +333,9 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       objEditInfo(connId: string, schema: string, table: string): Promise<{ ok: boolean; editable?: boolean; reason?: string; keyMode?: 'rowid' | 'cols'; keyCols?: string[]; readonlyCols?: string[]; error?: string }>
       objSaveEdits(p: { connId: string; sessionKey: string; schema: string; table: string; keyMode: 'rowid' | 'cols'; keyCols: string[]; edits: { rid?: string; keys?: any[]; col: string; value: string | null }[] }): Promise<{ ok: boolean; applied?: number; conflicts?: number[]; uncommitted?: boolean; error?: string }>
       exportResult(p: { connId: string; sessionKey: string; sql: string; columns: string[] }): Promise<{ ok: boolean; path?: string; rows?: number; truncated?: boolean; canceled?: boolean; error?: string }>
+      getArtifact(id: string): Promise<{ ok: boolean; data?: { kind: 'table'; columns: string[]; rows: unknown[][]; rowCount: number; ms?: number; truncated?: boolean; conn?: string; sql?: string; at: number }; error?: string }>
+      artifactImageDataUrl(p: string): Promise<{ ok: boolean; url?: string; size?: number; error?: string }>
+      exportArtifactCsv(p: { columns: string[]; rows: unknown[][]; name?: string }): Promise<{ ok: boolean; path?: string; rows?: number; canceled?: boolean; error?: string }>
       listSkills(): Promise<{ id: string; name: string; description: string; enabled: boolean; files?: number }[]>
       saveSkill(p: { id?: string; name: string; description: string; content: string }): Promise<{ ok: boolean }>
       deleteSkill(id: string): Promise<{ ok: boolean }>
@@ -290,6 +344,13 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       importSkill(): Promise<{ ok: boolean; skill?: any; pack?: SkillPackResult; error?: string }>
       importSkillUrl(url: string): Promise<{ ok: boolean; pack?: SkillPackResult; error?: string }>
       testProvider(provider: any, apiKey?: string): Promise<{ ok: boolean; label?: string; error?: string }>
+      listProviderModels(provider: any, apiKey?: string): Promise<{ ok: boolean; models?: string[]; error?: string }>
+      /** WorkBuddy 受管桥：状态 / 启停 / 登录控制台 / 模型目录（含倍率与上下文窗口） */
+      wbStatus(): Promise<{ running: boolean; starting: boolean; port: number; baseUrl: string; error?: string; root?: string }>
+      wbStart(): Promise<{ running: boolean; starting: boolean; port: number; baseUrl: string; error?: string; root?: string }>
+      wbStop(): Promise<{ running: boolean; starting: boolean; port: number; baseUrl: string; error?: string; root?: string }>
+      wbLogin(): Promise<{ ok: boolean; url?: string; error?: string }>
+      wbModels(): Promise<{ ok: boolean; models?: any[]; error?: string }>
       writeClipboard(text: string): Promise<{ ok: boolean }>
       // ---- 云管平台（OceanBase OCP） ----
       cloudPlatforms(): Promise<CloudPlatformView[]>

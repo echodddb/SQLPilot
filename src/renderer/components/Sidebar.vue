@@ -480,9 +480,9 @@ async function removeProject(p: any) {
 
 // ---------- 全局服务器 ----------
 function openTerm(s: any) {
-  // 直达该服务器的 shell；若当前会话项目未引用它，面板里仍可从列表手动打开其他服务器
+  // 服务器已是独立一级模块：直接切过去并让 ServerView 打开该会话的终端标签
   store.pendingTermServer = s
-  store.workbench = 'terminal'
+  store.module = 'server'
 }
 
 async function removeServer(s: any) {

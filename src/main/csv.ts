@@ -20,12 +20,34 @@ export function csvCell(v: any): string {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
-/** 按选定列（顺序保持选择顺序）构造完整 CSV 文本（含表头，带 BOM，CRLF 行尾） */
-export function buildCsv(columns: string[], rows: any[][], selected: string[]): string {
-  const wanted = selected.map((c) => String(c).toLowerCase())
-  const idx = wanted
-    .map((w) => columns.findIndex((c) => String(c).toLowerCase() === w))
-    .filter((i) => i >= 0)
+/** 按选定列（顺序保持选择顺序）构造完整 CSV 文本（含表头，带 BOM，CRLF 行尾）。
+ *  selected 支持列下标或列名：列名匹配必须"逐个占用"，否则 `SELECT a.id, b.id` 里
+ *  两个 id 都会命中第 0 列，导出的数据是静默错误的。 */
+export function buildCsv(columns: string[], rows: any[][], selected: (string | number)[]): string {
+  const used = new Set<number>()
+  const idx: number[] = []
+  const missing: string[] = []
+  for (const sel of selected) {
+    let hit = -1
+    if (typeof sel === 'number' && Number.isInteger(sel)) {
+      if (sel >= 0 && sel < columns.length && !used.has(sel)) hit = sel
+    } else {
+      const want = String(sel).toLowerCase()
+      for (let c = 0; c < columns.length; c++) {
+        if (!used.has(c) && String(columns[c]).toLowerCase() === want) {
+          hit = c
+          break
+        }
+      }
+    }
+    if (hit >= 0) {
+      used.add(hit)
+      idx.push(hit)
+    } else {
+      missing.push(String(sel))
+    }
+  }
+  if (missing.length) throw new Error(`结果集中找不到所选列：${missing.join(', ')}（列名可能重复或已被重命名，请刷新结果后重试）`)
   if (!idx.length) throw new Error('所选列都不在结果集中')
   const lines = [idx.map((i) => csvCell(columns[i])).join(',')]
   for (const row of rows) lines.push(idx.map((i) => csvCell(row[i])).join(','))

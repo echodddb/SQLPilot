@@ -50,6 +50,8 @@
           <template v-else>
             <div class="content" v-html="mdLite(m.text)"></div>
             <ToolCard v-for="(t, i) in m.tools" :key="i" :tool="t" />
+            <!-- WorkBuddy 式「任务产物」：本条消息产出的结果在右侧栏预览 -->
+            <ArtifactChips v-if="msgArtifacts[m.id]?.length" :items="msgArtifacts[m.id]" />
             <div v-if="isPlanTarget(idx)" class="plan-actions">
               <button class="btn primary" @click="approvePlan">✓ 批准并执行此计划</button>
               <span class="hint">批准后开始执行；权限模式恢复为计划前的设置（无记录则为确认执行）</span>
@@ -120,8 +122,19 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort, setSessionMode, MODES, archiveAndClear } from '../store'
 import ToolCard from './ToolCard.vue'
 import SubagentRunModal from './SubagentRunModal.vue'
+import ArtifactChips from './artifacts/ArtifactChips.vue'
+import { collectArtifacts, type Artifact } from '../artifacts'
 
 const scrollEl = ref<HTMLElement | null>(null)
+
+/** 按消息归组的产物（消息一变就重算；纯推导，工具结果到达后自动出现） */
+const msgArtifacts = computed<Record<number, Artifact[]>>(() => {
+  const out: Record<number, Artifact[]> = {}
+  for (const a of collectArtifacts(curSession()?.msgs as any)) {
+    ;(out[a.msgId] ||= []).push(a)
+  }
+  return out
+})
 
 async function onArchiveClick() {
   await archiveAndClear()

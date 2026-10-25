@@ -628,8 +628,12 @@ export function closeCluster(): void {
   void load()
 }
 
+/** 租户详情请求序号：连续点两个租户时，后到的旧响应不能覆盖新租户的抽屉 */
+let tenantSeq = 0
 export async function openTenant(clusterId: number, tenantId: number): Promise<void> {
+  const my = ++tenantSeq
   const r = await window.sqlpilot.cloudTenant(cloud.activeId, clusterId, tenantId)
+  if (my !== tenantSeq) return
   if (!r.ok || !r.data) {
     cloud.error = r.error || '获取租户详情失败'
     return

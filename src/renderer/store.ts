@@ -67,8 +67,8 @@ export function toPlain<T>(v: T): T {
 
 export const store = reactive({
   ready: false,
-  /** 一级功能模块：AI 助手（对话/终端）/ 数据库控制台 / 云管平台 / 文本编辑 / 脱敏工具 / 巡检报告（规划中） */
-  module: 'agent' as 'agent' | 'db' | 'cloud' | 'editor' | 'masking' | 'report',
+  /** 一级功能模块：AI 助手（对话/终端）/ 数据库控制台 / 云管平台 / 服务器 / 文本编辑 / 脱敏工具 / 巡检报告 */
+  module: 'agent' as 'agent' | 'db' | 'cloud' | 'server' | 'editor' | 'masking' | 'report',
   /** 设置浮窗（横切关注点，不占主视图轨道；对话/工作台保持原样在浮窗下方） */
   settingsOpen: false,
   cfg: null as any,
@@ -102,7 +102,11 @@ export const store = reactive({
   /** 侧栏服务器点击 → 终端面板打开该服务器的 shell（WorkbenchPanel 消费后清空） */
   pendingTermServer: null as any,
   /** 子代理完整过程查看弹窗（审计 JSONL 实时读取） */
-  subRun: null as { runId: string; title: string } | null
+  subRun: null as { runId: string; title: string } | null,
+  /** 右侧「产物」栏：开关 / 当前聚焦的产物 id / 宽度（宽度落 localStorage） */
+  artifactsOpen: false,
+  artifactFocus: null as string | null,
+  artifactW: Number(localStorage.getItem('sqlpilot.artifactW') || 460) || 460
 })
 
 export function curSession(): UiSession {
@@ -449,9 +453,13 @@ export async function archiveAndClear(): Promise<void> {
     await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
+  // 先建新会话并切过去，最后才删旧会话：一旦先 delete，curSession() 会短暂为空，
+  // App 根节点的 v-if 会把整棵 layout 卸载 —— 数据库标签页（含未提交事务）与 SSH 终端全被销毁
+  const meta = await window.sqlpilot.newSession()
+  ensureSessionRecord(meta)
+  store.currentId = meta.id
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
-  await createSession()
   pushNotice(r.archived ? `对话「${title}」已归档（可在项目树归档区恢复），已新开会话` : (r.note || '已新开会话'))
 }
 
@@ -547,13 +555,11 @@ export function openDbTask(conn: { id: string; name: string }): void {
   store.module = 'db'
 }
 
-/** 从服务器打开终端任务：确保终端面板打开并激活该服务器 shell */
+/** 从服务器打开终端：切到服务器模块并激活该会话 */
 export function openServerTask(server: { id: string; name: string }): void {
-  upsertTask('server', server.id, server.name, '🖥')
-  store.activeTermServerId = server.id
   const full = (store.cfg?.servers || []).find((s: any) => s.id === server.id)
   if (full) store.pendingTermServer = full
-  store.workbench = 'terminal'
+  store.module = 'server'
 }
 
 /** 任务栏主体点击：显示对应窗口 */
@@ -567,7 +573,7 @@ export function activateTask(t: { kind: 'db' | 'server'; refId: string }): void 
     store.activeTermServerId = t.refId
     const full = (store.cfg?.servers || []).find((s: any) => s.id === t.refId)
     if (full) store.pendingTermServer = full
-    store.workbench = 'terminal'
+    store.module = 'server'
   }
 }
 

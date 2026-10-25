@@ -74,11 +74,14 @@ const api = {
   saveProject: (project: any) => ipcRenderer.invoke('project:save', { project: plain(project) }),
   deleteProject: (id: string) => ipcRenderer.invoke('project:delete', { id }),
   // SSH 服务器
-  testServer: (server: any, password?: string) => ipcRenderer.invoke('server:test', { server: plain(server), password }),
-  saveServer: (server: any, password?: string) => ipcRenderer.invoke('server:save', { server: plain(server), password }),
+  testServer: (server: any, password?: string, keyPassphrase?: string) => ipcRenderer.invoke('server:test', { server: plain(server), password, keyPassphrase }),
+  saveServer: (server: any, password?: string, keyPassphrase?: string) => ipcRenderer.invoke('server:save', { server: plain(server), password, keyPassphrase }),
   deleteServer: (id: string) => ipcRenderer.invoke('server:delete', { id }),
+  forgetHostKey: (host: string, port: number) => ipcRenderer.invoke('server:forgetHostKey', { host, port }),
+  importSshConfig: () => ipcRenderer.invoke('server:importSshConfig'),
   // 交互式 SSH 终端
-  termOpen: (termId: string, serverId: string) => ipcRenderer.invoke('term:open', { termId, serverId }),
+  termOpen: (termId: string, serverId: string, opts?: { cols?: number; rows?: number; encoding?: string; cwd?: string; term?: string }) =>
+    ipcRenderer.invoke('term:open', { termId, serverId, ...(opts ? plain(opts) : {}) }),
   termInput: (termId: string, data: string) => ipcRenderer.invoke('term:input', { termId, data }),
   termResize: (termId: string, cols: number, rows: number) => ipcRenderer.invoke('term:resize', { termId, cols, rows }),
   termClose: (termId: string) => ipcRenderer.invoke('term:close', { termId }),
@@ -87,15 +90,43 @@ const api = {
     ipcRenderer.on('term:data', l)
     return () => ipcRenderer.removeListener('term:data', l)
   },
-  onTermExit: (cb: (p: { termId: string }) => void) => {
+  onTermExit: (cb: (p: { termId: string; code?: number | null }) => void) => {
     const l = (_e: any, p: any) => cb(p)
     ipcRenderer.on('term:exit', l)
     return () => ipcRenderer.removeListener('term:exit', l)
   },
-  // SFTP 文件浏览器
+  // SFTP 文件浏览器（旧接口，兼容底部工作台）
   sftpList: (serverId: string, p: string) => ipcRenderer.invoke('sftp:list', { serverId, path: p }),
   sftpDownload: (serverId: string, remotePath: string, localDir: string) => ipcRenderer.invoke('sftp:download', { serverId, remotePath, localDir }),
   sftpUpload: (serverId: string, remoteDir: string) => ipcRenderer.invoke('sftp:upload', { serverId, remoteDir }),
+  // SFTP 完整面板
+  sftpLs: (serverId: string, path: string) => ipcRenderer.invoke('sftp:ls', { serverId, path }),
+  sftpStat: (serverId: string, path: string) => ipcRenderer.invoke('sftp:stat', { serverId, path }),
+  sftpHome: (serverId: string) => ipcRenderer.invoke('sftp:home', { serverId }),
+  sftpMkdir: (serverId: string, path: string) => ipcRenderer.invoke('sftp:mkdir', { serverId, path }),
+  sftpRename: (serverId: string, from: string, to: string) => ipcRenderer.invoke('sftp:rename', { serverId, from, to }),
+  sftpRemove: (serverId: string, path: string, recursive?: boolean) => ipcRenderer.invoke('sftp:remove', { serverId, path, recursive }),
+  sftpChmod: (serverId: string, path: string, mode: number) => ipcRenderer.invoke('sftp:chmod', { serverId, path, mode }),
+  sftpRead: (serverId: string, path: string, maxBytes?: number, encoding?: string) => ipcRenderer.invoke('sftp:read', { serverId, path, maxBytes, encoding }),
+  sftpWrite: (serverId: string, path: string, content: string, encoding?: string) => ipcRenderer.invoke('sftp:write', { serverId, path, content, encoding }),
+  sftpPick: (mode: 'files' | 'folder') => ipcRenderer.invoke('sftp:pick', { mode }),
+  sftpUploadPaths: (serverId: string, localPaths: string[], remoteDir: string, jobId: string) =>
+    ipcRenderer.invoke('sftp:uploadPaths', { serverId, localPaths: plain(localPaths), remoteDir, jobId }),
+  sftpDownloadPaths: (serverId: string, remotePaths: string[], localDir: string, jobId: string) =>
+    ipcRenderer.invoke('sftp:downloadPaths', { serverId, remotePaths: plain(remotePaths), localDir, jobId }),
+  sftpCancel: (jobId: string) => ipcRenderer.invoke('sftp:cancel', { jobId }),
+  onSftpProgress: (cb: (p: any) => void) => {
+    const l = (_e: any, p: any) => cb(p)
+    ipcRenderer.on('sftp:progress', l)
+    return () => ipcRenderer.removeListener('sftp:progress', l)
+  },
+  // 本地目录（SFTP 双栏本地侧）
+  localRoots: () => ipcRenderer.invoke('local:roots'),
+  localLs: (dir: string) => ipcRenderer.invoke('local:ls', { dir }),
+  localOpen: (p: string) => ipcRenderer.invoke('local:open', { p }),
+  localSaveText: (content: string, suggested?: string) => ipcRenderer.invoke('local:saveText', { content, suggested }),
+  pickFile: (title?: string, filters?: { name: string; extensions: string[] }[]) =>
+    ipcRenderer.invoke('dialog:pickFile', { title, filters: filters ? plain(filters) : undefined }),
   showInFolder: (p: string) => ipcRenderer.invoke('shell:showInFolder', { p }),
   // ---------- 文本编辑器（Notepad++ 式多标签） ----------
   editorOpenDialog: () => ipcRenderer.invoke('editor:openDialog'),
@@ -164,6 +195,11 @@ const api = {
   // 查询结果导出（弹保存对话框，CSV 全量导出）
   exportResult: (p: { connId: string; sessionKey: string; sql: string; columns: string[] }) =>
     ipcRenderer.invoke('export:result', plain(p)),
+  // 会话产物（右侧结果预览）：完整结果按 id 取、面板内导出 CSV
+  getArtifact: (id: string) => ipcRenderer.invoke('artifact:get', { id: String(id || '') }),
+  artifactImageDataUrl: (p: string) => ipcRenderer.invoke('artifact:imageDataUrl', { path: String(p || '') }),
+  exportArtifactCsv: (p: { columns: string[]; rows: unknown[][]; name?: string }) =>
+    ipcRenderer.invoke('artifact:exportCsv', { columns: p.columns, rows: p.rows, name: p.name }),
   // 技能
   listSkills: () => ipcRenderer.invoke('skill:list'),
   saveSkill: (p: { id?: string; name: string; description: string; content: string }) => ipcRenderer.invoke('skill:save', plain(p)),
@@ -174,6 +210,13 @@ const api = {
   importSkillUrl: (url: string) => ipcRenderer.invoke('skill:importUrl', { url }),
   // 模型提供商
   testProvider: (provider: any, apiKey?: string) => ipcRenderer.invoke('provider:test', { provider: plain(provider), apiKey }),
+  listProviderModels: (provider: any, apiKey?: string) => ipcRenderer.invoke('provider:listModels', { provider: plain(provider), apiKey }),
+  // WorkBuddy 受管桥（模型通道）：令牌留在主进程，渲染层只拿状态
+  wbStatus: () => ipcRenderer.invoke('wb:status'),
+  wbStart: () => ipcRenderer.invoke('wb:start'),
+  wbStop: () => ipcRenderer.invoke('wb:stop'),
+  wbLogin: () => ipcRenderer.invoke('wb:login'),
+  wbModels: () => ipcRenderer.invoke('wb:models'),
   // ---------- 云管平台（OceanBase OCP） ----------
   cloudPlatforms: () => ipcRenderer.invoke('cloud:list'),
   cloudSave: (platform: any, password?: string) => ipcRenderer.invoke('cloud:save', { platform: plain(platform), password }),

@@ -112,6 +112,11 @@ export interface SshServer {
   scheme?: TermScheme
   /** 该会话的字号（缺省跟随全局） */
   fontSize?: number
+  /**
+   * 标签标识色（hex，如 #f85149）。只用于标签栏/会话列表区分，与终端配色 (scheme) 无关。
+   * 未设置时按 tag 自动推断（生产红 / 测试黄 / 开发绿）。
+   */
+  color?: string
   /** 跳板机：先连这台服务器，再从它转发到目标（ProxyJump） */
   jumpId?: string
 }
@@ -224,6 +229,8 @@ export interface DbAdapter {
   query(sql: string, maxRows: number, timeoutMs: number, binds?: any): Promise<QueryResult>
   /** Oracle 类适配器需要：写操作后显式提交。返回 false = 连接已被重置、事务未提交 */
   commit?(): Promise<boolean>
+  /** 回滚当前事务。返回 false = 连接已被重置（事务已由服务端回滚） */
+  rollback?(): Promise<boolean>
   /** 结果网格编辑支持信息：行标识方式与不可更新列（无则该表不可编辑） */
   editSupport?(schema: string, table: string): Promise<EditSupport>
 }

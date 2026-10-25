@@ -60,6 +60,21 @@
           :title="cloudBadgeTitle"
         >{{ cloudBadge }}</span>
 
+        <!-- 服务器不是一级导航模块，靠侧栏「服务器」分组点进来；顶栏只给模块标识 -->
+        <span
+          v-if="store.module === 'server'"
+          class="badge blue"
+          title="SSH 会话 · 多标签终端 · SFTP 双栏传输（入口在左侧栏底部「服务器」分组）"
+        >服务器 · SSH</span>
+
+        <button
+          v-if="store.module === 'agent'"
+          class="btn ghost"
+          :class="{ on: store.artifactsOpen }"
+          :title="`产物（Ctrl+Shift+A）：本次对话的查询结果 / DDL / 读写文件 / 命令输出${artifactCount ? '，共 ' + artifactCount + ' 项' : ''}`"
+          @click="store.artifactsOpen = !store.artifactsOpen"
+        >▦ 产物<span v-if="artifactCount" style="margin-left:5px;opacity:.75">{{ artifactCount }}</span></button>
+
         <!-- 未配置厂商时给一个明确 CTA，替代不可用的空下拉 -->
         <button
           v-if="store.module === 'agent' && !(store.cfg.providers || []).length"
@@ -85,6 +100,13 @@
           @click="openConnModal()"
         >＋ 新建连接</button>
 
+        <button
+          v-if="store.module === 'server'"
+          class="btn ghost"
+          title="新建 SSH 会话（密码 / 私钥 / 跳板机）"
+          @click="newServerSession"
+        >＋ 新建会话</button>
+
 
       </div>
 
@@ -92,8 +114,12 @@
       <template v-if="store.module === 'agent'">
         <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
              改由宿主 div 承担布局，子组件只管内容 -->
-        <div class="chat-view-host">
-          <ChatView />
+        <!-- 右侧「产物」栏：查询结果 / DDL / 文件 / 命令输出的结果预览（WorkBuddy 式） -->
+        <div class="agent-row">
+          <div class="chat-view-host">
+            <ChatView />
+          </div>
+          <ArtifactsPanel v-if="store.artifactsOpen" />
         </div>
 
       <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
@@ -109,10 +135,20 @@
       <!-- 数据库控制台（独立一级模块）：v-show 保活——切到别的模块处理完再回来，
            查询标签页 / 结果集 / 未提交事务全部还在；只有 ✕ 关闭控制台才销毁 -->
       <DbWorkbenchView v-if="store.dbOpen" v-show="store.module === 'db'" style="flex: 1; min-height: 0" />
+
+      <!-- 服务器模块（独立一级模块）：终端与 SSH 连接必须保活，切模块不能断线重连，
+           所以首次进入后常驻 + v-show 显隐 -->
+      <ServerView v-if="srvState.mounted || store.module === 'server'" v-show="store.module === 'server'" style="flex: 1; min-height: 0" />
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />
-    <ServerManager v-if="serverModal" :server="serverModalEditing" @close="serverModal = false; serverModalEditing = null" />
+    <ServerSessionModal
+      v-if="srvState.editing"
+      :server="srvState.editing"
+      :is-new="srvState.editingNew"
+      @close="srvState.editing = null"
+      @saved="reloadServerCfg"
+    />
     <SettingsView v-if="store.settingsOpen" @close="store.settingsOpen = false" />
     <ConfirmModal v-if="store.confirmQueue.length" />
     <PreviewModal v-if="store.previewQueue.length" />
@@ -157,11 +193,15 @@ import ChatView from './components/ChatView.vue'
 import TextEditorView from './components/TextEditorView.vue'
 import SettingsView from './components/SettingsView.vue'
 import DbWorkbenchView from './components/DbWorkbenchView.vue'
+import ServerView from './components/server/ServerView.vue'
+import { srv as srvState } from './server/state'
 import CloudView from './components/cloud/CloudView.vue'
 import { engineOf } from './cloud/engines'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
+import ArtifactsPanel from './components/artifacts/ArtifactsPanel.vue'
+import { collectArtifacts } from './artifacts'
 import ConnManager from './components/ConnManager.vue'
-import ServerManager from './components/ServerManager.vue'
+import ServerSessionModal from './components/server/ServerSessionModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import PreviewModal from './components/PreviewModal.vue'
 import ArchiveModal from './components/ArchiveModal.vue'
@@ -172,6 +212,9 @@ import { edState } from './editor/session'
 import { cloud } from './cloud/state'
 
 const connModal = ref(false)
+
+/** 顶栏产物角标：当前会话从工具结果推导出的产物数 */
+const artifactCount = computed(() => collectArtifacts(curSession()?.msgs as any).length)
 const connModalEditing = ref<any>(null)
 const serverModal = ref(false)
 const serverModalEditing = ref<any>(null)
@@ -239,13 +282,23 @@ onMounted(() => {
   // 2s 巡检足够准（误差远小于分钟级阈值），比每次移动都重排定时器省
   idleTimer = window.setInterval(checkIdle, 2000)
   window.addEventListener('sqlpilot:lock', lockNow)
+  window.addEventListener('keydown', onArtifactsKey)
 })
 
 onBeforeUnmount(() => {
   ACTIVITY.forEach((e) => window.removeEventListener(e, markActive, { capture: true }))
   window.clearInterval(idleTimer)
   window.removeEventListener('sqlpilot:lock', lockNow)
+  window.removeEventListener('keydown', onArtifactsKey)
 })
+
+/** Ctrl+Shift+A 切换右侧产物栏（与 WorkBuddy「切换右侧栏」对齐） */
+function onArtifactsKey(e: KeyboardEvent): void {
+  if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.key.toLowerCase() !== 'a') return
+  if (store.module !== 'agent') return
+  e.preventDefault()
+  store.artifactsOpen = !store.artifactsOpen
+}
 
 /** 顶栏模块标识：当前接的是 OCP 还是直连 Oracle（平台在模块内切换，这里跟着变） */
 const cloudActiveKind = computed(() => {
@@ -272,11 +325,17 @@ const archiveView = ref<{ id: string; name: string } | null>(null)
 const dragActive = ref(false)
 
 // 拖拽文件到窗口任意位置：交给文本编辑器打开（含任意扩展名，绕开文件对话框过滤器）
+// 例外：服务器模块内部自己处理拖拽（SFTP 上传），不能被编辑器的全屏提示层抢走
+function inServerModule(e: DragEvent): boolean {
+  const el = e.target as HTMLElement | null
+  return !!el?.closest?.('.sv')
+}
+
 function onDragOver(e: DragEvent): void {
   if (!e.dataTransfer?.types?.includes('Files')) return
   e.preventDefault()
   e.dataTransfer.dropEffect = 'copy'
-  dragActive.value = true
+  dragActive.value = !inServerModule(e)
 }
 
 function onDragLeave(e: DragEvent): void {
@@ -286,6 +345,8 @@ function onDragLeave(e: DragEvent): void {
 
 async function onDrop(e: DragEvent): Promise<void> {
   dragActive.value = false
+  // 拖进服务器模块：交给 SFTP 面板自己上传，不要切到文本编辑器
+  if (inServerModule(e)) return
   const files = Array.from(e.dataTransfer?.files || [])
   if (!files.length) return
   const paths = files
@@ -358,13 +419,24 @@ function openConnModal(editing: any = null) {
 function closeConnModal() {
   connModal.value = false
 }
+
+/** 顶栏「＋ 新建会话」：按钮只在服务器模块出现，走的也是模块内的 ServerSessionModal */
+function newServerSession(): void {
+  srvState.editingNew = true
+  srvState.editing = { id: `srv_${Date.now()}_${Math.floor(Math.random() * 1000)}` }
+}
 // 主题状态注入 ModuleNav（底部工具组用）
 provide('themeState', { theme, toggle: toggleTheme })
 provide('openConnModal', openConnModal)
-// 服务器全局注册表的编辑弹窗（侧栏/项目编辑器共用）
+// 服务器全局注册表的编辑弹窗（侧栏/项目编辑器/模块顶栏共用同一个新弹窗，
+// 旧 ServerManager 只有密码认证 + 基础字段，改一次会把跳板机/编码等字段写丢）
 function openServerModalFn(server: any = null) {
-  serverModalEditing.value = server
-  serverModal.value = true
+  srvState.editingNew = !server
+  srvState.editing = server ? { ...server } : { id: `srv_${Date.now()}_${Math.floor(Math.random() * 1000)}` }
+}
+
+async function reloadServerCfg(): Promise<void> {
+  try { store.cfg = await window.sqlpilot.getConfig() } catch { /* 保留旧配置 */ }
 }
 provide('openServerModal', openServerModalFn)
 function openProjectModalFn() {

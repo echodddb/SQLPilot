@@ -18,6 +18,10 @@ export interface VendorPreset {
   baseUrl: string
   /** 思考级别注入方式 */
   thinkingStyle: 'openai_effort' | 'glm_thinking' | 'qwen_thinking' | 'anthropic_budget' | 'none'
+  /** 表单里是否允许改 Base URL：本地桥/中转站的端口会变，不能写死 */
+  editableBaseUrl?: boolean
+  /** 选中该厂商时在表单里显示的一行说明（安装前置、端口、注意事项） */
+  note?: string
   models: ModelPreset[]
 }
 
@@ -101,6 +105,26 @@ export const VENDOR_CATALOG: VendorPreset[] = [
     thinkingStyle: 'anthropic_budget',
     models: [
       { id: 'glm-5.3', label: 'GLM-5.3', note: '实测 Coding Plan 通道仅含此型号；flash/air 系列不在该通道', contextK: 200 }
+    ]
+  },
+  {
+    id: 'workbuddy',
+    label: 'WorkBuddy（本地桥）',
+    protocol: 'openai',
+    baseUrl: 'http://127.0.0.1:8790/v1',
+    thinkingStyle: 'none',
+    editableBaseUrl: true,
+    // WorkBuddy 的模型走它自家私有协议（copilot.tencent.com + 签名头），凭据还是 App 运行时密钥
+    // 加密的 AES-GCM 信封 —— 客户端里复刻这套等于每月跟着上游改一次。这里只对接社区本地桥：
+    // 由桥负责登录态与协议转换，本客户端说标准 OpenAI 协议。
+    note:
+      '桥随 SQLPilot 一起分发，不用另装东西：点下面「启动」即可（默认 127.0.0.1:8790，被占用自动顺延）。' +
+      'WorkBuddy 客户端需要已登录，没登录点「登录 WorkBuddy」。API Key 可以留空——主进程会自动注入本地令牌；' +
+      '模型名点「拉取模型」按你账号的实际目录读取（会带上积分倍率与上下文窗口）。',
+    models: [
+      { id: 'deepseek-v4.1-flash', label: 'DeepSeek-V4.1-Flash', note: '快、便宜（x0.11）', contextK: 300 },
+      { id: 'deepseek-v4-pro', label: 'DeepSeek-V4-Pro', note: '代码/推理强（x0.51）', contextK: 300 },
+      { id: 'glm-5.3', label: 'GLM-5.3', note: '工程/中文写作（x0.69）', contextK: 300 }
     ]
   },
   {

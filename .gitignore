@@ -14,3 +14,6 @@ test/.*.mjs
 .vscode/
 .idea/
 Thumbs.db
+
+# 桥接运行时用量日志（含本机调用记录，不入库）
+vendor/workbuddy-bridge/bridge/usage.jsonl

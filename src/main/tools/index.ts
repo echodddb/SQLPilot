@@ -10,6 +10,7 @@ import type { AuditEntry } from '../audit'
 import { cached, metaDropConn, metaKeys } from '../meta'
 import { readSkill } from '../skills'
 import { appendMemory } from '../memory'
+import { putTable } from '../artifacts'
 import * as ssh from '../ssh'
 import { readRunAudit } from '../agent/subagent-audit'
 import { listSubagentTasks, stopSubagentTask, waitSubagentTask } from '../agent/subtask-registry'
@@ -45,6 +46,8 @@ export interface ToolContext {
   connections: ConnProfile[]
   globalClientDir?: string
   mode: PermissionMode
+  /** 实时读取当前模式：审批可能等待几分钟，期间用户/父会话可能把模式降级，ctx.mode 只是入口快照 */
+  getMode?: () => PermissionMode
   sessionApproved: Set<string>
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalOutcome>
   /** 当前会话绑定的项目（未绑定为 undefined，fs 工具不可用） */
@@ -468,9 +471,9 @@ function approvalKey(req: ApprovalRequest): string {
   return `${req.tool}:${req.kind}:${req.conn}${req.target ? `:${req.target}` : ''}${req.origin ? `|${req.origin}` : ''}`
 }
 
-/** 读取当前权限模式（经函数返回，避免 TypeScript 用函数入口的收窄结果判定后续比较） */
+/** 读取当前权限模式：优先取实时值（审批期间模式可能已变），没有注入时退回入口快照 */
 function currentMode(ctx: ToolContext): PermissionMode {
-  return ctx.mode
+  return ctx.getMode ? ctx.getMode() : ctx.mode
 }
 
 /** 写操作统一门控：计划/只读拒绝；确认/会话/放开按级别放行。
@@ -486,22 +489,23 @@ async function gateWrite(
   const od = ctx.origin ? `[${ctx.origin}] ` : ''
   const base = auditBase(ctx, req.tool)
   const sqlField = req.tool === 'db_write' ? { sql: req.sql } : {}
-  if (ctx.mode === 'plan' || ctx.mode === 'readonly') {
-    const where = ctx.mode === 'plan' ? '计划模式（请先输出计划并获得用户批准）' : '只读模式'
-    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: `${where}拒绝`, ...sqlField })
+  const modeAtEntry = currentMode(ctx)
+  if (modeAtEntry === 'plan' || modeAtEntry === 'readonly') {
+    const where = modeAtEntry === 'plan' ? '计划模式（请先输出计划并获得用户批准）' : '只读模式'
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: modeAtEntry, approved: false, error: `${where}拒绝`, ...sqlField })
     return JSON.stringify({ error: `当前为${where}，写操作被拒绝。` })
   }
   const outcome = await requestApprovalIfNeeded(ctx, req)
   if (outcome.decision === 'denied') {
     const reason = outcome.reason?.trim()
-    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: false, error: reason ? `用户拒绝：${reason.slice(0, 300)}` : '用户拒绝', ...sqlField })
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: currentMode(ctx), approved: false, error: reason ? `用户拒绝：${reason.slice(0, 300)}` : '用户拒绝', ...sqlField })
     const feedback = reason
       ? `用户拒绝了该操作，反馈：${reason}。请根据反馈调整方案后再继续；未经用户明确要求，不要原样重试。`
       : '用户拒绝了该操作。请询问用户希望如何调整，不要原样重试。'
     return JSON.stringify({ error: feedback })
   }
   if (outcome.decision === 'session') ctx.sessionApproved.add(approvalKey(req))
-  // 审批期间模式可能被降级（用户切只读 / 父会话降级）：执行前按当前模式再校验一次
+  // 审批期间模式可能被降级（用户切只读 / 父会话降级）：执行前按实时模式再校验一次
   const modeNow = currentMode(ctx)
   if (modeNow === 'plan' || modeNow === 'readonly') {
     const where = modeNow === 'plan' ? '计划模式' : '只读模式'
@@ -510,7 +514,7 @@ async function gateWrite(
   }
   // yolo：会话模式切换由审批应答方（ipc 层）完成，这里视同本次放行
   if (!skipSuccessAudit) {
-    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: ctx.mode, approved: true, ...sqlField })
+    appendAudit({ ...base, kind: 'sql.write', conn: auditConn, detail: od + detail.slice(0, 500), mode: modeNow, approved: true, ...sqlField })
   }
   return null
 }
@@ -776,16 +780,15 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
       if (!/^https?:\/\//i.test(url)) {
         return { ok: false, result: JSON.stringify({ error: '仅支持 http/https 网址' }) }
       }
-      // 只读/计划模式下打开外链需要确认：否则"读敏感文件 → 拼进 URL 打开"可无审批外传
-      if (ctx.mode === 'plan' || ctx.mode === 'readonly') {
-        const gated = await gateWrite(
-          ctx,
-          { tool: 'open_url', conn: '本机', sql: url, kind: 'net', risk: 2, target: url.slice(0, 200) },
-          '本机',
-          `open_url ${url.slice(0, 200)}`
-        )
-        if (gated) return { ok: false, result: gated }
-      }
+      // 打开外链等于把 URL 交给系统浏览器发出去：这是唯一的数据出口，任何模式都要过门控。
+      // 否则"读敏感文件 → 拼进 URL 打开"无需审批即可外泄（只读/计划模式由 gateWrite 直接拒绝）。
+      const gated = await gateWrite(
+        ctx,
+        { tool: 'open_url', conn: '本机', sql: url, kind: 'net', risk: 2, target: url.slice(0, 200) },
+        '本机',
+        `open_url ${url.slice(0, 200)}`
+      )
+      if (gated) return { ok: false, result: gated }
       await shell.openExternal(url)
       audit({ kind: 'tool', target: url.slice(0, 200), detail: `open_url ${url.slice(0, 200)}` })
       return { ok: true, result: JSON.stringify({ opened: url }) }
@@ -952,6 +955,13 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
         return { ok: false, result: JSON.stringify({ error: '任务已被用户中止，查询执行结果未知（语句可能仍在服务端执行至超时）' }) }
       }
       const out = fmtQueryResult(r)
+      // 侧栏「产物」：完整结果落盘（对话里只保留前 30 行），工具返回值只带 id + 实际行数，
+      // 模型不必看全量；用户在右侧面板打开时再按 id 取
+      try {
+        const art = putTable({ columns: r.columns, rows: r.rows, rowCount: r.rowCount, ms: r.ms, truncated: r.truncated, conn: profile.name, sql })
+        out.artifactId = art.id
+        out.artifactRows = art.rows
+      } catch { /* 落盘失败不影响查询本身 */ }
       audit({ kind: 'sql.read', conn: profile.name, detail: 'db_query 执行', sql, rows: r.rowCount, ms: r.ms })
       return { ok: true, result: JSON.stringify(out) }
     }
@@ -959,8 +969,10 @@ export async function executeTool(name: string, argsJson: string, ctx: ToolConte
     if (name === 'db_write') {
       const sql = String(args.sql ?? '').trim()
       // 事务/会话控制语句不能走 db_write：MySQL 上 SET autocommit=0 会让后续写"报成功但从未提交"，
-      // USE/ALTER SESSION 还会污染共享连接的解析上下文
-      if (/^(set|use|begin|commit|rollback|start)\b/i.test(sql)) {
+      // USE/ALTER SESSION 还会污染共享连接的解析上下文。
+      // 判首词前必须先剥注释：直接对原始串做正则会被 `/*x*/SET autocommit=0` 绕过
+      const headWord = (sql.replace(/^(--[^\n]*\r?\n|\/\*[\s\S]*?\*\/|\s)+/, '').match(/^[a-zA-Z]+/)?.[0] || '').toLowerCase()
+      if (/^(set|use|begin|commit|rollback|start)$/.test(headWord)) {
         return { ok: false, result: JSON.stringify({ error: '事务/会话控制语句（SET/USE/BEGIN/COMMIT/ROLLBACK）不允许通过 db_write 执行；写操作由工具自动提交，Oracle 可用工作台的提交/回滚按钮。' }) }
       }
       const v = classifySql(sql, dialectOf(profile.type))

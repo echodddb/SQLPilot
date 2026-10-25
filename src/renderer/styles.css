@@ -644,3 +644,6 @@ option { background: var(--bg-card); color: var(--text); }
 .theme-toggle:hover { border-color: var(--accent); transform: rotate(15deg); }
 
 .chat-view-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* AI 助手：对话 + 右侧产物栏并排（产物栏宽度由组件内部拖拽） */
+.agent-row { flex: 1; min-height: 0; display: flex; min-width: 0; }
+.agent-row > .chat-view-host { min-width: 0; }

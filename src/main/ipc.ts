@@ -1,11 +1,14 @@
 import { BrowserWindow, app, clipboard, dialog, ipcMain, shell } from 'electron'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import path from 'node:path'
 import { loadConfig, saveConfig } from './config'
 import { setPassword, deletePassword, getPassword, secretsAvailable } from './secrets'
 import { readAudit, appendAudit, queryAudit } from './audit'
 import { getAdapter, dropAdapter, closeAll } from './db/manager'
-import { testServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, sftpList, sftpDownload, sftpUpload } from './ssh'
+import { testServer, probeServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, forgetHostKey, sftpList, sftpDownload, sftpUpload } from './ssh'
+import * as sftpOps from './sftp'
+import { readSshConfig } from './ssh-config'
 import { classifySql, dialectOf } from './db/guard'
 import { OracleAdapter } from './db/oracle'
 import { ObOracleAdapter } from './db/ob-oracle'
@@ -18,10 +21,12 @@ import {
   type AgentEvent
 } from './agent/loop'
 import { callLlm } from './agent/llm'
+import { bridgeStatus, startBridge, stopBridge, openLoginDashboard, listBridgeModels, resolveProvider as resolveWbProvider } from './workbuddy'
 import { appendArchive, readProjectArchiveFull, listProjectArchiveEntries, deleteProjectArchiveEntry, clearProjectArchive, updateArchiveEntry, deleteArchiveEntryByHead } from './memory'
 import { listSkills, saveSkill, deleteSkill, importSkill, importSkillPack, importSkillPackFromUrl, readSkill } from './skills'
 import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
+import { getArtifact } from './artifacts'
 import { defaultMaskingConfig, maskText, normalizeMaskingConfig, validateMaskingConfig, type MaskingConfig, type MaskingFileType } from './masking'
 import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
 import type { ApprovalOutcome, ApprovalDecision, ApprovalRequest } from './tools'
@@ -294,6 +299,8 @@ export function registerIpc(): void {
     // 云管平台清单由主进程独立维护（cloud:* ），渲染层的配置副本可能是模块接入前的旧快照；
     // 整份回存时以主进程为准，避免切主题之类的操作把平台配置抹掉
     cfg.cloudPlatforms = cur.cloudPlatforms
+    // 终端偏好同理：渲染层的旧副本可能还没有 termPrefs，缺省保留主进程已存值
+    if (!cfg.termPrefs) cfg.termPrefs = cur.termPrefs
     saveConfig(cfg)
     return { ok: true }
   })
@@ -303,6 +310,11 @@ export function registerIpc(): void {
     const profile = normalizeConnectionProfile(rawProfile)
     const validationError = validateConnectionProfile(profile, true)
     if (validationError) return { ok: false, error: validationError }
+    // DPAPI 的键就是连接 id，而密钥表是全项目共用的一张平表（server:/server-key:/cloud:/provider: 也在这里）。
+    // id 里带 ':' 就能写到别的命名空间上，进而借 conn:test 把别处的口令引出来 —— 只允许安全字符。
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(profile.id || ''))) {
+      return { ok: false, error: '连接 id 只能包含字母、数字、下划线和短横线（≤64 字符）' }
+    }
     const cfg = loadConfig()
     // 连接名全局唯一：agent 按名称寻址，重名会产生歧义
     const dup = cfg.connections.find((c) => c.name === profile.name && c.id !== profile.id)
@@ -675,63 +687,151 @@ export function registerIpc(): void {
   })
 
   // ---------- SSH 服务器（全局注册表：侧栏管理，项目经 serverIds 引用） ----------
-  ipcMain.handle('server:save', (_e, { server, password }: { server: any; password?: string }) => {
-    const name = String(server?.name || '').trim()
-    if (!name || !server?.host || !server?.user) return { ok: false, error: '名称、主机、用户名必填' }
+  const TERM_ENCODINGS = ['utf-8', 'gbk', 'gb18030', 'big5', 'latin1']
+  /** 白名单清洗：渲染层传来的对象不能原样落盘（可能带 UI 临时字段） */
+  const cleanServer = (raw: any) => {
+    const auth = raw?.auth === 'key' ? 'key' : 'password'
+    const s: any = {
+      id: String(raw.id),
+      name: String(raw.name || '').trim(),
+      host: String(raw.host || '').trim(),
+      port: Number(raw.port) || 22,
+      user: String(raw.user || '').trim(),
+      auth
+    }
+    for (const k of ['tag', 'note', 'group', 'cwd'] as const) {
+      const v = String(raw?.[k] ?? '').trim()
+      if (v) s[k] = v
+    }
+    if (auth === 'key') s.keyPath = String(raw.keyPath || '').trim()
+    if (raw.jumpId) s.jumpId = String(raw.jumpId)
+    if (raw.scheme) s.scheme = String(raw.scheme)
+    // 标签标识色：只收 #rrggbb，避免渲染层传入任意 CSS 值
+    if (/^#[0-9a-fA-F]{6}$/.test(String(raw.color || ''))) s.color = String(raw.color).toLowerCase()
+    if (Number(raw.fontSize) >= 8 && Number(raw.fontSize) <= 32) s.fontSize = Number(raw.fontSize)
+    if (TERM_ENCODINGS.includes(raw.encoding)) s.encoding = raw.encoding
+    if (TERM_ENCODINGS.includes(raw.fileEncoding)) s.fileEncoding = raw.fileEncoding
+    return s
+  }
+
+  ipcMain.handle('server:save', (_e, { server, password, keyPassphrase }: { server: any; password?: string; keyPassphrase?: string }) => {
+    const clean = cleanServer(server)
+    const name = clean.name
+    if (!name || !clean.host || !clean.user) return { ok: false, error: '名称、主机、用户名必填' }
     const cfg = loadConfig()
     // 全局名称唯一：agent 按名称寻址，重名跨项目也会产生歧义
-    if (cfg.servers.some((s) => s.name === name && s.id !== server.id)) {
+    if (cfg.servers.some((s) => s.name === name && s.id !== clean.id)) {
       return { ok: false, error: `服务器名「${name}」已存在（agent 按名称寻址，全局不能重名）` }
     }
-    const clean = {
-      id: String(server.id),
-      name,
-      host: String(server.host).trim(),
-      port: Number(server.port) || 22,
-      user: String(server.user).trim(),
-      tag: server.tag ? String(server.tag) : undefined,
-      note: server.note ? String(server.note) : undefined
+    if (clean.auth === 'key') {
+      if (!clean.keyPath) return { ok: false, error: '认证方式为私钥时必须选择私钥文件' }
+      if (!fsSync.existsSync(clean.keyPath)) return { ok: false, error: `私钥文件不存在：${clean.keyPath}` }
     }
+    // 跳板合法性：不能指向自己，且不能形成环（A→B→A），否则建连会无限递归
+    if (clean.jumpId) {
+      if (clean.jumpId === clean.id) return { ok: false, error: '跳板机不能是服务器自身' }
+      const seen = new Set<string>([clean.id])
+      let cur: string | undefined = clean.jumpId
+      while (cur) {
+        if (seen.has(cur)) return { ok: false, error: '跳板机链路存在循环引用' }
+        seen.add(cur)
+        const next = cfg.servers.find((s) => s.id === cur)
+        if (!next) return { ok: false, error: '所选跳板机不存在' }
+        cur = next.jumpId
+      }
+    }
+
     const idx = cfg.servers.findIndex((s) => s.id === clean.id)
     const prev = idx >= 0 ? cfg.servers[idx] : null
     if (idx >= 0) cfg.servers[idx] = clean
     else cfg.servers.push(clean)
     saveConfig(cfg)
-    // 密码单独走 DPAPI；空密码 = 保持已存。只有连接参数（主机/端口/账号）变化才断开
-    // 池化连接——改备注/标签不应杀掉用户开着的终端
+    // 口令单独走 DPAPI；空值 = 保持已存（编辑备注时不该逼用户重填密码）
     if (password) setPassword(`server:${clean.id}`, password)
-    if (!prev || prev.host !== clean.host || prev.port !== clean.port || prev.user !== clean.user) {
-      dropServer(clean.id)
-    }
-    return { ok: true }
+    if (keyPassphrase) setPassword(`server-key:${clean.id}`, keyPassphrase)
+    // 只有影响握手的字段变化才断开池化连接——改备注/分组/字体不应杀掉用户开着的终端
+    const handshakeChanged =
+      !prev ||
+      prev.host !== clean.host ||
+      prev.port !== clean.port ||
+      prev.user !== clean.user ||
+      (prev.auth || 'password') !== clean.auth ||
+      (prev.keyPath || '') !== (clean.keyPath || '') ||
+      (prev.jumpId || '') !== (clean.jumpId || '')
+    if (handshakeChanged) dropServer(clean.id)
+    return { ok: true, id: clean.id }
   })
 
   ipcMain.handle('server:delete', (_e, { id }: { id: string }) => {
     const cfg = loadConfig()
     if (!cfg.servers.some((s) => s.id === id)) return { ok: true }
     cfg.servers = cfg.servers.filter((s) => s.id !== id)
-    // 所有项目解除对该服务器的引用
+    // 引用清理：项目关联 + 其它服务器把它当跳板
     for (const p of cfg.projects) {
       if (Array.isArray(p.serverIds)) p.serverIds = p.serverIds.filter((x) => x !== id)
     }
+    for (const s of cfg.servers) {
+      if (s.jumpId === id) delete s.jumpId
+    }
     saveConfig(cfg)
     deletePassword(`server:${id}`)
+    deletePassword(`server-key:${id}`)
     dropServer(id)
     return { ok: true }
   })
 
-  ipcMain.handle('server:test', async (_e, { server, password }: { server: any; password?: string }) => {
+  ipcMain.handle('server:test', async (_e, { server, password, keyPassphrase }: { server: any; password?: string; keyPassphrase?: string }) => {
     try {
-      const label = await testServer(server, password || undefined)
-      return { ok: true, label }
+      const target = cleanServer(server) as any
+      const usingSaved = !password && !keyPassphrase
+      if (usingSaved && target?.id) {
+        // 用已保存的密码/私钥口令测试时不允许换目标：否则渲染层传一个别的 host，
+        // 主进程就把该服务器 DPAPI 里的凭据发给了攻击者主机（同 conn:test 的防护）
+        const saved = loadConfig().servers.find((s: any) => s.id === target.id)
+        if (!saved) return { ok: false, error: '会话不存在，请重新填写密码或私钥口令后测试' }
+        const sameTarget =
+          saved.host === target.host &&
+          (Number(saved.port) || 22) === (Number(target.port) || 22) &&
+          saved.user === target.user &&
+          (saved.auth || 'password') === (target.auth || 'password') &&
+          (saved.keyPath || '') === (target.keyPath || '') &&
+          (saved.jumpId || '') === (target.jumpId || '')
+        if (!sameTarget) {
+          return { ok: false, error: '使用已保存凭据时不能修改主机/端口/用户/认证方式/跳板；测试新目标请重新填写密码。' }
+        }
+      }
+      const probe = await probeServer(target, password || undefined, keyPassphrase || undefined)
+      return { ok: true, label: probe.label, locale: probe.locale, viaJump: probe.viaJump }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }
   })
 
+  ipcMain.handle('server:forgetHostKey', (_e, { host, port }: { host: string; port: number }) => {
+    return { ok: true, removed: forgetHostKey(host, port) }
+  })
+
+  /** 从 ~/.ssh/config 导入候选（只解析，不落盘；由渲染层勾选后走 server:save） */
+  ipcMain.handle('server:importSshConfig', () => {
+    const r = readSshConfig()
+    const cfg = loadConfig()
+    const existing = new Set(cfg.servers.map((s) => `${s.host}:${s.port}:${s.user}`))
+    return {
+      ok: !r.error,
+      error: r.error,
+      path: r.path,
+      entries: r.entries.map((e) => ({
+        ...e,
+        duplicate: existing.has(`${e.host}:${e.port}:${e.user || ''}`)
+      }))
+    }
+  })
+
   // ---------- 交互式 SSH 终端 ----------
 
-  ipcMain.handle('term:open', async (_e, { termId, serverId }: { termId: string; serverId: string }) => {
+  ipcMain.handle('term:open', async (_e, { termId, serverId, cols, rows, encoding, cwd, term }: {
+    termId: string; serverId: string; cols?: number; rows?: number; encoding?: string; cwd?: string; term?: string
+  }) => {
     // 全局注册表查找：终端不限于当前项目引用的服务器（侧栏可直达任意全局服务器）
     const server = loadConfig().servers.find((s) => s.id === serverId)
     if (!server) return { ok: false, error: '服务器不存在（可能已删除）' }
@@ -744,10 +844,18 @@ export function registerIpc(): void {
             try { win.webContents.send('term:data', { termId, data: d }) } catch { /* 忽略 */ }
           }
         },
-        () => {
+        (info) => {
           if (win && !win.isDestroyed()) {
-            try { win.webContents.send('term:exit', { termId }) } catch { /* 忽略 */ }
+            try { win.webContents.send('term:exit', { termId, code: info?.code ?? null }) } catch { /* 忽略 */ }
           }
+        },
+        {
+          cols,
+          rows,
+          // 会话级编码优先；未指定则用服务器配置（再兜底 utf-8）
+          encoding: (TERM_ENCODINGS.includes(String(encoding)) ? encoding : server.encoding) as any,
+          cwd: cwd ?? server.cwd,
+          term
         }
       )
       return { ok: true }
@@ -825,6 +933,256 @@ export function registerIpc(): void {
     }
   })
 
+  // ---------- SFTP 完整面板（服务器模块：双栏浏览 / 编辑 / 传输队列） ----------
+  // 与上面的 sftp:* 兼容接口并存：旧接口没有进度、没有错误分类，新面板一律走这里。
+  /** 传输任务：jobId → 取消控制器。渲染层关标签/取消按钮都通过 sftp:cancel 中止 */
+  const transfers = new Map<string, AbortController>()
+
+  const sendProgress = (jobId: string, p: Record<string, any>) => {
+    if (!jobId || !win || win.isDestroyed()) return
+    try { win.webContents.send('sftp:progress', { jobId, ...p }) } catch { /* 窗口已关 */ }
+  }
+
+  const requireServer = (serverId: string) => {
+    const s = findServer(serverId)
+    if (!s) throw new Error('服务器不存在（可能已删除）')
+    return s
+  }
+
+  /** 统一包一层：所有 SFTP handler 都返回 { ok, error }，渲染层不用 try/catch 满天飞 */
+  const wrap = <T>(fn: () => Promise<T>) => fn().then((r) => ({ ok: true as const, ...(r as any) })).catch((e: any) => ({ ok: false as const, error: String(e?.message || e) }))
+
+  ipcMain.handle('sftp:ls', (_e, { serverId, path: p }: { serverId: string; path: string }) =>
+    wrap(async () => ({ path: p, entries: await sftpOps.listDir(requireServer(serverId), p || '.') })))
+
+  ipcMain.handle('sftp:stat', (_e, { serverId, path: p }: { serverId: string; path: string }) =>
+    wrap(async () => ({ stat: await sftpOps.statPath(requireServer(serverId), p) })))
+
+  ipcMain.handle('sftp:home', (_e, { serverId }: { serverId: string }) =>
+    wrap(async () => ({ path: await sftpOps.homeDir(requireServer(serverId)) })))
+
+  ipcMain.handle('sftp:mkdir', (_e, { serverId, path: p }: { serverId: string; path: string }) =>
+    wrap(async () => {
+      const s = requireServer(serverId)
+      await sftpOps.mkdir(s, p)
+      appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: p, detail: 'sftp 新建目录' })
+      return {}
+    }))
+
+  ipcMain.handle('sftp:rename', (_e, { serverId, from, to }: { serverId: string; from: string; to: string }) =>
+    wrap(async () => {
+      const s = requireServer(serverId)
+      if (!from || !to) throw new Error('路径不能为空')
+      await sftpOps.rename(s, from, to)
+      appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: `${from} → ${to}`, detail: 'sftp 重命名' })
+      return {}
+    }))
+
+  ipcMain.handle('sftp:remove', (_e, { serverId, path: p, recursive }: { serverId: string; path: string; recursive?: boolean }) =>
+    wrap(async () => {
+      const s = requireServer(serverId)
+      const n = await sftpOps.removePath(s, p, recursive !== false)
+      appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: p, detail: `sftp 删除（${n} 项）` })
+      return { removed: n }
+    }))
+
+  ipcMain.handle('sftp:chmod', (_e, { serverId, path: p, mode }: { serverId: string; path: string; mode: number }) =>
+    wrap(async () => {
+      const s = requireServer(serverId)
+      await sftpOps.chmod(s, p, Number(mode))
+      appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: p, detail: `sftp chmod ${(Number(mode) || 0).toString(8)}` })
+      return {}
+    }))
+
+  ipcMain.handle('sftp:read', (_e, { serverId, path: p, maxBytes, encoding }: { serverId: string; path: string; maxBytes?: number; encoding?: string }) =>
+    wrap(async () => sftpOps.readText(requireServer(serverId), p, Math.min(Number(maxBytes) || 2 * 1024 * 1024, 8 * 1024 * 1024), encoding || 'utf-8')))
+
+  ipcMain.handle('sftp:write', (_e, { serverId, path: p, content, encoding }: { serverId: string; path: string; content: string; encoding?: string }) =>
+    wrap(async () => {
+      const s = requireServer(serverId)
+      const bytes = await sftpOps.writeText(s, p, String(content ?? ''), encoding || 'utf-8')
+      appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: p, detail: `sftp 保存（${bytes} 字节）` })
+      return { bytes }
+    }))
+
+  /** 本地文件/目录选择：上传前选源，或下载前选目标目录 */
+  ipcMain.handle('sftp:pick', async (_e, { mode }: { mode: 'files' | 'folder' }) => {
+    if (!win) return { ok: false, canceled: true }
+    const r = await dialog.showOpenDialog(win, {
+      properties: mode === 'folder' ? ['openDirectory', 'createDirectory'] : ['openFile', 'multiSelections']
+    })
+    return r.canceled ? { ok: false, canceled: true } : { ok: true, paths: r.filePaths }
+  })
+
+  ipcMain.handle('sftp:uploadPaths', async (_e, { serverId, localPaths, remoteDir, jobId }: {
+    serverId: string; localPaths: string[]; remoteDir: string; jobId: string
+  }) => {
+    const ctrl = new AbortController()
+    transfers.set(jobId, ctrl)
+    // 进度统一带 kind：渲染层重载后队列是空的，也还能判断这条是上传还是下载
+    const emit = (p: Record<string, any>) => sendProgress(jobId, { kind: 'upload', ...p })
+    try {
+      const s = requireServer(serverId)
+      let files = 0
+      let bytes = 0
+      const list = (localPaths || []).filter(Boolean)
+      for (let i = 0; i < list.length; i++) {
+        if (ctrl.signal.aborted) throw new Error('已取消')
+        const lp = list[i]
+        emit({ phase: 'start', index: i, fileCount: list.length, name: path.basename(lp) })
+        const r = await sftpOps.upload(
+          s,
+          lp,
+          remoteDir || '.',
+          // p.total 是当前文件的字节数，不能覆盖成文件数：文件数走 fileCount
+          (p) => emit({ ...p, phase: 'progress', index: i, fileCount: list.length }),
+          ctrl.signal
+        )
+        files += r.files
+        bytes += r.bytes
+        appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: `${lp} → ${remoteDir}`, detail: 'sftp 上传' })
+      }
+      emit({ phase: 'done', files, bytes })
+      return { ok: true, files, bytes }
+    } catch (e: any) {
+      const msg = String(e?.message || e)
+      emit({ phase: msg.includes('取消') ? 'canceled' : 'error', error: msg })
+      return { ok: false, error: msg }
+    } finally {
+      transfers.delete(jobId)
+    }
+  })
+
+  ipcMain.handle('sftp:downloadPaths', async (_e, { serverId, remotePaths, localDir, jobId }: {
+    serverId: string; remotePaths: string[]; localDir: string; jobId: string
+  }) => {
+    const ctrl = new AbortController()
+    transfers.set(jobId, ctrl)
+    // 进度统一带 kind：渲染层重载后队列是空的，也还能判断这条是上传还是下载
+    const emit = (p: Record<string, any>) => sendProgress(jobId, { kind: 'download', ...p })
+    try {
+      const s = requireServer(serverId)
+      // 本地目标必须是绝对路径，否则一律落到 userData/downloads，避免写进应用目录
+      let dir = String(localDir || '')
+      if (!/^[a-zA-Z]:[\\/]/.test(dir) && !dir.startsWith('\\\\')) {
+        dir = path.join(app.getPath('userData'), 'downloads')
+      }
+      fsSync.mkdirSync(dir, { recursive: true })
+      let files = 0
+      let bytes = 0
+      const list = (remotePaths || []).filter(Boolean)
+      for (let i = 0; i < list.length; i++) {
+        if (ctrl.signal.aborted) throw new Error('已取消')
+        const rp = list[i]
+        emit({ phase: 'start', index: i, fileCount: list.length, name: path.posix.basename(rp) })
+        const r = await sftpOps.download(
+          s,
+          rp,
+          dir,
+          (p) => emit({ ...p, phase: 'progress', index: i, fileCount: list.length }),
+          ctrl.signal
+        )
+        files += r.files
+        bytes += r.bytes
+        appendAudit({ kind: 'tool', actor: 'human', conn: s.name, target: `${rp} → ${dir}`, detail: 'sftp 下载' })
+      }
+      emit({ phase: 'done', files, bytes })
+      return { ok: true, files, bytes, dir }
+    } catch (e: any) {
+      const msg = String(e?.message || e)
+      emit({ phase: msg.includes('取消') ? 'canceled' : 'error', error: msg })
+      return { ok: false, error: msg }
+    } finally {
+      transfers.delete(jobId)
+    }
+  })
+
+  ipcMain.handle('sftp:cancel', (_e, { jobId }: { jobId: string }) => {
+    const c = transfers.get(jobId)
+    if (c) c.abort()
+    return { ok: true, found: !!c }
+  })
+
+  // ---------- 本地目录（SFTP 双栏的本地侧） ----------
+  // 不复用 editor:listDir：那是编辑器工作区语义（限制在打开的根目录内），
+  // 而这里要能自由浏览整机磁盘，两者权限模型不同，混用迟早出事。
+  ipcMain.handle('local:roots', async () => {
+    const roots: { name: string; path: string }[] = []
+    for (let c = 67; c <= 90; c++) {
+      const p = `${String.fromCharCode(c)}:\\`
+      try {
+        await fs.access(p)
+        roots.push({ name: `${String.fromCharCode(c)}:`, path: p })
+      } catch { /* 盘符不存在 */ }
+    }
+    const home = app.getPath('home')
+    const quick = [
+      { name: '桌面', path: app.getPath('desktop') },
+      { name: '下载', path: app.getPath('downloads') },
+      { name: '文档', path: app.getPath('documents') }
+    ]
+    return { ok: true, roots, home, quick }
+  })
+
+  ipcMain.handle('local:ls', async (_e, { dir }: { dir: string }) => {
+    try {
+      const d = path.resolve(String(dir || '.'))
+      const items = await fs.readdir(d, { withFileTypes: true })
+      const capped = items.slice(0, 5000)
+      const entries = await Promise.all(
+        capped.map(async (it) => {
+          let size = 0
+          let mtime = 0
+          try {
+            const st = await fs.stat(path.join(d, it.name))
+            size = st.size
+            mtime = st.mtimeMs
+          } catch { /* 权限不足/符号链接失效：仍列出，只是没有大小 */ }
+          return {
+            name: it.name,
+            path: path.join(d, it.name),
+            isDir: it.isDirectory(),
+            hidden: it.name.startsWith('.'),
+            size,
+            mtime
+          }
+        })
+      )
+      entries.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name, 'zh-CN', { numeric: true }) : a.isDir ? -1 : 1))
+      return { ok: true, dir: d, parent: path.dirname(d), entries, truncated: items.length > capped.length }
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  ipcMain.handle('local:open', async (_e, { p }: { p: string }) => {
+    const err = await shell.openPath(String(p))
+    return err ? { ok: false, error: err } : { ok: true }
+  })
+
+  /** 通用单选文件对话框（私钥文件选择等）；文件 filters 由调用方给 */
+  ipcMain.handle('dialog:pickFile', async (_e, { title, filters }: { title?: string; filters?: { name: string; extensions: string[] }[] }) => {
+    if (!win) return { ok: false, canceled: true }
+    const r = await dialog.showOpenDialog(win, {
+      title: title || '选择文件',
+      properties: ['openFile'],
+      filters: filters && filters.length ? filters : undefined
+    })
+    return r.canceled || !r.filePaths.length ? { ok: false, canceled: true } : { ok: true, path: r.filePaths[0] }
+  })
+
+  /** 保存文本到本地（终端「保存输出日志」用）：走系统保存对话框，用户自己选位置 */
+  ipcMain.handle('local:saveText', async (_e, { content, suggested }: { content: string; suggested?: string }) => {
+    if (!win) return { ok: false, canceled: true }
+    const r = await dialog.showSaveDialog(win, {
+      defaultPath: suggested || 'terminal.log',
+      filters: [{ name: '日志', extensions: ['log', 'txt'] }, { name: '所有文件', extensions: ['*'] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    await fs.writeFile(r.filePath, String(content ?? ''), 'utf8')
+    return { ok: true, path: r.filePath }
+  })
+
   ipcMain.handle('shell:showInFolder', (_e, { p }: { p: string }) => {
     if (/^[a-zA-Z]:[\\/]/.test(String(p)) || String(p).startsWith('\\\\')) shell.showItemInFolder(String(p))
     return { ok: true }
@@ -851,11 +1209,27 @@ export function registerIpc(): void {
     // MySQL/OB 连接为原生 autocommit，无需额外提交
     try {
       const adapter = getAdapter(profile, cfg.instantClientDir, sessionKey)
+      const head = (sql.trim().replace(/^(--[^\n]*\r?\n|\/\*[\s\S]*?\*\/|\s)+/, '').match(/^[a-zA-Z]+/)?.[0] || '').toUpperCase()
+      // COMMIT/ROLLBACK 绝不能走 query()：query 内部的 ensure() 在探活失败时会静默换一条新连接，
+      // 新连接上没有事务，COMMIT 会"成功"，而原事务已被服务端按断连回滚 —— 界面报"已提交"、数据全丢。
+      // 走适配器自己的 commit()/rollback()，它们能在连接被重置时返回 false。
+      if ((head === 'COMMIT' || head === 'ROLLBACK') && adapter.commit) {
+        const done = head === 'COMMIT' ? await adapter.commit() : (adapter.rollback ? await adapter.rollback() : false)
+        if (!done) {
+          const msg = '事务已因连接重置（查询超时或网络断开）在服务端回滚，没有可提交的内容。请刷新数据后重做。'
+          appendAudit({ kind: 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)', detail: '事务控制', sql, mode: 'human', approved: false, error: msg })
+          return { ok: false, error: msg }
+        }
+        appendAudit({ kind: 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)', detail: '事务控制', sql, mode: 'human', approved: true })
+        return {
+          ok: true,
+          result: { columns: [], rows: [], rowCount: 0, truncated: false, ms: 0, kind: v.kind, message: head === 'COMMIT' ? '已提交(COMMIT)' : '已回滚(ROLLBACK)' }
+        }
+      }
       const r = await adapter.query(sql, 500, 60_000)
       appendAudit({ kind: v.ok ? 'sql.read' : 'sql.write', actor: 'human', conn: profile.name, target: '(查询窗口)', detail: '查询窗口执行', sql, rows: r.rowCount, ms: r.ms, mode: 'human', approved: v.ok ? undefined : true })
       // 控制台执行了 DDL：该连接的元数据缓存全部失效（表/列结构可能已变）
       if (v.kind === 'ddl') metaDropConn(connId)
-      const head = (sql.trim().replace(/^(--[^\n]*\r?\n|\/\*[\s\S]*?\*\/|\s)+/, '').match(/^[a-zA-Z]+/)?.[0] || '').toUpperCase()
       // 写语句没有结果网格，给一条明确的成功/事务状态消息
       let message: string | undefined
       if (head === 'COMMIT') {
@@ -911,11 +1285,8 @@ export function registerIpc(): void {
       // where 是渲染层可控的自由文本：必须过守门器（按只读 SELECT 分类），
       // 防多语句 / INTO OUTFILE / 写子句借道本通道绕过门控（此前为裸拼，属旁路）
       if (cond) {
-        // 注释符/多语句/UNION 直接拒绝：即便分类器方言化，也不允许筛选条件里出现可改变语句边的构造
-        if (/;|--|#|\/\*|\bunion\b|\binto\b/i.test(cond)) {
-          appendAudit({ kind: "sql.read", actor: "human", conn: profile.name, target: `${s}.${t}`, detail: "obj:data 筛选条件含危险构造", sql: cond.slice(0, 2000), error: '拦截: 注释/多语句/UNION/INTO' })
-          return { ok: false, error: '筛选条件不能包含注释符、分号、UNION 或 INTO 子句' }
-        }
+        // 只交给方言化的分类器判断：它在剥注释/识别字符串字面量上是对的，
+        // 外层的 `#|--` 正则会把 Oracle 合法标识符 COL# 和含 `--` 的普通字符串一起误杀
         const verdict = classifySql(`SELECT 1 WHERE ${cond}`, dialectOf(profile.type))
         if (!verdict.ok || verdict.kind !== "read") {
           appendAudit({ kind: "sql.read", actor: "human", conn: profile.name, target: `${s}.${t}`, detail: "obj:data 筛选条件被守门器拒绝", sql: cond.slice(0, 2000), error: `拦截: ${verdict.reason || verdict.kind}` })
@@ -1081,6 +1452,9 @@ export function registerIpc(): void {
     let applied = 0
     try {
       if (!isOracle) await adapter.query('START TRANSACTION', 1, 10_000)
+      // Oracle 没有语句级回滚：先打保存点，中途失败时把本批已执行的 UPDATE 撤回，
+      // 否则它们会留在事务里，等用户下一次成功保存/提交时被一起落库（而界面报的是"保存失败"）
+      else await adapter.query('SAVEPOINT sqlpilot_grid', 1, 10_000)
       for (let i = 0; i < edits.length; i++) {
         const e = edits[i]
         if (!colOk(String(e.col))) throw new Error(`列 "${e.col}" 不可更新（只读列或非法标识符）`)
@@ -1091,6 +1465,7 @@ export function registerIpc(): void {
             1, 30_000, { v: e.value, rid: e.rid }
           )
           if (r.rowCount === 0) conflicts.push(i)
+          else if (r.rowCount > 1) throw new Error(`rowid 定位命中 ${r.rowCount} 行，数据异常，本批已全部撤销`)
           else applied++
         } else {
           if (!Array.isArray(e.keys) || e.keys.length !== keyCols.length) throw new Error('行键值缺失，请刷新后重试')
@@ -1100,6 +1475,8 @@ export function registerIpc(): void {
             1, 30_000, [e.value, ...e.keys]
           )
           if (r.rowCount === 0) conflicts.push(i)
+          // >1 说明唯一键已失效（应用外改过索引）或键值失真：宁可整批失败，也不能批量误改
+          else if (r.rowCount > 1) throw new Error(`行键命中 ${r.rowCount} 行（唯一键可能已变更），本批已全部撤销，请刷新后重试`)
           else applied++
         }
       }
@@ -1120,9 +1497,12 @@ export function registerIpc(): void {
     } catch (e: any) {
       if (!isOracle) {
         try { await adapter.query('ROLLBACK', 1, 10_000) } catch { /* 忽略 */ }
+      } else if (applied > 0) {
+        // 撤回到保存点：本批已执行的 UPDATE 全部撤销，避免"保存失败但改了一半"
+        try { await adapter.query('ROLLBACK TO SAVEPOINT sqlpilot_grid', 1, 10_000) } catch { /* 忽略 */ }
       }
-      appendAudit({ kind: 'sql.write', actor: 'human', conn: profile.name, target: `${s}.${t}`, detail: '网格编辑保存失败', mode: 'human', approved: false, error: String(e?.message || e).slice(0, 200) })
-      return { ok: false, error: String(e?.message || e) }
+      appendAudit({ kind: 'sql.write', actor: 'human', conn: profile.name, target: `${s}.${t}`, detail: `网格编辑保存失败（已撤销 ${applied} 处已应用的修改）`, mode: 'human', approved: false, error: String(e?.message || e).slice(0, 200) })
+      return { ok: false, error: String(e?.message || e), applied: 0, rolledBack: true }
     }
   })
 
@@ -1160,6 +1540,49 @@ export function registerIpc(): void {
       return { ok: true, path: r.filePath, rows: res.rows.length, truncated: res.rows.length >= EXPORT_MAX_ROWS }
     } catch (e: any) {
       appendAudit({ kind: 'tool', actor: 'human', conn: profile.name, detail: '导出查询结果失败', sql: sql.slice(0, 500), error: String(e?.message || e).slice(0, 200) })
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  // ---------- 会话产物（右侧「产物」面板） ----------
+  // 完整结果集只在面板打开时按 id 取；不进对话上下文
+  ipcMain.handle('artifact:get', (_e, { id }: { id: string }) => getArtifact(String(id || '')))
+
+  // 图片预览：读成 data URL 交给渲染层（dev 下页面是 http://localhost，直接引用 file:// 会被拦）
+  ipcMain.handle('artifact:imageDataUrl', async (_e, { path: p }: { path: string }) => {
+    const IMG = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.avif', '.svg'])
+    try {
+      const abs = path.resolve(String(p || ''))
+      const ext = path.extname(abs).toLowerCase()
+      if (!IMG.has(ext)) return { ok: false, error: `不支持的图片类型：${ext || '(无扩展名)'}` }
+      const st = await fs.stat(abs)
+      if (!st.isFile()) return { ok: false, error: '不是文件' }
+      if (st.size > 16 * 1024 * 1024) return { ok: false, error: `图片过大（${(st.size / 1048576).toFixed(1)} MB，上限 16 MB）` }
+      const buf = await fs.readFile(abs)
+      const mime = ext === '.svg' ? 'image/svg+xml' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : `image/${ext.slice(1)}`
+      return { ok: true, url: `data:${mime};base64,${buf.toString('base64')}`, size: st.size }
+    } catch (e: any) {
+      return { ok: false, error: e?.code === 'ENOENT' ? '文件不存在（可能已被移动或删除）' : String(e?.message || e) }
+    }
+  })
+
+  // 面板里导出 CSV：数据已在内存（面板拿到的行），不再回库重跑一遍
+  ipcMain.handle('artifact:exportCsv', async (_e, { columns, rows, name }: { columns: string[]; rows: any[][]; name?: string }) => {
+    if (!Array.isArray(columns) || !columns.length) return { ok: false, error: '没有可导出的列' }
+    if (!Array.isArray(rows)) return { ok: false, error: '没有可导出的行' }
+    const ts = new Date()
+    const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(ts.getHours()).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}${String(ts.getSeconds()).padStart(2, '0')}`
+    // 文件名来自产物标题（可能含 SQL 片段）：去掉 Windows 非法字符并限长
+    const base = String(name || '查询结果').replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 60) || '查询结果'
+    const opts = { title: '导出为 CSV', defaultPath: `${base}_${stamp}.csv`, filters: [{ name: 'CSV（Excel 可直接打开）', extensions: ['csv'] }] }
+    const r = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      const csv = buildCsv(columns, rows, columns)
+      await fs.writeFile(r.filePath, csv, 'utf8')
+      appendAudit({ kind: 'tool', actor: 'human', conn: '产物面板', target: r.filePath, detail: `导出产物 ${rows.length} 行 × ${columns.length} 列`, rows: rows.length })
+      return { ok: true, path: r.filePath, rows: rows.length }
+    } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }
   })
@@ -2092,9 +2515,20 @@ export function registerIpc(): void {
     // 用已保存的 Key 测试时，目标地址/协议/模型必须取自主进程配置：
     // 否则渲染层只要传已有 id + 攻击者 baseUrl，就能把真实 Key 发到任意主机
     const saved = loadConfig().providers.find((p) => p.id === provider?.id)
-    const target = typed ? provider : saved
-    if (!target) return { ok: false, error: '未找到该提供商的已保存配置' }
-    const key = typed || getPassword(`provider:${target.id}`)
+    // WorkBuddy 的凭据不在表单里（由受管桥现场注入），未保存时也必须能测
+    let target = typed || provider?.vendor === 'workbuddy' ? provider : saved
+    if (!target) return { ok: false, error: '请先填写一次 API Key，或先保存该提供商' }
+    let key = typed || getPassword(`provider:${target.id}`)
+    // WorkBuddy：端点与令牌由受管桥给（配置里不需要明文 Key）
+    if (target.vendor === 'workbuddy') {
+      try {
+        const r = await resolveWbProvider({ ...target, apiKey: typed || '' })
+        target = r
+        key = r.apiKey
+      } catch (e: any) {
+        return { ok: false, error: String(e?.message || e) }
+      }
+    }
     if (!key) return { ok: false, error: '没有可用的 API Key（未填写且无历史存储）' }
     const base = String(target.baseUrl || '').replace(/\/+$/, '')
     const url = target.protocol === 'anthropic' ? `${base}/v1/messages` : `${base}/chat/completions`
@@ -2128,6 +2562,64 @@ export function registerIpc(): void {
       return { ok: false, error: `请求失败：${e?.message || e}` }
     }
   })
+
+  // ---------- 拉取模型列表（OpenAI 兼容端点，本地桥/中转站都用得上） ----------
+  // 与 provider:test 同样的凭据规则：填了新 Key 才允许用表单里的地址；否则地址与 Key 都取自主进程配置
+  ipcMain.handle('provider:listModels', async (_e, { provider, apiKey }: { provider: any; apiKey?: string }) => {
+    const typed = apiKey && apiKey.trim()
+    const saved = loadConfig().providers.find((p) => p.id === provider?.id)
+    let target = typed || provider?.vendor === 'workbuddy' ? provider : saved
+    if (!target) return { ok: false, error: '先填写一次 API Key 再拉取（未保存的提供商无法复用历史 Key）' }
+    let key = typed || getPassword(`provider:${target.id}`)
+    if (target.vendor === 'workbuddy') {
+      try {
+        const r = await resolveWbProvider({ ...target, apiKey: typed || '' })
+        target = r
+        key = r.apiKey
+      } catch (e: any) {
+        return { ok: false, error: String(e?.message || e) }
+      }
+    }
+    const base = String(target.baseUrl || '').replace(/\/+$/, '')
+    if (!base) return { ok: false, error: 'Base URL 为空' }
+    if (target.protocol === 'anthropic') return { ok: false, error: 'Anthropic 协议没有 /models 列表接口，请手填型号' }
+    try {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 20_000)
+      let res: any
+      try {
+        res = await fetch(`${base}/models`, {
+          headers: key ? { Authorization: `Bearer ${key}`, Accept: 'application/json' } : { Accept: 'application/json' },
+          signal: ctrl.signal
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+      const text = await res.text()
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status} ← ${text.slice(0, 300)}` }
+      let models: string[] = []
+      try {
+        const j = JSON.parse(text)
+        const arr: any[] = Array.isArray(j?.data) ? j.data : Array.isArray(j?.models) ? j.models : []
+        models = arr.map((m: any) => String(m?.id || m?.name || '')).filter(Boolean)
+      } catch {
+        return { ok: false, error: '返回的不是 JSON（可能不是 OpenAI 兼容端点）' }
+      }
+      if (!models.length) return { ok: false, error: '模型列表为空（端点可能不是 OpenAI 兼容，或令牌没有权限）' }
+      appendAudit({ kind: 'tool', actor: 'human', detail: `拉取模型列表：${base}（${models.length} 个）` })
+      return { ok: true, models: models.slice(0, 500) }
+    } catch (e: any) {
+      return { ok: false, error: `请求失败：${e?.message || e}` }
+    }
+  })
+
+  // ---------- WorkBuddy 受管桥（模型通道） ----------
+  // 桥是随包分发的子进程：这里只暴露启停与状态，令牌不经过渲染层
+  ipcMain.handle('wb:status', () => bridgeStatus())
+  ipcMain.handle('wb:start', () => startBridge())
+  ipcMain.handle('wb:stop', () => stopBridge())
+  ipcMain.handle('wb:login', () => openLoginDashboard())
+  ipcMain.handle('wb:models', () => listBridgeModels())
 
   // ---------- 云管平台（目前对接 OceanBase OCP） ----------
   // 平台配置与密码分离：配置走 config.json，密码走 DPAPI；所有业务接口统一返回 { ok, data?, error? }
@@ -2523,6 +3015,8 @@ export async function shutdown(): Promise<void> {
     pendingPreviews.delete(id)
   }
   persistSessions()
+  // WorkBuddy 桥：连同子进程树一起收掉，别在后台留一个监听 879x 的进程
+  try { stopBridge() } catch { /* 已退出 */ }
   await closeAll()
   await sshCloseAll()
 }

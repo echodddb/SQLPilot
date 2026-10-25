@@ -423,15 +423,21 @@ onBeforeUnmount(() => {
 })
 
 // ---------- 单元格格式化 ----------
+/** 本地时区的 YYYY-MM-DD HH:mm:ss(.SSS)：用 toISOString() 会把 UTC 写回 DATE 列，东八区整体偏 8 小时 */
+function fmtLocal(v: Date, ms = false): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  const base = `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())} ${p(v.getHours())}:${p(v.getMinutes())}:${p(v.getSeconds())}`
+  return ms ? `${base}.${String(v.getMilliseconds()).padStart(3, '0')}` : base
+}
 function fmt(v: any): string {
   if (v === null || v === undefined) return '∅'
-  if (v instanceof Date) return v.toISOString().replace('T', ' ').slice(0, 19)
+  if (v instanceof Date) return fmtLocal(v)
   if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
 }
 function full(v: any): string {
   if (v === null || v === undefined) return 'NULL'
-  if (v instanceof Date) return v.toISOString().replace('T', ' ').slice(0, 23)
+  if (v instanceof Date) return fmtLocal(v, true)
   if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
 }

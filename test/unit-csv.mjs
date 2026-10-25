@@ -8,6 +8,10 @@ function eq(actual, expected, why) {
   assert.equal(actual, expected, `${why}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`)
   passed++
 }
+function ok(cond, why) {
+  assert.ok(cond, why)
+  passed++
+}
 
 // ---------- 公式注入防护 ----------
 eq(csvCell('=cmd|\'/c calc\'!A0'), "'=cmd|'/c calc'!A0", '等号公式加前缀')
@@ -44,5 +48,19 @@ passed++
 eq(csvCell('-2+3'), "'-2+3", '负号+算术表达式必须加前缀')
 eq(csvCell('-123.45'), '-123.45', '负数不加前缀')
 eq(csvCell('-1,234.50'), '"-1,234.50"', '千分位负数不加前缀（含逗号按 CSV 规则加引号）')
+
+// ---------- 重名列：SELECT a.id, b.id 必须各取一列，不能都落到第一个 ----------
+const dupCols = ['id', 'id', 'name']
+eq(
+  buildCsv(dupCols, [[1, 2, 'x']], ['id', 'id']),
+  '\uFEFFid,id\r\n1,2\r\n',
+  '重名列按选择顺序各占一列'
+)
+let dupThrew = false
+try { buildCsv(dupCols, [[1, 2, 'x']], ['id', 'id', 'id']) } catch { dupThrew = true }
+ok(dupThrew, '超选重名列（没有第三列）必须报错而不是静默少导')
+let missThrew = false
+try { buildCsv(['a'], [[1]], ['nope']) } catch { missThrew = true }
+ok(missThrew, '找不到的列必须报错，不能静默丢弃')
 
 console.log(`csv 单测：${passed} 组断言全部通过`)

@@ -74,6 +74,9 @@ export class MySqlAdapter implements DbAdapter {
         database: this.profile.database || undefined,
         connectTimeout: 10000,
         charset: 'utf8mb4',
+        // BIGINT 主键超过 2^53 时按 Number 解析会丢精度：网格回写 WHERE id=? 会命中错误行
+        supportBigNumbers: true,
+        bigNumberStrings: true,
         ssl: sslOptions(this.profile)
       }).then((c) => {
         this.conn = c
@@ -245,18 +248,11 @@ export class MySqlAdapter implements DbAdapter {
   private async queryOnce(sql: string, maxRows: number, timeoutMs: number, binds?: any[]): Promise<QueryResult> {
     let c = await this.ensure()
     const started = Date.now()
-    let res: [any[], any]
-    /** 单次尝试：query + 超时哨兵（重试路径也必须包，慢库上无限挂） */
-    const attempt = (): Promise<[any[], any]> => {
-      const qp = c.query({ sql, rowsAsArray: true, values: binds }) as Promise<[any[], any]>
-      qp.catch(() => {}) // 超时后被放弃的查询若再报错，避免 unhandled rejection
-      return Promise.race([
-        qp,
-        new Promise<never>((_, rej) => setTimeout(() => rej(queryTimeoutError(timeoutMs)), timeoutMs))
-      ])
-    }
+    /** 单次尝试：流式取数 + 超时哨兵（重试路径也必须包，慢库上无限挂） */
+    const attempt = () => this.streamQuery(c, sql, maxRows, timeoutMs, binds)
+    let out: { rows: any[][]; columns: string[]; truncated: boolean; affectedRows: number }
     try {
-      res = await attempt()
+      out = await attempt()
     } catch (e: any) {
       if ((e as any)?.code === 'SQLPILOT_QUERY_TIMEOUT') {
         await this.destroy()
@@ -270,26 +266,87 @@ export class MySqlAdapter implements DbAdapter {
         }
         await this.destroy()
         c = await this.ensure()
-        res = await attempt()
+        out = await attempt()
       } else {
         throw e
       }
     }
-    const fields: any[] = (res[1] as any)?.columns || (res[1] as any) || []
-    const columns = Array.isArray(fields) ? fields.map((f: any) => f.name) : []
-    // 写语句（INSERT/UPDATE/DELETE/DDL）返回 OkPacket 而非行数组：rowCount 取 affectedRows
-    const raw = res[0] as any
-    const isRows = Array.isArray(raw)
-    const allRows: any[][] = isRows ? raw : []
-    const okPacket = isRows ? null : raw
-    const truncated = allRows.length > maxRows
+    // 有列 = 行结果集；没有列 = OkPacket（写语句/DDL），行数取 affectedRows
+    const isRows = out.columns.length > 0
     return {
-      columns,
-      rows: truncated ? allRows.slice(0, maxRows) : allRows,
-      rowCount: isRows ? allRows.length : Number(okPacket?.affectedRows ?? 0),
+      columns: out.columns,
+      rows: out.rows,
+      rowCount: isRows ? out.rows.length : out.affectedRows,
       ms: Date.now() - started,
-      truncated
+      truncated: out.truncated
     }
+  }
+
+  /** 流式取数：mysql2 的 query() 会把结果集整份物化到 JS 数组，
+   *  一条 `SELECT * FROM 大表`（控制台 rowsAsArray + 500 行上限）就能把主进程内存打爆。
+   *  这里走底层连接的流式事件，达到上限后只标记 truncated、不再入数组 —— 内存有上界。
+   *  底层连接拿不到时退回旧的缓冲实现，保持行为不退化。 */
+  private streamQuery(
+    c: mysql.Connection,
+    sql: string,
+    maxRows: number,
+    timeoutMs: number,
+    binds?: any[]
+  ): Promise<{ rows: any[][]; columns: string[]; truncated: boolean; affectedRows: number }> {
+    const core: any = (c as any).connection
+    if (!core || typeof core.query !== 'function') {
+      const qp = c.query({ sql, rowsAsArray: true, values: binds }) as unknown as Promise<[any[], any]>
+      qp.catch(() => {})
+      return Promise.race([
+        qp.then(([rows, fields]: [any[], any]) => {
+          const cols: any[] = (fields as any)?.columns || (fields as any) || []
+          const list = Array.isArray(rows) ? rows : []
+          return {
+            rows: list.slice(0, maxRows),
+            columns: Array.isArray(cols) ? cols.map((f: any) => f.name) : [],
+            truncated: list.length > maxRows,
+            affectedRows: Array.isArray(rows) ? 0 : Number((rows as any)?.affectedRows ?? 0)
+          }
+        }),
+        new Promise<never>((_, rej) => setTimeout(() => rej(queryTimeoutError(timeoutMs)), timeoutMs))
+      ])
+    }
+    return new Promise((resolve, reject) => {
+      const rows: any[][] = []
+      let columns: string[] = []
+      let truncated = false
+      let affectedRows = 0
+      let settled = false
+      const finish = (err?: any) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (err) reject(err)
+        else resolve({ rows, columns, truncated, affectedRows })
+      }
+      const timer = setTimeout(() => {
+        try { core.destroy() } catch { /* 忽略 */ }
+        finish(queryTimeoutError(timeoutMs))
+      }, timeoutMs)
+      let q: any
+      try {
+        q = core.query({ sql, rowsAsArray: true, values: binds })
+      } catch (e) {
+        finish(e)
+        return
+      }
+      q.on('fields', (f: any[]) => { columns = (f || []).map((x: any) => x.name) })
+      q.on('result', (row: any) => {
+        if (Array.isArray(row)) {
+          if (rows.length < maxRows) rows.push(row)
+          else truncated = true
+        } else if (row && typeof row.affectedRows === 'number') {
+          affectedRows = row.affectedRows
+        }
+      })
+      q.on('error', (e: any) => finish(e))
+      q.on('end', () => finish())
+    })
   }
 
   async close(): Promise<void> {

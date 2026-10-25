@@ -57,8 +57,11 @@ watch(theme, () => { void nextTick(repaintNav) }, { immediate: true })
 
 /** 一级功能模块：只做导航切换，模块内容渲染在 App.vue 按 module 分发 */
 const modules = [
-  { key: 'agent', icon: '◆', label: 'AI 助手', desc: 'AI 对话 · SSH 终端（会话/项目/连接管理）' },
+  { key: 'agent', icon: '◆', label: 'AI 助手', desc: 'AI 对话 · 会话/项目/连接管理' },
   { key: 'db', icon: '🗄', label: '数据库', desc: '数据库控制台：对象树 / 查询窗口 / 表数据编辑 / 库信息（独立模块，标签页保活）' },
+  // 「服务器」是一级模块，入口就在这一列；侧栏底部的「服务器」分组只是全局注册表（AI 助手模块内），
+  // 点某台机器会切到本模块并直接开终端，两者并不冲突
+  { key: 'server', icon: '🖥', label: '服务器', desc: '服务器：SSH 多标签终端 / SFTP 双栏传输 / 跳板机与编码适配（独立模块，终端保活）' },
   { key: 'cloud', icon: '☁', label: '云管平台', desc: '云管平台：OceanBase（OCP 接口）+ Oracle（直连查 v$ 视图）' },
   { key: 'editor', icon: '✎', label: '文本编辑', desc: 'Notepad++ 式多标签文本编辑器：大文件秒开 / 语法高亮 / 正则替换 / 编码转换' },
   { key: 'masking', icon: '⛨', label: '脱敏工具', desc: '本地脱敏 Oracle AWR 等运维文件，规则按文件类型独立配置' },

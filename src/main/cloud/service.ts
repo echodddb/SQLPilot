@@ -352,8 +352,25 @@ export async function testPlatform(input: CloudPlatform, password?: string): Pro
   note?: string
   privileges?: { dba: boolean; sysdba: boolean; sysoper: boolean }
 }> {
-  const eff = password && password !== '' ? password : input.id ? getPassword(secretKey(input.id)) : ''
+  const usingSaved = !(password && password !== '')
+  const eff = usingSaved ? (input.id ? getPassword(secretKey(input.id)) : '') : password!
   if (!eff) return { ok: false, error: '请填写密码' }
+  if (usingSaved) {
+    // 用已保存密码测试时不允许换目标：否则渲染层传一个别的 host/baseUrl，
+    // 主进程就把 DPAPI 里的管理员口令发给了攻击者主机（conn:test 已有同款校验）
+    const saved = (loadConfig().cloudPlatforms || []).find((x) => x.id === input.id)
+    if (!saved) return { ok: false, error: '平台不存在，请重新填写密码后测试' }
+    const sameTarget =
+      saved.type === input.type &&
+      String(saved.host || '') === String(input.host || '') &&
+      Number(saved.port || 0) === Number(input.port || 0) &&
+      String(saved.username || '') === String(input.username || '') &&
+      String(saved.baseUrl || '') === String(input.baseUrl || '') &&
+      String(saved.serviceName || '') === String(input.serviceName || '')
+    if (!sameTarget) {
+      return { ok: false, error: '使用已保存密码时不能修改地址/端口/用户名/服务名；测试新目标请先填写密码。' }
+    }
+  }
   if (input.type === 'oracle') {
     const r = await oraTestConn(input as CloudOraclePlatform, eff)
     return { ok: r.ok, error: r.error, version: r.version, mode: r.mode, downgraded: r.downgraded, note: r.note, privileges: r.privileges }

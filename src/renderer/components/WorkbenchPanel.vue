@@ -227,6 +227,9 @@ watch(() => store.pendingKillTermServer, (sid) => {
 // 全局服务器未必被当前项目引用，但 shell 只按 server.id 连接，允许直接打开
 watch(() => store.pendingTermServer, (s) => {
   if (!s) return
+  // 服务器模块的入口由 ServerView 消费：两个消费者抢同一个单槽会各自开一个 shell，
+  // 而本面板在切模块时会被卸载，后建的那个 shell 无人持有也无人关闭
+  if (store.module !== 'agent') return
   store.pendingTermServer = null
   openTerm(s)
 }, { immediate: true })

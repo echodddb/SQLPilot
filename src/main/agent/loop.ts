@@ -817,6 +817,8 @@ export async function runTurn(
           connections: sessionConnections(cfg2, project2),
           globalClientDir,
           mode: sess.mode,
+          // 审批弹窗可能挂几分钟，期间用户可能把会话切到只读/计划模式：门控必须读实时值
+          getMode: () => sess.mode,
           sessionApproved: sess.sessionApproved,
           requestApproval: (req) => deps.requestApproval(req, sessionId),
           project: project2 ? { id: project2.id, name: project2.name, rootPath: project2.rootPath } : undefined,

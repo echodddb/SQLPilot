@@ -63,6 +63,55 @@ function countFiles(dir: string): number {
   return n
 }
 
+/** 内置技能包版本：改 SKILL.md 内容后 +1（仅用于标记，不覆盖用户已改的技能） */
+const BUILTIN_VERSION = 1
+
+function copySkillTree(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true })
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    const ss = path.join(src, e.name)
+    const dd = path.join(dest, e.name)
+    const st = fs.lstatSync(ss)
+    // 符号链接一律跳过：包内容不该能指到技能目录外
+    if (st.isSymbolicLink()) continue
+    if (st.isDirectory()) copySkillTree(ss, dd)
+    else if (st.isFile()) fs.copyFileSync(ss, dd)
+  }
+}
+
+/**
+ * 播种随包分发的内置技能（resources/skills/<id>/SKILL.md）。
+ * 规则：目标目录已存在就跳过——用户可能改过、也可能删了不想要；
+ * 只有第一次启动（或新增技能）才写入。返回本次新增的 id，便于日志排查。
+ */
+export function seedBuiltinSkills(): { added: string[]; source: string } {
+  const src = path.join(app.getAppPath(), 'resources', 'skills')
+  const added: string[] = []
+  try {
+    if (!fs.existsSync(src)) return { added, source: src }
+    fs.mkdirSync(skillsDir(), { recursive: true })
+    for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue
+      // 技能 ID 必须能过 skillDir 的白名单，否则会抛错中断整轮播种
+      if (!/^[A-Za-z0-9_-]+$/.test(e.name)) continue
+      const target = path.join(skillsDir(), e.name)
+      if (fs.existsSync(target)) continue
+      copySkillTree(path.join(src, e.name), target)
+      added.push(e.name)
+    }
+    if (added.length) {
+      const marker = path.join(skillsDir(), '.builtin.json')
+      let state: any = {}
+      try { state = JSON.parse(fs.readFileSync(marker, 'utf8')) } catch { state = {} }
+      for (const id of added) state[id] = BUILTIN_VERSION
+      fs.writeFileSync(marker, JSON.stringify(state, null, 2), 'utf8')
+    }
+  } catch {
+    /* 播种失败（只读盘/权限）不能挡住应用启动，用户可以自己导入技能 */
+  }
+  return { added, source: src }
+}
+
 export function listSkills(): SkillMeta[] {
   try {
     const out: SkillMeta[] = []

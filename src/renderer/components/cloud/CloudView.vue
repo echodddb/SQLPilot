@@ -337,6 +337,8 @@ async function openNative(): Promise<void> {
 
 // 总览页 60s 静默刷新：告警与任务变化能自己浮上来，其它页面保持手动刷新避免打断阅读
 let timer: ReturnType<typeof setInterval> | null = null
+/** 初始化是异步的：await 回来时组件可能已经卸载，别再建定时器 */
+let disposed = false
 /** Ctrl/Cmd+K 唤起全局搜索（仅云管模块挂载时生效） */
 function onKey(e: KeyboardEvent): void {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
@@ -347,17 +349,22 @@ function onKey(e: KeyboardEvent): void {
 onMounted(async () => {
   document.addEventListener('keydown', onKey)
   await initCloud()
+  // 初始化要走真实探活（秒级），期间用户可能已经切走、组件被卸载：
+  // 此时再建定时器就没人清理了，会一直打接口并且每进出一次模块多一个
+  if (disposed) return
   timer = setInterval(() => {
     if (document.visibilityState !== 'visible') return
     if (cloud.view === 'overview' && cloud.status?.ok && !cloud.loading) void load()
   }, 60000)
 })
 onBeforeUnmount(() => {
+  disposed = true
   cancelPick()
   cancelOraPick()
   document.removeEventListener('keydown', onKey)
   cloud.searchOpen = false
   if (timer) clearInterval(timer)
+  timer = null
 })
 </script>
 

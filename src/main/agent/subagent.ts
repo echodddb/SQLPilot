@@ -196,6 +196,8 @@ export async function runSubagent(input: SubagentRunInput): Promise<{ ok: boolea
     connections: input.connections,
     globalClientDir: input.globalClientDir,
     mode: childMode,
+    // 审批等待期间父会话可能降级：gateWrite 用这个闭包取实时模式
+    getMode: liveChildMode,
     sessionApproved: input.sessionApproved,
     requestApproval: (req: ApprovalRequest) =>
       input.requestApproval({ ...req, origin: `子代理 ${input.profile.name}` }, input.sessionId),

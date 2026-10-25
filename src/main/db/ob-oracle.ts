@@ -93,7 +93,13 @@ export class ObOracleAdapter implements DbAdapter {
     if (this.conn) {
       const connection = this.conn
       this.conn = null
-      try { await connection.end() } catch { /* 忽略 */ }
+      // 必须立即断 socket：end() 是优雅关闭，会等正在执行的那条查询（往往正是超时卡住的那条）跑完，
+      // 超时路径会因此永远返回不了，串行链被永久占住（mysql 适配器同样处理，见 mysql.ts destroy）
+      try {
+        const anyConn = connection as any
+        if (typeof anyConn.destroy === 'function') anyConn.destroy()
+        else await connection.end()
+      } catch { /* 忽略 */ }
     }
   }
 
@@ -267,6 +273,19 @@ export class ObOracleAdapter implements DbAdapter {
       if (!c) return false
       try {
         await c.query('COMMIT')
+        return true
+      } catch {
+        return false
+      }
+    })
+  }
+
+  async rollback(): Promise<boolean> {
+    return this.runSerial(async () => {
+      const c = this.conn
+      if (!c) return false
+      try {
+        await c.query('ROLLBACK')
         return true
       } catch {
         return false

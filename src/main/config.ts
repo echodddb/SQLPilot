@@ -24,7 +24,7 @@ export function defaultTermPrefs(): TermPrefs {
 }
 
 /** 缺失/非法字段逐个回填，避免旧配置里半套 termPrefs 让 xterm 拿到 undefined */
-function normalizeTermPrefs(v: any): TermPrefs {
+export function normalizeTermPrefs(v: any): TermPrefs {
   const d = defaultTermPrefs()
   if (!v || typeof v !== 'object') return d
   const num = (x: any, min: number, max: number, fb: number) => {
@@ -138,6 +138,8 @@ export function projectServers(cfg: AppConfig, project: ProjectConfig | undefine
 
 export function saveConfig(cfg: AppConfig): void {
   cfg.masking = normalizeMaskingConfig(cfg.masking)
+  // 渲染层可能回存半套/旧版 termPrefs（模块接入前拿的配置副本），落盘前统一补齐
+  cfg.termPrefs = normalizeTermPrefs(cfg.termPrefs)
   const encrypted = secretsAvailable()
   const hasKeys = cfg.providers.some((p) => !!p.apiKey)
   // 不允许静默降级为明文：加密不可用时拒绝保存密钥（连接/项目等非密钥配置仍可保存）

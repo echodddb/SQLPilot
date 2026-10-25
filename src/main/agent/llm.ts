@@ -1,6 +1,7 @@
 import type { ChatMsg, ProviderConfig, ToolCall, ThinkingEffort } from '../types'
 import type { ToolDef } from '../tools'
 import { findVendor, applyOpenAiThinking, anthropicThinking } from './catalog'
+import { resolveProvider } from '../workbuddy'
 
 export interface LlmStreamEvents {
   onText?: (t: string) => void
@@ -389,8 +390,10 @@ export async function callLlm(
   ev: LlmStreamEvents = {},
   options: LlmCallOptions = {}
 ): Promise<LlmResponse> {
-  if (provider.protocol === 'anthropic') {
-    return callAnthropic(provider, system, history, tools, ev, options.signal, options.effort, options.preview)
+  // WorkBuddy：配置里只有厂商名，真正的回环端口与本地令牌由受管桥提供（首次会懒启动）
+  const p = provider.vendor === 'workbuddy' ? await resolveProvider(provider) : provider
+  if (p.protocol === 'anthropic') {
+    return callAnthropic(p, system, history, tools, ev, options.signal, options.effort, options.preview)
   }
-  return callOpenAi(provider, system, history, tools, ev, options.signal, options.effort, options.preview)
+  return callOpenAi(p, system, history, tools, ev, options.signal, options.effort, options.preview)
 }

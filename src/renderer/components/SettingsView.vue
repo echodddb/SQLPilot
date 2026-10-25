@@ -43,14 +43,14 @@
 
           <div class="frow">
             <div class="fitem" style="flex:2">
-              <label>Base URL{{ editP.vendor === 'custom' ? '（自定义必填）' : '' }}</label>
-              <input type="text" v-model="editP.baseUrl" :disabled="editP.vendor !== 'custom'" :placeholder="currentVendor.baseUrl || 'https://…/v1'" />
+              <label>Base URL{{ editP.vendor === 'custom' ? '（自定义必填）' : currentVendor.editableBaseUrl ? '（本地桥端口可改）' : '' }}</label>
+              <input type="text" v-model="editP.baseUrl" :disabled="editP.vendor !== 'custom' && !currentVendor.editableBaseUrl" :placeholder="currentVendor.baseUrl || 'https://…/v1'" />
             </div>
             <div class="fitem" style="flex:2">
               <label>模型（可从列表选择，也可手动填写任意型号 ID）</label>
               <input type="text" v-model="editP.model" list="model-presets" :placeholder="currentVendor.models[0]?.id || '模型名，如 glm-5.3'" />
               <datalist id="model-presets">
-                <option v-for="m in currentVendor.models" :key="m.id" :value="m.id">
+                <option v-for="m in modelOptions" :key="m.id" :value="m.id">
                   {{ m.label }}{{ m.note ? ` — ${m.note}` : '' }}
                 </option>
               </datalist>
@@ -64,11 +64,32 @@
           <div class="frow">
             <div class="fitem" style="flex:2">
               <label>API Key</label>
-              <input type="password" v-model="editP.apiKey" :placeholder="!editP.id ? 'sk-…' : editP.hasKey ? '（已保存，留空则沿用）' : '（尚未保存 Key）'" />
+              <!-- WorkBuddy 不需要 Key：令牌由主进程生成并注入本机桥，渲染层拿不到也不需要它 -->
+              <div v-if="editP.vendor === 'workbuddy'" class="wb-keyhint">无需填写 —— 本机桥令牌由 SQLPilot 自动注入（不落配置、不进渲染层）</div>
+              <input
+                v-else
+                type="password"
+                v-model="editP.apiKey"
+                :placeholder="!editP.id ? 'sk-…' : editP.hasKey ? '（已保存，留空则沿用）' : '（尚未保存 Key）'"
+              />
             </div>
-            <div class="fitem" style="flex:0 0 auto; align-self: flex-end">
+            <div class="fitem" style="flex:0 0 auto; align-self: flex-end; display:flex; gap:6px">
+              <button class="btn ghost" :disabled="listing" title="从 Base URL 的 /models 拉取（OpenAI 兼容端点）" @click="doListModels" style="margin-bottom:1px">{{ listing ? '拉取中…' : '拉取模型' }}</button>
               <button class="btn" :disabled="testing" @click="doTestProvider" style="margin-bottom:1px">{{ testing ? '测试中…' : '测试模型' }}</button>
             </div>
+          </div>
+          <div v-if="currentVendor.note" class="vendor-note">{{ currentVendor.note }}</div>
+
+          <!-- WorkBuddy：桥是随包分发的子进程，这里只管启停与登录 -->
+          <div v-if="editP.vendor === 'workbuddy'" class="wb-box">
+            <span class="wb-dot" :class="{ on: wb.running, wait: wb.starting }"></span>
+            <span class="wb-state">
+              {{ wb.running ? `桥已就绪 · 127.0.0.1:${wb.port}` : wb.starting ? '正在启动（首次要拉起 WorkBuddy 取授权，约几秒）…' : (wb.error || '桥未启动') }}
+            </span>
+            <span style="flex:1"></span>
+            <button class="btn ghost" :disabled="wb.starting" @click="onWbStart">{{ wb.running ? '重启' : '启动' }}</button>
+            <button class="btn ghost" title="WorkBuddy 未登录时打开授权页" @click="onWbLogin">登录 WorkBuddy</button>
+            <button v-if="wb.running" class="btn ghost" @click="onWbStop">停止</button>
           </div>
           <div class="test-result" v-if="testMsg" :style="{ color: testOk ? 'var(--green)' : 'var(--red)', whiteSpace: 'pre-wrap' }">{{ testMsg }}</div>
 
@@ -228,7 +249,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 const emit = defineEmits<{ (e: 'close'): void }>()
 import { store, MODES, toPlain, pushNotice } from '../store'
 import { VENDOR_CATALOG } from '../../main/agent/catalog'
@@ -243,8 +264,11 @@ const audit = ref<any[]>([])
 const skills = ref<any[]>([])
 const skillEditor = ref<any>(null)
 const testing = ref(false)
+const listing = ref(false)
 const testOk = ref(false)
 const testMsg = ref('')
+/** 从 /models 拉回来的型号（本地桥/中转站的真实目录），与厂商预设合并后给 datalist */
+const pulledModels = ref<string[]>([])
 
 async function doTestProvider() {
   testing.value = true
@@ -265,6 +289,70 @@ const activeProviderId = computed(() => store.cfg?.activeProviderId)
 
 const currentVendor = computed(() => VENDOR_CATALOG.find((v) => v.id === editP.value.vendor) || VENDOR_CATALOG[0])
 
+// ---------- WorkBuddy 受管桥 ----------
+const wb = ref<{ running: boolean; starting: boolean; port: number; baseUrl: string; error?: string }>({
+  running: false,
+  starting: false,
+  port: 0,
+  baseUrl: ''
+})
+let wbTimer: ReturnType<typeof setInterval> | null = null
+
+async function wbRefresh(): Promise<void> {
+  try {
+    wb.value = await window.sqlpilot.wbStatus()
+  } catch { /* 主进程不可用时不打扰 */ }
+}
+async function onWbStart(): Promise<void> {
+  wb.value = { ...wb.value, starting: true, error: '' }
+  wb.value = await window.sqlpilot.wbStart()
+  testOk.value = wb.value.running
+  testMsg.value = wb.value.running ? `✓ 桥已就绪：${wb.value.baseUrl}` : `✗ ${wb.value.error || '桥启动失败'}`
+}
+async function onWbStop(): Promise<void> {
+  wb.value = await window.sqlpilot.wbStop()
+  testMsg.value = ''
+}
+async function onWbLogin(): Promise<void> {
+  const r = await window.sqlpilot.wbLogin()
+  if (r.ok && r.url) await window.sqlpilot.openExternal(r.url)
+  else testOk.value = false
+  if (!r.ok) testMsg.value = `✗ ${r.error || '打开登录页失败'}`
+}
+
+/** datalist 选项 = 厂商预设 + 从端点拉回来的真实型号（预设里没有的追加在后面） */
+const modelOptions = computed(() => {
+  const out: { id: string; label: string; note?: string }[] = currentVendor.value.models.map((m) => ({
+    id: m.id,
+    label: m.label,
+    note: m.note
+  }))
+  const known = new Set(out.map((o) => o.id))
+  for (const id of pulledModels.value) if (!known.has(id)) out.push({ id, label: id })
+  return out
+})
+
+/** 拉取模型列表：本地桥（WorkBuddy 等）与中转站的可用型号以服务端返回为准 */
+async function doListModels() {
+  listing.value = true
+  testMsg.value = ''
+  try {
+    const r = await window.sqlpilot.listProviderModels({ ...editP.value }, editP.value.apiKey || undefined)
+    testOk.value = r.ok
+    if (r.ok) {
+      pulledModels.value = r.models || []
+      testMsg.value = `✓ 拉到 ${pulledModels.value.length} 个模型，点型号输入框即可选择`
+    } else {
+      testMsg.value = `✗ ${r.error}`
+    }
+  } catch (e: any) {
+    testOk.value = false
+    testMsg.value = `✗ ${e?.message || e}`
+  } finally {
+    listing.value = false
+  }
+}
+
 /** 当前所选模型的厂商预设上下文窗口（K），作为表单占位与默认值 */
 function presetContextK(): number {
   const m = currentVendor.value.models.find((x) => x.id === editP.value.model)
@@ -277,6 +365,8 @@ function vendorLabel(id: string | undefined) {
 
 function onVendorChange() {
   const v = currentVendor.value
+  pulledModels.value = []
+  testMsg.value = ''
   editP.value.protocol = v.protocol
   editP.value.baseUrl = v.baseUrl
   // 型号联动：仅当为空或原本就是某厂商预设值时才预填，手填的型号不动
@@ -287,6 +377,25 @@ function onVendorChange() {
   const isAutoName = (n: string) => !n || VENDOR_CATALOG.some((x) => vendorLabel(x.id) === n)
   if (isAutoName(editP.value.name)) editP.value.name = vendorLabel(v.id)
 }
+
+// WorkBuddy 选中时轮询桥状态（设置浮窗关掉就停）
+watch(
+  () => editP.value.vendor,
+  (v) => {
+    if (wbTimer) {
+      clearInterval(wbTimer)
+      wbTimer = null
+    }
+    if (v === 'workbuddy') {
+      void wbRefresh()
+      wbTimer = setInterval(wbRefresh, 2500)
+    }
+  },
+  { immediate: true }
+)
+onBeforeUnmount(() => {
+  if (wbTimer) clearInterval(wbTimer)
+})
 
 onMounted(() => {
   loadAudit()
@@ -375,7 +484,8 @@ async function saveProvider() {
     if (!p.model && v.models.length) p.model = v.models[0].id
   }
   if (!p.name || !p.baseUrl || !p.model) { window.sqlpilot.uiAlert('名称、Base URL、模型均必填'); return }
-  if (!p.id && !p.apiKey) { window.sqlpilot.uiAlert('请填写 API Key'); return }
+  // WorkBuddy 的凭据由受管桥提供，不需要（也不该）在表单里填 Key
+  if (!p.id && !p.apiKey && p.vendor !== 'workbuddy') { window.sqlpilot.uiAlert('请填写 API Key'); return }
   if (!p.id) p.id = `p_${Date.now()}`
   if (!p.contextK || p.contextK <= 0) p.contextK = undefined
   // 空 Key = 沿用已存（主进程对空值不覆盖 secrets；渲染层拿到的是掩码，没有明文可回填）
@@ -543,6 +653,48 @@ async function doImportUrl() {
 .frow { display: flex; gap: 10px; margin-bottom: 10px; }
 .fitem { flex: 1; min-width: 0; }
 .fitem label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+/* WorkBuddy 桥状态条：绿点=就绪，黄点=启动中，灰点=未启动 */
+.wb-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-card-hover) 60%, transparent);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.wb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.wb-dot.on { background: var(--green); box-shadow: 0 0 8px 1px color-mix(in srgb, var(--green) 60%, transparent); }
+.wb-dot.wait { background: var(--yellow); animation: wbBlink 1s ease-in-out infinite; }
+@keyframes wbBlink { 50% { opacity: 0.3; } }
+.wb-state { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 52%; }
+/* WorkBuddy 的 API Key 位置：说明「不用填」，高度与输入框对齐，避免整行跳一下 */
+.wb-keyhint {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+/* 厂商说明（本地桥的起桥步骤、端口、令牌来源）：选中就显示，避免用户对着表单猜 */
+.vendor-note {
+  margin: -2px 0 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
 .lock-cfg {
   display: flex;
   align-items: center;

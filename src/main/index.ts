@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { registerIpc, bindWindow, shutdown } from './ipc'
+import { seedBuiltinSkills } from './skills'
 import { dirsFromArgv, filesFromArgv, setPendingOpens, setPendingWorkspace } from './editor'
 import { appendAudit } from './audit'
 import { loadConfig } from './config'
@@ -164,6 +165,8 @@ if (!gotLock) {
     setPendingOpens(filesFromArgv(process.argv.slice(1)))
     const dirs = dirsFromArgv(process.argv.slice(1))
     if (dirs.length) setPendingWorkspace(dirs[0])
+    // 内置技能包：只在技能库里还没有时播种（用户的改动不会被覆盖）
+    seedBuiltinSkills()
     registerIpc()
     createWindow()
     app.on('activate', () => {

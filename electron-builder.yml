@@ -6,6 +6,13 @@ directories:
 files:
   - dist/**/*
   - package.json
+  # WorkBuddy 受管桥（MIT）：随包分发，用户不需要另装 dsh / Node
+  - vendor/workbuddy-bridge/**/*
+  # 内置技能包（首启播种到 userData/skills，用户可改可删）
+  - resources/skills/**/*
+# 桥是 .mjs 子进程，必须解包到 app.asar.unpacked 才能被 spawn
+asarUnpack:
+  - vendor/workbuddy-bridge/**
 # 生产依赖(oracledb/mysql2)由 builder 自动收进包；vue 已被 vite 打包无需分发
 asar: true
 win:

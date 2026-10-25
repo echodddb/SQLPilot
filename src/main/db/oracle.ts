@@ -22,6 +22,7 @@ function queryTimeoutError(ms: number): Error {
 interface OraConnection {
   execute<T = any>(sql: string, binds?: any, options?: any): Promise<OraExecuteResult<T>>
   commit(): Promise<void>
+  rollback(): Promise<void>
   close(): Promise<void>
   callTimeout: number
 }
@@ -290,6 +291,16 @@ export class OracleAdapter implements DbAdapter {
       const c = this.conn
       if (!c) return false
       await c.commit()
+      return true
+    })
+  }
+
+  /** 回滚当前事务；false = 连接已被重置（事务已由服务端回滚，无需再回滚） */
+  async rollback(): Promise<boolean> {
+    return this.runSerial(async () => {
+      const c = this.conn
+      if (!c) return false
+      await c.rollback()
       return true
     })
   }

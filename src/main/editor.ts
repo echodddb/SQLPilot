@@ -164,7 +164,7 @@ function stripBom(buf: Buffer, enc: EncodingId): { buf: Buffer; bomLen: number }
   return { buf, bomLen: 0 }
 }
 
-/** 编码探测：BOM 优先；无 BOM 时用严格 UTF-8 解码试探（截断采样用 stream 模式避免误判） */
+/** 编码探测：BOM 优先；无 BOM 时用严格 UTF-8 解码**扫全文件**（只看前 1MB 会把"前段英文、后面中文"的 GBK 文件误判成 UTF-8） */
 export function detectEncoding(buf: Buffer): EncodingId {
   if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return 'utf8bom'
   if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return 'utf16le'
@@ -172,7 +172,12 @@ export function detectEncoding(buf: Buffer): EncodingId {
   if (buf.length === 0) return 'utf8'
   try {
     const dec = new TextDecoder('utf-8', { fatal: true })
-    dec.decode(buf.subarray(0, Math.min(buf.length, 1 << 20)), { stream: true })
+    const STEP = 1 << 20
+    for (let i = 0; i < buf.length; i += STEP) {
+      // stream 模式：分块边界上的半个字符会被缓存到下一块，不会误报
+      dec.decode(buf.subarray(i, Math.min(i + STEP, buf.length)), { stream: true })
+    }
+    // 不 flush：文件末尾若被截断在字符中间，也不该把整个文件判成 GBK
     return 'utf8'
   } catch {
     // 中文 Windows 的 ANSI 文件绝大多数是 GBK；GB18030 是其超集但解码更慢，先按 GBK
@@ -345,6 +350,11 @@ export async function openPath(file: string, forceEncoding?: EncodingId): Promis
   try {
     const st = await fsp.stat(file)
     if (!st.isFile()) return { ok: false, error: '不是文件：' + file }
+    // 先按大小分流：readFile 对 >2GiB 直接抛 ERR_FS_FILE_TOO_LARGE（原始英文报错），
+    // 而窗口模式本来就是给这种大日志设计的；这里给一条能看懂的提示而不是让它炸在 Buffer 上限上
+    if (st.size > 1_500 * 1024 * 1024) {
+      return { ok: false, error: `文件 ${(st.size / 1024 / 1024 / 1024).toFixed(2)} GB，超过编辑器 1.5GB 上限；请用「服务器」模块的 tail 或命令行分段查看` }
+    }
     const raw = await fsp.readFile(file)
     const encoding = forceEncoding || detectEncoding(raw)
     const stripped = stripBom(raw, encoding)
@@ -533,12 +543,38 @@ export async function saveDoc(p: {
   encoding?: EncodingId
   eol?: EolId
   markRecentLine?: { line: number; col: number }
-}): Promise<{ ok: boolean; doc?: EditorDocMeta; error?: string }> {
+}): Promise<{ ok: boolean; doc?: EditorDocMeta; error?: string; conflict?: boolean }> {
   const d = docs.get(p.id)
   if (!d) return { ok: false, error: '文档已关闭' }
   const target = p.path || d.path
   if (!target) return { ok: false, error: '尚未指定保存路径' }
   try {
+    // 保存前确认磁盘上还是「我打开时那一份」：同事/发布脚本改过就提示，不能静默覆盖
+    if (!p.path && d.mtimeMs > 0) {
+      try {
+        const cur = await fsp.stat(target)
+        if (Math.abs(cur.mtimeMs - d.mtimeMs) > 1) {
+          const win = BrowserWindow.getFocusedWindow()
+          const choice = win
+            ? dialog.showMessageBoxSync(win, {
+                type: 'warning',
+                title: '文件已在外部修改',
+                message: `${path.basename(target)} 已被其他程序修改。`,
+                detail: '继续保存会用编辑器里的内容覆盖磁盘上的新内容。',
+                buttons: ['仍然覆盖', '取消保存'],
+                defaultId: 1,
+                cancelId: 1,
+                noLink: true
+              })
+            : 1
+          if (choice !== 0) {
+            return { ok: false, conflict: true, error: '文件已被外部修改，已取消保存（关闭后重新打开可载入最新内容）' }
+          }
+        }
+      } catch {
+        /* stat 失败 = 文件已被删除，按新建写入 */
+      }
+    }
     const enc = p.encoding || d.encoding
     const eol = p.eol || d.eol
     // 统一换行后再编码：内核里的 text 一律使用 \n
