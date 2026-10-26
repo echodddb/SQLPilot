@@ -12,7 +12,7 @@
  *   · 合并/统计/备份类接口多数要求显式时间窗，缺参会 400。
  */
 
-import { OcpClient, OcpError, toTopSql, type TopSqlRow } from './ocp'
+import { OcpClient, OcpError, ocpAtLeast, toTopSql, type TopSqlRow } from './ocp'
 
 const num = (v: any): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
 const str = (v: any): string => (v === undefined || v === null ? '' : String(v))
@@ -240,8 +240,9 @@ export interface TenantRowLock {
   info: string
 }
 
-/** 行锁等待：GET /tenants/{tid}/rowlock */
+/** 行锁等待：GET /tenants/{tid}/rowlock（4.3 无此端点，直接返回空） */
 export async function ocpTenantRowLocks(client: OcpClient, clusterId: number, tenantId: number): Promise<TenantRowLock[]> {
+  if (!(await ocpAtLeast(client, 4, 4))) return []
   const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/rowlock`, { query: { page: 1, size: 200 } })
   return arr(d?.contents).map((o: any) => ({
     sessionId: num(o?.sessionId ?? o?.transSessionId),
@@ -510,8 +511,9 @@ export interface TenantGatherOverview {
   buckets: { days: number; count: number; percent: number }[]
 }
 
-/** 统计信息概况：GET /api/v2/stats/gather/overview/{tid} */
+/** 统计信息概况：GET /api/v2/stats/gather/overview/{tid}（4.3 无此模块） */
 export async function ocpTenantGatherOverview(client: OcpClient, tenantId: number): Promise<TenantGatherOverview> {
+  if (!(await ocpAtLeast(client, 4, 4))) return { totalTables: 0, buckets: [] }
   const d = await client.call<any>(`/api/v2/stats/gather/overview/${tenantId}`)
   return {
     totalTables: num(d?.totalCount),
@@ -529,8 +531,9 @@ export interface TenantGatherTable {
   rowCount: number
 }
 
-/** 表统计信息：GET /api/v2/stats/gather/table/{tid}（可按 dbName 过滤） */
+/** 表统计信息：GET /api/v2/stats/gather/table/{tid}（可按 dbName 过滤；4.3 无此模块） */
 export async function ocpTenantGatherTables(client: OcpClient, tenantId: number, dbName?: string): Promise<TenantGatherTable[]> {
+  if (!(await ocpAtLeast(client, 4, 4))) return []
   const d = await client.call<any>(`/api/v2/stats/gather/table/${tenantId}`, {
     query: { page: 1, size: 1000, ...(dbName ? { dbName } : {}) }
   })
@@ -552,8 +555,9 @@ export interface TenantGatherWindow {
   duration: number
 }
 
-/** 自动收集窗口：GET /api/v2/stats/gather/auto/{tid} */
+/** 自动收集窗口：GET /api/v2/stats/gather/auto/{tid}（4.3 无此模块） */
 export async function ocpTenantGatherAuto(client: OcpClient, tenantId: number): Promise<TenantGatherWindow[]> {
+  if (!(await ocpAtLeast(client, 4, 4))) return []
   const d = await client.call<any>(`/api/v2/stats/gather/auto/${tenantId}`)
   return arr(d?.contents).map((o: any) => ({
     windowName: str(o?.windowName),
@@ -573,8 +577,9 @@ export interface TenantGatherPref {
   range: string
 }
 
-/** 收集策略参数（estimate_percent / degree / cascade …）：GET /api/v2/stats/gather/prefs/{tid} */
+/** 收集策略参数（estimate_percent / degree / cascade …）：GET /api/v2/stats/gather/prefs/{tid}（4.3 无此模块） */
 export async function ocpTenantGatherPrefs(client: OcpClient, tenantId: number): Promise<TenantGatherPref[]> {
+  if (!(await ocpAtLeast(client, 4, 4))) return []
   const d = await client.call<any>(`/api/v2/stats/gather/prefs/${tenantId}`)
   return arr(d?.contents).map((o: any) => {
     const r = o?.valueRange || {}
@@ -763,6 +768,8 @@ export interface TenantTde {
  * 注意：开启 TDE 不可逆，SqlPilot 只做展示，不提供开启入口。
  */
 export async function ocpTenantTde(client: OcpClient, clusterId: number, tenantId: number): Promise<TenantTde | null> {
+  // /tenants/tde 是 4.4 才有的端点；4.3 上会落到 SPA 路由（200 + HTML），直接跳过
+  if (!(await ocpAtLeast(client, 4, 4))) return null
   const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/tde`, { query: { page: 1, size: 200 } })
   const hit = arr(d?.contents).find((o: any) => num(o?.tenantId) === tenantId)
   if (!hit) return null

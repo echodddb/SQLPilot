@@ -1,7 +1,7 @@
 {
   "name": "sqlpilot",
-  "version": "0.1.0",
-  "description": "SQLPilot - 数据库 DBA AI 助手 (Oracle / OceanBase / MySQL)",
+  "version": "1.0.1",
+  "description": "SQLPilot - 面向 DBA 的数据库智能助手：AI 对话、SQL 控制台、SSH 服务器与云管平台",
   "main": "dist/main/index.js",
   "author": "echodddb",
   "license": "GPL-3.0-only",

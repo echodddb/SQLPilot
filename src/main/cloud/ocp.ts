@@ -320,18 +320,18 @@ export function normalizeBase(raw: string): string {
   if (!b) throw new Error('OCP 地址为空')
   if (!/^https?:\/\//i.test(b)) b = 'http://' + b
   let u: URL
-  try { u = new URL(b) } catch { throw new Error(`OCP 地址格式不正确：${raw}（示例 http://192.168.1.130:8080）`) }
+  try { u = new URL(b) } catch { throw new Error(`OCP 地址格式不正确：${raw}（示例 http://192.168.1.100:8080）`) }
   const host = u.hostname.replace(/^\[|\]$/g, '')
-  if (!host) throw new Error(`OCP 地址缺少主机名：${raw}（示例 http://192.168.1.130:8080）`)
+  if (!host) throw new Error(`OCP 地址缺少主机名：${raw}（示例 http://192.168.1.100:8080）`)
   // 主机名合法性：非法字符（引号/零宽/中文）会让 DNS 直接查不到，不如在这里说清楚
   const isV6 = host.includes(':')
   const isV4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) && host.split('.').every((n) => Number(n) <= 255)
   const isName = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/i.test(host)
   if (!isV6 && !isName) {
-    throw new Error(`OCP 地址不合法：主机名「${host}」含非法字符（粘贴时带入的引号或零宽字符很常见），请重新输入，例如 http://192.168.1.130:8080`)
+    throw new Error(`OCP 地址不合法：主机名「${host}」含非法字符（粘贴时带入的引号或零宽字符很常见），请重新输入，例如 http://192.168.1.100:8080`)
   }
   if (!isV6 && !isV4 && /^[\d.]+$/.test(host)) {
-    throw new Error(`OCP 地址不合法：${host} 不是有效 IP，请检查点号与端口，例如 http://192.168.1.130:8080`)
+    throw new Error(`OCP 地址不合法：${host} 不是有效 IP，请检查点号与端口，例如 http://192.168.1.100:8080`)
   }
   const segs = u.pathname.split('/').filter(Boolean)
   while (segs.length && SPA_ROUTES.has(segs[segs.length - 1].toLowerCase())) segs.pop()
@@ -376,7 +376,7 @@ function requestRaw(
     req.on('error', (e: any) => {
       const host = url.host
       const msg = e?.code === 'ECONNREFUSED' ? `无法连接 ${host}：端口被拒绝（OCP 服务未启动或端口不对）`
-        : e?.code === 'ENOTFOUND' || e?.code === 'EAI_AGAIN' ? `无法解析主机名「${url.hostname}」：本机 DNS 查不到它。内网请直接填 IP（如 http://192.168.1.130:8080），或确认该主机名在 hosts/DNS 中`
+        : e?.code === 'ENOTFOUND' || e?.code === 'EAI_AGAIN' ? `无法解析主机名「${url.hostname}」：本机 DNS 查不到它。内网请直接填 IP（如 http://192.168.1.100:8080），或确认该主机名在 hosts/DNS 中`
           : e?.code === 'EHOSTUNREACH' || e?.code === 'ENETUNREACH' ? `无法路由到 ${host}：检查网段 / VPN`
             : e?.code === 'ETIMEDOUT' ? `连接 ${host} 超时：检查防火墙与端口`
               : e?.code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || /self signed|certificate/i.test(String(e?.message)) ? 'OCP 证书校验失败：可在平台配置中勾选「跳过证书校验」'
@@ -468,7 +468,7 @@ export class OcpClient {
     if (keyRes.status !== 200) {
       // 302/404 + HTML 基本都是地址填成了网页路由（用户常粘浏览器地址栏的 /login）
       if ([301, 302, 303, 307, 308, 404].includes(keyRes.status)) {
-        throw new OcpError(`访问 OCP 接口失败（HTTP ${keyRes.status}）：当前地址 ${this.baseUrl} 可能带了网页路径或不是 OCP 服务，请只填到端口，例如 http://192.168.1.130:8080`)
+        throw new OcpError(`访问 OCP 接口失败（HTTP ${keyRes.status}）：当前地址 ${this.baseUrl} 可能带了网页路径或不是 OCP 服务，请只填到端口，例如 http://192.168.1.100:8080`)
       }
       throw new OcpError(`获取 OCP 公钥失败（HTTP ${keyRes.status}）`)
     }
@@ -563,6 +563,24 @@ export class OcpClient {
   }
 
   get infoCache(): OcpInfo | null { return this.info }
+}
+
+/**
+ * 版本能力判断：OCP 4.3 与 4.4 的少数端点不同名/不存在，靠 /api/v2/info 的 buildVersion 分流。
+ *
+ * 版本号取不到时返回 false（走保守的通用路径）——因为拿「新端点」去问老版本，
+ * 服务端会把请求落到 SPA 路由上返回 200 + HTML，client.call 会误判为会话失效并触发一次多余重登。
+ */
+export async function ocpAtLeast(client: OcpClient, major: number, minor: number): Promise<boolean> {
+  let ver = client.infoCache?.version || ''
+  if (!ver) {
+    try { ver = (await client.ensureLogin())?.version || '' } catch { return false }
+  }
+  const m = ver.match(/(\d+)\.(\d+)/)
+  if (!m) return false
+  const a = Number(m[1])
+  const b = Number(m[2])
+  return a > major || (a === major && b >= minor)
 }
 
 function buildQuery(p: string, query?: Record<string, any>): string {
@@ -896,7 +914,8 @@ export async function ocpOverview(client: OcpClient): Promise<CloudOverview> {
     settle(client.call<any>('/api/v2/ob/clustersView'), '集群列表', { contents: [] }),
     settle(client.call<any>('/api/v2/ob/clusters/alarmSummaries'), '集群告警统计', { contents: [] }),
     settle(client.call<any>('/api/v2/compute/hosts'), '主机列表', { contents: [] }),
-    settle(client.call<any>('/api/v2/alarm/overview/active'), '告警概况', { contents: [] }),
+    // 4.4 有 /alarm/overview/active；4.3 没有（会返回 SPA HTML 并误触发重登），由 ocpAlarmLevelCounts 分流
+    settle(ocpAlarmLevelCounts(client).then((list) => ({ contents: list })), '告警概况', { contents: [] }),
     settle(client.call<any>('/api/v2/alarm/alarms/actived', { query: { page: 1, size: 6 } }), '活跃告警', { contents: [] }),
     settle(client.call<any>('/api/v2/tasks/instances', { query: { page: 1, size: 6 } }), '最近任务', { contents: [] })
   ])
@@ -1163,10 +1182,29 @@ export async function ocpAlarmDetail(client: OcpClient, id: number): Promise<Clo
   return toAlarm(data)
 }
 
-/** 活跃告警按级别人数：GET /api/v2/alarm/overview/active → [{level, count}] */
+/**
+ * 活跃告警按级别人数 → [{level, count}]
+ *
+ * OCP 4.4：GET /api/v2/alarm/overview/active（专用汇总端点）
+ * OCP 4.3：该端点不存在（请求会落到 SPA 路由，返回 200 + HTML，还会误触发一次重登），
+ *          改用 /api/v2/alarm/alarms/actived?level=N&size=1 读 page.totalElements
+ */
 export async function ocpAlarmLevelCounts(client: OcpClient): Promise<{ level: number; count: number }[]> {
-  const data = await client.call<any>('/api/v2/alarm/overview/active')
-  return (data?.contents || []).map((o: any) => ({ level: num(o.level), count: num(o.count) }))
+  if (await ocpAtLeast(client, 4, 4)) {
+    try {
+      const data = await client.call<any>('/api/v2/alarm/overview/active')
+      const list = (data?.contents || []).map((o: any) => ({ level: num(o.level), count: num(o.count) }))
+      return list
+    } catch { /* 版本号与实际不符（如 4.3）时回落下面的通用实现 */ }
+  }
+  const levels = [1, 2, 3]
+  const rows = await Promise.all(levels.map(async (level) => {
+    try {
+      const d = await client.call<any>('/api/v2/alarm/alarms/actived', { query: { level, page: 1, size: 1 } })
+      return { level, count: num(d?.page?.totalElements) }
+    } catch { return { level, count: 0 } }
+  }))
+  return rows
 }
 
 export interface AlarmRuleDetect {
@@ -1491,9 +1529,20 @@ export async function ocpTaskDetail(client: OcpClient, id: number): Promise<Clou
   return toTaskDetail(data)
 }
 
-/** 各状态任务数：GET /api/v2/tasks/instances/state-statistics-batch → [{status, count}] */
+/**
+ * 各状态任务数 → [{status, count}]
+ *
+ * OCP 4.4：GET /api/v2/tasks/instances/state-statistics-batch
+ * OCP 4.3：同端点不存在，路径被当成 {taskInstanceId} 解析，返回 400
+ *          （"The parameter 'taskInstanceId' of value 'state-statistics-batch' could not be converted to type 'Long'"）
+ *          实际端点是 /api/v2/tasks/instances/state-statistics
+ */
 export async function ocpTaskStats(client: OcpClient): Promise<{ status: string; count: number }[]> {
-  const data = await client.call<any>('/api/v2/tasks/instances/state-statistics-batch')
+  const base = '/api/v2/tasks/instances/state-statistics'
+  const path = (await ocpAtLeast(client, 4, 4)) ? `${base}-batch` : base
+  // 版本号与端点实际不一致时回落另一个（老版本走错路径只回 400，不会触发重登）
+  const data = await client.call<any>(path).catch(() =>
+    client.call<any>(path.endsWith('-batch') ? base : `${base}-batch`))
   return (data?.contents || []).map((o: any) => ({ status: str(o.status), count: num(o.count) }))
 }
 
