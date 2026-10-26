@@ -66,7 +66,7 @@ cases.push(async () => {
     execute: async (sql, binds, opts) => {
       const low = String(sql).toLowerCase()
       if (low.includes('from v$database')) {
-        return { rows: [{ ver: 'Oracle Database 11g Enterprise Edition Release 11.2.0.4.0 - 64bit Production', name: 'PRODDB', db_unique_name: 'trade_db', database_role: 'PRIMARY', open_mode: 'READ WRITE', log_mode: 'ARCHIVELOG' }] }
+        return { rows: [{ ver: 'Oracle Database 11g Enterprise Edition Release 11.2.0.4.0 - 64bit Production', name: 'PRODDB', db_unique_name: 'proddb', database_role: 'PRIMARY', open_mode: 'READ WRITE', log_mode: 'ARCHIVELOG' }] }
       }
       if (low.includes('from gv$instance')) {
         return { rows: [
@@ -139,7 +139,7 @@ cases.push(async () => {
     ['from v$asm_diskgroup g', []],
     ['from v$archive_dest_status where dest_id <= 10', [{
       dest_id: 1, status: 'VALID', destination: '/arch', synchronization_status: 'PARALLEL',
-      synchronized: 'YES', error: '', db_unique_name: 'trade_db', gap_status: 'NO GAP',
+      synchronized: 'YES', error: '', db_unique_name: 'proddb', gap_status: 'NO GAP',
       archived_seq: 72, applied_seq: 72
     }]],
     ['from v$archived_log', [{ cnt: 12, gb: 1.5 }]],

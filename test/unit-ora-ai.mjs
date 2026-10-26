@@ -48,8 +48,8 @@ test('细分块 key：ora:<env>:<unit>:<part>，part 与 arg 都要在目录里'
   assert.equal(M.isOraAiKey('ora:ora1:overview:kpi.orKpiSess'), true)
   assert.equal(M.isOraAiKey('ora:ora1:overview:kpi.nope'), false)
   // 实例名这类运行期参数（dynamicArgs）放行
-  assert.equal(M.isOraAiKey('ora:ora1:instances:sga.trade_db'), true)
-  assert.equal(M.isOraAiKey('ora:ora1:instances:sga.trade_db:extra'), false)
+  assert.equal(M.isOraAiKey('ora:ora1:instances:sga.proddb'), true)
+  assert.equal(M.isOraAiKey('ora:ora1:instances:sga.proddb:extra'), false)
 })
 
 test('目录：每个单元都有可勾的细分块，中文名与说明齐全', () => {
@@ -82,7 +82,7 @@ test('单元目录：概要 + 14 个 tab，标签不重复', () => {
 
 const FIX = {
   summary: {
-    dbName: 'PRODDB', dbUniqueName: 'trade_db', databaseRole: 'PRIMARY', openMode: 'READ WRITE', logMode: 'ARCHIVELOG',
+    dbName: 'PRODDB', dbUniqueName: 'proddb', databaseRole: 'PRIMARY', openMode: 'READ WRITE', logMode: 'ARCHIVELOG',
     version: 'Oracle Database 11g Enterprise Edition Release 11.2.0.4.0 - 64bit Production',
     isRac: false, isCdb: false, instances: 1, instancesOpen: 1, startupTime: '2026-10-22 07:52',
     sessions: 28, activeSessions: 3, tsWorst: { name: 'SYSTEM', usedPct: 99.48 }, blocking: 2, invalid: 5, longops: 1
@@ -90,7 +90,7 @@ const FIX = {
   overview: {
     info: { dbName: 'PRODDB' },
     kpis: [{ label: '用户会话', value: '28', sub: '活跃 3' }],
-    instances: [{ name: 'trade_db', host: 'mgr01', status: 'OPEN', sessions: 28, active: 3 }],
+    instances: [{ name: 'proddb', host: 'mgr01', status: 'OPEN', sessions: 28, active: 3 }],
     tablespaces: [{ name: 'SYSTEM', usedPct: 99.48, usedMb: 740, sizeMb: 750, autoext: 1 }],
     alertHours: [{ hour: '10', count: 3 }],
     waits: [{ event: 'db file sequential read', waitClass: 'User I/O', timeS: 12.5 }],
@@ -99,12 +99,12 @@ const FIX = {
   },
   rac: {
     clusterDatabase: 'FALSE', configuredInstances: 0,
-    nodes: [{ instId: 1, instanceName: 'trade_db1', hostName: 'mgr01', status: 'OPEN', instanceRole: 'PRIMARY_INSTANCE', activeState: 'NORMAL', startupTime: '2026-10-22 07:52', version: '11.2.0.4.0', sessions: 28, active: 3 }],
-    services: [{ instId: 1, serviceId: 1, name: 'trade_db', networkName: 'trade_db' }],
-    interconnects: [], activeInstances: [{ instNumber: 1, instName: 'trade_db' }]
+    nodes: [{ instId: 1, instanceName: 'proddb1', hostName: 'mgr01', status: 'OPEN', instanceRole: 'PRIMARY_INSTANCE', activeState: 'NORMAL', startupTime: '2026-10-22 07:52', version: '11.2.0.4.0', sessions: 28, active: 3 }],
+    services: [{ instId: 1, serviceId: 1, name: 'proddb', networkName: 'proddb' }],
+    interconnects: [], activeInstances: [{ instNumber: 1, instName: 'proddb' }]
   },
   instances: [{
-    instId: 1, instanceName: 'trade_db', hostName: 'mgr01', status: 'OPEN', startupTime: '2026-10-22 07:52',
+    instId: 1, instanceName: 'proddb', hostName: 'mgr01', status: 'OPEN', startupTime: '2026-10-22 07:52',
     version: '11.2.0.4.0', instanceRole: 'PRIMARY_INSTANCE', activeState: 'NORMAL', dbStatus: 'ACTIVE',
     sgaMb: 2048, pgaMb: 512, processes: '300', sessions: '472', dbBlockSize: '8192', compat: '11.2.0.4.0',
     optimizerMode: 'ALL_ROWS', cursorSharing: 'EXACT', openCursors: '300', undoTablespace: 'UNDOTBS1', defaultTempTs: 'TEMP',
@@ -121,7 +121,7 @@ const FIX = {
     undo: { segments: [{ status: 'ONLINE', count: 10 }], recent: [{ begin: '10:00', end: '10:10', undoblks: 12, txnCount: 100, maxQueryLen: 30, ssolderrcnt: 0, nospaceerrcnt: 0 }] },
     datafiles: [{ fileId: 1, fileName: '/u01/system01.dbf', tablespace: 'SYSTEM', sizeMb: 750, autoextensible: 'YES', maxMb: 32768, incMb: 10, status: 'AVAILABLE', onlineStatus: 'ONLINE' }],
     asm: [{ name: 'DATA', state: 'MOUNTED', type: 'EXTERN', totalMb: 51200, freeMb: 10240, usableMb: 10240, usedPct: 80, disks: 1 }],
-    archive: { dests: [{ destId: 1, status: 'VALID', destination: '/arch', syncStatus: 'CHECK CONFIGURATION', synchronized: 'YES', error: '', dbUnique: 'trade_db', gapStatus: '', archivedSeq: 100, appliedSeq: 100 }], last24h: { count: 12, gb: 2.4 } },
+    archive: { dests: [{ destId: 1, status: 'VALID', destination: '/arch', syncStatus: 'CHECK CONFIGURATION', synchronized: 'YES', error: '', dbUnique: 'proddb', gapStatus: '', archivedSeq: 100, appliedSeq: 100 }], last24h: { count: 12, gb: 2.4 } },
     fra: { name: '/fra', limitGb: 8, usedGb: 2.5, reclaimGb: 1.2, files: 12, usage: [{ type: 'ARCHIVED LOG', usedPct: 31.3, reclaimPct: 20, files: 12 }] },
     redo: [{ group: 1, thread: 1, sequence: 100, mb: 1024, members: 1, status: 'CURRENT', archived: 'NO', firstTime: '10:20' }]
   },
@@ -193,7 +193,7 @@ test('每个单元都能渲染出内容（含表格与关键字段）', () => {
   const expect = {
     summary: ['PRIMARY', 'READ WRITE', '99.5%'],
     overview: ['用户会话', 'SYSTEM', 'db file sequential read'],
-    rac: ['cluster_database', 'trade_db1', '服务分布'],
+    rac: ['cluster_database', 'proddb1', '服务分布'],
     instances: ['SGA', 'Buffer Cache', 'processes'],
     pdb: ['非 CDB'],
     storage: ['SYSTEM', 'ASM', 'FRA', '归档目标'],
@@ -246,13 +246,13 @@ test('细分块渲染：磁贴级 arg 只输出那一项指标', () => {
 
 test('细分块渲染：实例名 arg 只输出那一个实例', () => {
   const inst = [
-    { ...FIX.instances[0], instanceName: 'trade_db1', sga: [{ name: 'Buffer Cache', mb: 1024 }] },
-    { ...FIX.instances[0], instanceName: 'trade_db2', sga: [{ name: 'Buffer Cache', mb: 2048 }] }
+    { ...FIX.instances[0], instanceName: 'proddb1', sga: [{ name: 'Buffer Cache', mb: 1024 }] },
+    { ...FIX.instances[0], instanceName: 'proddb2', sga: [{ name: 'Buffer Cache', mb: 2048 }] }
   ]
-  const only = M.renderOraAiPart('instances', 'sga.trade_db2', inst)
-  assert.ok(only.includes('trade_db2'))
-  assert.ok(!only.includes('trade_db1'), '只勾 trade_db2 的 SGA 不该带出 trade_db1')
-  assert.equal(M.oraAiPartLabel('instances', 'sga.trade_db2'), 'SGA 组成 · trade_db2')
+  const only = M.renderOraAiPart('instances', 'sga.proddb2', inst)
+  assert.ok(only.includes('proddb2'))
+  assert.ok(!only.includes('proddb1'), '只勾 proddb2 的 SGA 不该带出 proddb1')
+  assert.equal(M.oraAiPartLabel('instances', 'sga.proddb2'), 'SGA 组成 · proddb2')
 })
 
 test('key 的中文名：整块与细分都能写清楚', () => {

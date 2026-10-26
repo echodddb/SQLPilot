@@ -20,18 +20,18 @@ const throws = (fn, pattern, why) => {
 }
 
 // ---------- normalizeBase：用户从浏览器地址栏粘过来的各种形态 ----------
-eq(normalizeBase('192.168.1.130:8080'), 'http://192.168.1.130:8080', '裸地址默认补 http')
-eq(normalizeBase('http://192.168.1.130:8080/'), 'http://192.168.1.130:8080', '去掉末尾斜杠')
-eq(normalizeBase('  http://192.168.1.130:8080  '), 'http://192.168.1.130:8080', '去掉首尾空白')
+eq(normalizeBase('192.168.1.100:8080'), 'http://192.168.1.100:8080', '裸地址默认补 http')
+eq(normalizeBase('http://192.168.1.100:8080/'), 'http://192.168.1.100:8080', '去掉末尾斜杠')
+eq(normalizeBase('  http://192.168.1.100:8080  '), 'http://192.168.1.100:8080', '去掉首尾空白')
 eq(normalizeBase('https://ocp.intra:8443'), 'https://ocp.intra:8443', '保留 https 与端口')
 eq(normalizeBase('http://ocp.intra:8080/login'), 'http://ocp.intra:8080', '剥掉末尾的 SPA 路由 login')
 eq(normalizeBase('http://ocp.intra:8080/#/overview'), 'http://ocp.intra:8080', '剥掉 hash 路由')
 eq(normalizeBase('http://ocp.intra:8080/overview'), 'http://ocp.intra:8080', '剥掉末尾的 SPA 路由 overview')
 eq(normalizeBase('http://ocp.intra:8080/ocp/overview'), 'http://ocp.intra:8080/ocp', '保留反向代理子路径，只剥路由段')
-eq(normalizeBase('ｈｔｔｐ：／／192.168.1.130：8080'), 'http://192.168.1.130:8080', '全角字符 NFKC 归一')
-eq(normalizeBase('http://192.168.1.130:8080\u200B'), 'http://192.168.1.130:8080', '去掉零宽字符')
-eq(normalizeBase('"http://192.168.1.130:8080"'), 'http://192.168.1.130:8080', '去掉包裹的引号')
-eq(normalizeBase('<http://192.168.1.130:8080>'), 'http://192.168.1.130:8080', '去掉包裹的尖括号')
+eq(normalizeBase('ｈｔｔｐ：／／192.168.1.100：8080'), 'http://192.168.1.100:8080', '全角字符 NFKC 归一')
+eq(normalizeBase('http://192.168.1.100:8080\u200B'), 'http://192.168.1.100:8080', '去掉零宽字符')
+eq(normalizeBase('"http://192.168.1.100:8080"'), 'http://192.168.1.100:8080', '去掉包裹的引号')
+eq(normalizeBase('<http://192.168.1.100:8080>'), 'http://192.168.1.100:8080', '去掉包裹的尖括号')
 eq(normalizeBase('http://[::1]:8080'), 'http://[::1]:8080', 'IPv6 地址保留方括号')
 eq(normalizeBase('http://ocp.intra:8080?x=1'), 'http://ocp.intra:8080', '丢掉查询串')
 

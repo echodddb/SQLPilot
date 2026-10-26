@@ -32,7 +32,7 @@ const ok = (cond, why) => {
   const text = `
 # 生产环境
 Host db-prod-01
-  HostName 192.168.1.130
+  HostName 192.168.1.100
   User oracle
   Port 2222
   IdentityFile ~/.ssh/id_rsa
@@ -44,7 +44,7 @@ Host db-test-01 db-test-02
   const list = parseSshConfig(text)
   eq(list.length, 3, '多别名展开为多条会话')
   const p = list.find((x) => x.alias === 'db-prod-01')
-  eq(p.host, '192.168.1.130', 'HostName 覆盖别名')
+  eq(p.host, '192.168.1.100', 'HostName 覆盖别名')
   eq(p.user, 'oracle', 'User')
   eq(p.port, 2222, 'Port')
   ok(p.identityFile && !p.identityFile.startsWith('~'), 'IdentityFile 的 ~ 已展开为绝对路径')
