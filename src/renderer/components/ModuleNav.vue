@@ -106,7 +106,11 @@ function go(key: (typeof modules)[number]['key']): void {
   transition: color 0.14s ease, background 0.14s ease;
 }
 .mn-item:hover { color: var(--text); background: var(--bg-card-hover); }
-.mn-item.active { color: var(--accent); background: var(--bg-card-hover); }
+/* 激活项：主色渐隐底 + 竖条发光 + 图标辉光，作为"当前所在模块"的信号 */
+.mn-item.active {
+  color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-dim), transparent 72%);
+}
 /* 左侧竖条指示当前模块 */
 .mn-item.active::before {
   content: '';
@@ -117,6 +121,10 @@ function go(key: (typeof modules)[number]['key']): void {
   width: 2.5px;
   border-radius: 0 2px 2px 0;
   background: var(--accent);
+  box-shadow: 0 0 10px var(--accent), 0 0 20px var(--accent-glow);
+}
+.mn-item.active .mn-icon {
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--accent) 55%, transparent));
 }
 .mn-icon { font-size: 17px; line-height: 1; }
 .mn-label { font-size: 10.5px; letter-spacing: 0.5px; }

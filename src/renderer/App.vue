@@ -25,8 +25,8 @@
     <ModuleNav />
     <Sidebar v-if="store.module === 'agent'" />
     <div class="main-area">
-      <!-- 文本编辑有自己的菜单栏与状态栏，不需要顶栏品牌标识，直接让编辑区占满 -->
-      <div class="topbar" v-if="store.module !== 'editor'">
+      <!-- 顶栏：所有模块共用（含文本编辑），品牌标识 + 模块标识 + 模块级操作 -->
+      <div class="topbar">
         <span class="logo">◆ SQLPilot</span>
 
         <span
@@ -66,6 +66,13 @@
           class="badge blue"
           title="SSH 会话 · 多标签终端 · SFTP 双栏传输（入口在左侧栏底部「服务器」分组）"
         >服务器 · SSH</span>
+
+        <!-- 文本编辑：文件树 / 多标签 / 大文件与编码转换，状态栏在自身底部 -->
+        <span
+          v-if="store.module === 'editor'"
+          class="badge blue"
+          title="文本编辑器 · 多标签 / 语法高亮 / 正则替换 / 编码转换"
+        >文本编辑</span>
 
         <button
           v-if="store.module === 'agent'"

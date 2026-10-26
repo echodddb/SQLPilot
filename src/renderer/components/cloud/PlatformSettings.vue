@@ -40,13 +40,13 @@
 
           <div class="frow">
             <label>名称</label>
-            <input v-model="form.name" :placeholder="form.type === 'oracle' ? '例如：核心库 PRODDB' : '例如：生产 OCP / 测试 OCP'" spellcheck="false" />
+            <input v-model="form.name" :placeholder="form.type === 'oracle' ? '例如：核心业务库' : '例如：生产 OCP / 测试 OCP'" spellcheck="false" />
           </div>
 
           <template v-if="form.type === 'ocp'">
             <div class="frow">
               <label>地址</label>
-              <input v-model="form.baseUrl" placeholder="http://192.168.1.130:8080" spellcheck="false" />
+              <input v-model="form.baseUrl" placeholder="http://192.168.1.100:8080" spellcheck="false" />
               <span class="fhint">只填到端口，内网建议直接用 IP（主机名要能被本机 DNS 解析）；带 context path 时形如 http://主机:8080/ocp。误填成登录页地址（/login）会自动纠正。</span>
             </div>
             <div class="frow two">
@@ -69,7 +69,7 @@
             <div class="frow three">
               <div>
                 <label>主机</label>
-                <input v-model="form.host" placeholder="192.168.1.61" spellcheck="false" />
+                <input v-model="form.host" placeholder="192.168.1.100" spellcheck="false" />
               </div>
               <div>
                 <label>端口</label>

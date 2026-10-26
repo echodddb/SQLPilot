@@ -66,7 +66,7 @@
         <!-- 导航入口统一收顶栏与侧栏：composer 只保留与"发送"直接相关的控件，回收纵向空间 -->
         <textarea
           v-model="store.drafts[store.currentId]"
-          placeholder="描述任务，如：查一下 LIS 库里最近一周的检验申请量，按天汇总"
+          placeholder="描述任务，如：看下 t_order 表最近一周的慢查询，给出执行计划"
           @keydown.enter.exact.prevent="onEnterKey"
           rows="2"
         ></textarea>

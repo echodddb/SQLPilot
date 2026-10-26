@@ -7,8 +7,26 @@ import { seedBuiltinSkills } from './skills'
 import { dirsFromArgv, filesFromArgv, setPendingOpens, setPendingWorkspace } from './editor'
 import { appendAudit } from './audit'
 import { loadConfig } from './config'
+import { applyTitleBar, TITLEBAR_COLORS, TITLEBAR_HEIGHT } from './window-chrome'
 
 let win: BrowserWindow | null = null
+
+/**
+ * 启动诊断：设 `SQLPILOT_BOOT_LOG=<文件路径>` 时，把启动各阶段追加写进该文件。
+ * 打包版起不来又看不到控制台时，这是唯一能拿到的现场（生产默认关闭，零开销）。
+ */
+const BOOT_LOG = process.env.SQLPILOT_BOOT_LOG
+function blog(msg: string): void {
+  if (!BOOT_LOG) return
+  try {
+    fs.appendFileSync(BOOT_LOG, `${new Date().toISOString()} ${msg}\n`)
+  } catch { /* 日志写不了就算了，不能影响启动 */ }
+}
+if (BOOT_LOG) {
+  blog(`boot module loaded, packaged=${app.isPackaged}, electron=${process.versions.electron}`)
+  process.on('uncaughtException', (e: any) => blog('uncaughtException: ' + (e?.stack || String(e))))
+  process.on('unhandledRejection', (e: any) => blog('unhandledRejection: ' + (e?.stack || String(e))))
+}
 
 // 测试/调试用：设置 SQLPILOT_USER_DATA 环境变量可重定向数据目录（绕开单实例锁并行起第二个实例）
 if (process.env.SQLPILOT_USER_DATA) {
@@ -73,9 +91,21 @@ function createWindow(): void {
     minHeight: 700,
     show: false,
     // 窗口底色和启动画面同色，首帧就不会闪
-    backgroundColor: theme === 'light' ? '#f8f8f8' : '#161616',
+    // 与标题栏/启动画面同色，首帧和启动遮罩之间不会有色差
+    backgroundColor: theme === 'light' ? '#e9f0f9' : '#04060c',
     title: 'SQLPilot — DBA 智能助手',
     autoHideMenuBar: true,
+    // 隐藏系统标题栏，只保留右上角 - □ ×，底色交给应用（见 window-chrome.ts）
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'win32' || process.platform === 'linux'
+      ? {
+          titleBarOverlay: {
+            color: TITLEBAR_COLORS[theme].color,
+            symbolColor: TITLEBAR_COLORS[theme].symbolColor,
+            height: TITLEBAR_HEIGHT
+          }
+        }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -87,6 +117,8 @@ function createWindow(): void {
   bindWindow(win)
   win.removeMenu()
   Menu.setApplicationMenu(null)
+  // 原生控件/系统对话框跟随主题（标题栏颜色在构造时已给，这里补齐其余部分）
+  applyTitleBar(theme, win)
 
   // F12 开发者工具 / Ctrl+R 刷新：仅开发构建或 SQLPILOT_DEV=1 时开放，生产包不给终端用户留入口
   const devTools = !app.isPackaged || !!process.env.SQLPILOT_DEV
@@ -122,6 +154,10 @@ function createWindow(): void {
   // 兜底：ready-to-show 万一不触发（资源异常），8 秒后也必须有一个能用的窗口
   const revealGuard = setTimeout(() => revealMain(), 8000)
 
+  win.webContents.on('did-finish-load', () => blog('did-finish-load'))
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => blog(`did-fail-load ${code} ${desc} ${url}`))
+  win.webContents.on('render-process-gone', (_e, d) => blog(`render-process-gone ${JSON.stringify(d)}`))
+
   // SQLPILOT_NO_SPLASH=1 → 渲染层跳过启动画面（开发时反复重启省得等动画）
   win
     .loadFile(indexHtml, {
@@ -130,7 +166,9 @@ function createWindow(): void {
         theme
       }
     })
+    .then(() => blog('loadFile resolved'))
     .catch((err) => {
+      blog('loadFile rejected: ' + (err?.message || err))
       console.error('[main] 主页面加载失败:', err)
       revealMain()
     })
@@ -141,6 +179,7 @@ function createWindow(): void {
 }
 
 const gotLock = app.requestSingleInstanceLock()
+blog('singleInstanceLock = ' + gotLock)
 if (!gotLock) {
   app.quit()
 } else {
@@ -160,19 +199,24 @@ if (!gotLock) {
   })
 
   app.whenReady().then(() => {
+    blog('whenReady')
     migrateOldUserData()
+    blog('migrated userData')
     // 双击/命令行带文件启动：窗口就绪后由渲染层取走并在编辑器中打开
     setPendingOpens(filesFromArgv(process.argv.slice(1)))
     const dirs = dirsFromArgv(process.argv.slice(1))
     if (dirs.length) setPendingWorkspace(dirs[0])
     // 内置技能包：只在技能库里还没有时播种（用户的改动不会被覆盖）
-    seedBuiltinSkills()
+    try { seedBuiltinSkills() } catch (e: any) { blog('seedBuiltinSkills failed: ' + (e?.stack || e)) }
+    blog('skills seeded')
     registerIpc()
+    blog('ipc registered')
     createWindow()
+    blog('window created')
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
-  })
+  }).catch((e: any) => blog('whenReady chain failed: ' + (e?.stack || e)))
 
   app.on('window-all-closed', () => {
     app.quit()

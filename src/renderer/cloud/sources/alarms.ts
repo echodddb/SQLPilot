@@ -31,7 +31,7 @@ export const AL_SOURCES: Record<string, SourceInfo> = {
       placeholder: true
     },
     sql: `-- 在 OCP MetaDB 的 meta 租户执行（租户/库名为示意，按实际环境替换）：\nSELECT id, level, status, scope, alarm_type, app_type, target, summary, active_at\nFROM ocp.ocp2_alarm_event\nWHERE status = 'Active'\nORDER BY level, active_at DESC;`,
-    note: 'target 是采集端拼的定位串，形如 alarm_template_id=0:host=192.168.1.162；详情接口的 alarmTarget.includeTargets 才是结构化的对象（hosts[] / cluster + tenants[]），界面优先用后者；app_type 标明来源（OCP 自身 / OB 集群 / OBProxy）'
+    note: 'target 是采集端拼的定位串，形如 alarm_template_id=0:host=192.168.1.10；详情接口的 alarmTarget.includeTargets 才是结构化的对象（hosts[] / cluster + tenants[]），界面优先用后者；app_type 标明来源（OCP 自身 / OB 集群 / OBProxy）'
   },
   alarmTrend: {
     title: '告警趋势分布',

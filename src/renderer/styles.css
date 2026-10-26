@@ -1,65 +1,75 @@
-/* ============ SQLPilot 主题系统（GitHub Dark / Light · 日/夜双主题） ============ */
+/* ============ SQLPilot 主题系统（科技暗 / 科技亮 · 日/夜双主题） ============ */
 
 :root, html[data-theme='dark'] {
-  /* GitHub Dark：画布 #0d1117、侧栏更黑 #010409、卡片 #161b22、发丝线 #30363d */
-  --bg: #0d1117;
-  --bg-side: #010409;
-  --bg-card: #161b22;
-  --bg-card-hover: #1c2430;
-  --bg-input: #0d1117;
-  --bg-code: #161b22;
-  --border: #30363d;
-  --border-strong: #3d444d;
-  --text: #e6edf3;
-  --text-dim: #8d96a0;
-  --text-faint: #6e7681;
-  --accent: #1f6feb;
-  --accent-2: #58a6ff;
-  /* 名字保留 -grad（历史引用 6 处），值已是纯色：蓝紫渐变已弃用 */
-  --accent-grad: #1f6feb;
-  --accent-dim: rgba(56, 139, 253, 0.15);
-  --accent-glow: rgba(56, 139, 253, 0.12);
-  --green: #3fb950;
-  --green-dim: rgba(63, 185, 80, 0.15);
-  --yellow: #d29922;
-  --yellow-dim: rgba(210, 153, 34, 0.15);
-  --red: #f85149;
-  --red-dim: rgba(248, 81, 73, 0.15);
-  --purple: #a371f7;
-  --shadow: 0 8px 24px rgba(1, 4, 9, 0.6);
-  --shadow-lg: 0 16px 48px rgba(1, 4, 9, 0.76);
-  --scroll-thumb: #30363d;
+  /* 科技暗：近黑带蓝的底 + 青蓝主色，边框是冷调细线 */
+  --bg: #060910;
+  --bg-side: #04060c;
+  --bg-card: #0c111c;
+  --bg-card-hover: #131b2b;
+  --bg-input: #080c15;
+  --bg-code: #0a0f1a;
+  --border: #1b2438;
+  --border-strong: #2b3b59;
+  --text: #dbe7f7;
+  --text-dim: #93a6c2;
+  --text-faint: #63758f;
+  --accent: #38bdf8;
+  --accent-2: #7dd3fc;
+  /* 名字保留 -grad（历史引用 6 处），值已是纯色 */
+  --accent-grad: #38bdf8;
+  --accent-dim: rgba(56, 189, 248, 0.13);
+  --accent-glow: rgba(56, 189, 248, 0.22);
+  --green: #34d399;
+  --green-dim: rgba(52, 211, 153, 0.14);
+  --yellow: #fbbf24;
+  --yellow-dim: rgba(251, 191, 36, 0.14);
+  --red: #fb7185;
+  --red-dim: rgba(251, 113, 133, 0.14);
+  --purple: #c084fc;
+  --shadow: 0 10px 30px rgba(2, 6, 16, 0.72);
+  --shadow-lg: 0 20px 60px rgba(2, 6, 16, 0.86);
+  --scroll-thumb: #1e2a41;
+  /* 科技感专用：网格线 / 氛围光 / 卡面高光 */
+  --grid-line: rgba(56, 189, 248, 0.15);
+  --grid-size: 52px;
+  --sheen: rgba(255, 255, 255, 0.055);
+  /* 主色底上的文字：青蓝偏亮，必须用深色字才够对比 */
+  --on-accent: #04121b;
   --mono: 'Cascadia Code', 'JetBrains Mono', 'Consolas', monospace;
 }
 
 html[data-theme='light'] {
-  /* GitHub Light：白画布 + #f6f8fa 侧栏，边框 #d0d7de */
-  --bg: #ffffff;
-  --bg-side: #f6f8fa;
+  /* 科技亮：冷白纸面 + 同一支青蓝主色，网格比暗色更收敛 */
+  --bg: #f4f7fb;
+  --bg-side: #e9f0f9;
   --bg-card: #ffffff;
-  --bg-card-hover: #f3f4f6;
-  --bg-input: #ffffff;
-  --bg-code: #f6f8fa;
-  --border: #d0d7de;
-  --border-strong: #afb8c1;
-  --text: #1f2328;
-  --text-dim: #656d76;
-  --text-faint: #8b949e;
-  --accent: #0969da;
-  --accent-2: #0969da;
-  --accent-grad: #0969da;
-  --accent-dim: rgba(9, 105, 218, 0.08);
-  --accent-glow: rgba(9, 105, 218, 0.10);
-  --green: #1a7f37;
-  --green-dim: rgba(26, 127, 55, 0.10);
-  --yellow: #9a6700;
-  --yellow-dim: rgba(154, 103, 0, 0.10);
-  --red: #cf222e;
-  --red-dim: rgba(207, 34, 46, 0.09);
-  --purple: #8250df;
-  --shadow: 0 8px 24px rgba(140, 149, 159, 0.20);
-  --shadow-lg: 0 16px 48px rgba(140, 149, 159, 0.26);
-  --scroll-thumb: #d0d7de;
+  --bg-card-hover: #edf4fc;
+  --bg-input: #f7fafd;
+  --bg-code: #edf3fa;
+  --border: #ccd9ea;
+  --border-strong: #a8bbd3;
+  --text: #0d1726;
+  --text-dim: #52627a;
+  --text-faint: #8092aa;
+  --accent: #0284c7;
+  --accent-2: #0ea5e9;
+  --accent-grad: #0284c7;
+  --accent-dim: rgba(2, 132, 199, 0.09);
+  --accent-glow: rgba(2, 132, 199, 0.16);
+  --green: #059669;
+  --green-dim: rgba(5, 150, 105, 0.10);
+  --yellow: #b45309;
+  --yellow-dim: rgba(180, 83, 9, 0.10);
+  --red: #e11d48;
+  --red-dim: rgba(225, 29, 72, 0.09);
+  --purple: #7c3aed;
+  --shadow: 0 8px 24px rgba(20, 40, 80, 0.08);
+  --shadow-lg: 0 18px 48px rgba(20, 40, 80, 0.13);
+  --scroll-thumb: #c1cfe2;
+  --grid-line: rgba(2, 132, 199, 0.10);
+  --grid-size: 52px;
+  --sheen: rgba(255, 255, 255, 0.9);
+  --on-accent: #ffffff;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -74,13 +84,42 @@ body {
   transition: background 0.25s ease, color 0.25s ease;
 }
 
-::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: var(--border-strong); border: 2px solid transparent; background-clip: content-box; }
+/* 背景层：细网格 + 两支氛围光（fixed，不随内容滚动；.layout 抬到上面一层） */
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+body::before {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: var(--grid-size) var(--grid-size);
+  mask-image: radial-gradient(ellipse 130% 120% at 50% 0%, #000 20%, transparent 96%);
+  -webkit-mask-image: radial-gradient(ellipse 130% 120% at 50% 0%, #000 20%, transparent 96%);
+}
+body::after {
+  background:
+    radial-gradient(620px 420px at 6% -8%, color-mix(in srgb, var(--accent) 15%, transparent), transparent 72%),
+    radial-gradient(760px 520px at 104% 110%, color-mix(in srgb, var(--purple) 11%, transparent), transparent 70%);
+  opacity: .8;
+}
+html[data-theme='light'] body::after { opacity: .5; }
+
+/* 选中与焦点：统一走主色的半透明，别再出现系统蓝 */
+::selection { background: color-mix(in srgb, var(--accent) 34%, transparent); color: var(--text); }
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 62%, transparent); outline-offset: 2px; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--accent) 55%, var(--scroll-thumb)); border: 3px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 
 /* ============ 布局 ============ */
-.layout { display: flex; height: 100%; }
+.layout { display: flex; height: 100%; position: relative; z-index: 1; }
 
 .sidebar {
   width: 272px;
@@ -89,18 +128,66 @@ body {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  /* 右边界一道极淡的主色描边，比纯灰线有"面板"感 */
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .topbar {
+  position: relative;
   height: 54px;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 18px;
+  /* 右侧让出窗口按钮区（- □ ×，约 138px），否则模型下拉会钻到按钮底下 */
+  padding: 0 146px 0 18px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-side);
+  /* 隐藏了系统标题栏，这条顶栏就是拖窗口的地方 */
+  -webkit-app-region: drag;
+}
+.topbar button,
+.topbar select,
+.topbar input,
+.topbar .badge,
+.topbar a {
+  -webkit-app-region: no-drag;
+}
+
+/* 编辑器模块不显示 .topbar（它有自己的菜单栏），窗口拖动区改挂在菜单栏空白处 */
+.ed-menubar { -webkit-app-region: drag; }
+.ed-menubar > * { -webkit-app-region: no-drag; }
+.ed-menubar > .spacer { -webkit-app-region: drag; }
+/* 顶栏底边一条青蓝渐变线，是整个暗色界面最显眼的一道"能量线" */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 75%, transparent) 30%,
+    color-mix(in srgb, var(--purple) 55%, transparent) 62%,
+    /* 最后一段保持颜色：窗口按钮区下方也要有线，否则左右两截割裂 */
+    color-mix(in srgb, var(--purple) 55%, transparent)
+  );
+  opacity: .95;
+}
+html[data-theme='light'] .topbar::after {
+  /* 浅底上同一条线要更实，否则读不出来 */
+  height: 1.5px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 62%, transparent) 28%,
+    color-mix(in srgb, var(--purple) 42%, transparent) 64%,
+    color-mix(in srgb, var(--purple) 42%, transparent)
+  );
 }
 
 .logo {
@@ -116,6 +203,22 @@ body {
 
 .topbar .spacer { flex: 1; }
 
+/* 顶栏内的下拉框（模型选择）：默认与顶栏同底色，别做成一块白板 */
+.topbar select {
+  /* 用输入底 + 标准描边：既不是一块白板（浅色 --bg-input 已从纯白改成冷白），
+     也不会在暗色里彻底消失成一行字 */
+  background: var(--bg-input);
+  border-color: var(--border);
+}
+.topbar select:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border);
+}
+.topbar select:focus {
+  background: var(--bg-input);
+  border-color: var(--accent);
+}
+
 /* ============ 通用控件 ============ */
 .btn {
   padding: 7px 15px;
@@ -128,22 +231,35 @@ body {
   font-family: inherit;
   transition: all 0.16s ease;
 }
-.btn:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+.btn:hover {
+  border-color: var(--accent);
+  background: var(--bg-card-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
 .btn.primary {
   background: var(--accent-grad);
   border: none;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
-
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 4px 16px var(--accent-glow);
 }
-.btn.primary:hover { filter: brightness(1.08); }
+.btn.primary:hover {
+  filter: brightness(1.06);
+  box-shadow: 0 0 0 1px var(--accent), 0 6px 26px color-mix(in srgb, var(--accent) 34%, transparent);
+}
 .btn.danger { background: var(--red); border: none; color: #fff; }
-.btn.danger:hover { filter: brightness(1.08); }
+.btn.danger:hover { filter: brightness(1.08); box-shadow: 0 6px 20px color-mix(in srgb, var(--red) 30%, transparent); }
 .btn.ghost { background: transparent; border-color: transparent; }
 .btn.ghost:hover { background: var(--bg-card-hover); border-color: var(--border); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: grayscale(0.4); }
 
-select, input[type="text"], input[type="password"], input[type="number"], textarea {
+/* input 不写 type 时默认就是 text，但属性选择器 input[type="text"] 匹配不到它，
+   会回退成浏览器白底（暗色主题下就是一块刺眼的白）。用 :not([type]) 兜住。 */
+select,
+input[type="text"], input[type="search"], input[type="password"],
+input[type="number"], input[type="email"], input[type="url"], input[type="tel"],
+input:not([type]),
+textarea {
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text);
@@ -154,10 +270,11 @@ select, input[type="text"], input[type="password"], input[type="number"], textar
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease;
 }
-select:focus, input:focus, textarea:focus {
+select:focus, input:focus, textarea:focus, input:not([type]):focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
+  box-shadow: 0 0 0 3px var(--accent-dim), 0 0 20px var(--accent-glow);
 }
+input::placeholder, textarea::placeholder { color: var(--text-faint); opacity: .85; }
 select { cursor: pointer; }
 option { background: var(--bg-card); color: var(--text); }
 
@@ -169,6 +286,8 @@ option { background: var(--bg-card); color: var(--text); }
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.2px;
+  /* 描一条同色细边：比纯色块更像"仪表指示灯" */
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
 }
 .badge.blue { background: var(--accent-dim); color: var(--accent); }
 .badge.green { background: var(--green-dim); color: var(--green); }
@@ -335,6 +454,8 @@ option { background: var(--bg-card); color: var(--text); }
 .content pre {
   background: var(--bg-code);
   border: 1px solid var(--border);
+  /* 左侧一道主色竖条：代码块在暗底上靠这个"立"起来 */
+  border-left: 2px solid color-mix(in srgb, var(--accent) 48%, transparent);
   border-radius: 10px;
   padding: 12px 14px;
   overflow-x: auto;
@@ -507,7 +628,8 @@ option { background: var(--bg-card); color: var(--text); }
   max-height: 88vh;
   overflow-y: auto;
   padding: 22px 24px;
-  box-shadow: var(--shadow-lg);
+  /* 顶部一条内高光，让弹窗像一块"被光照到的面板" */
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--sheen);
   animation: modal-in 0.18s ease;
 }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }

@@ -56,7 +56,7 @@
           <div class="sm-grid">
             <label class="sm-f sm-span2">
               <span>主机 *</span>
-              <input v-model="form.host" placeholder="192.168.1.130 或域名" spellcheck="false" />
+              <input v-model="form.host" placeholder="192.168.1.100 或域名" spellcheck="false" />
             </label>
             <label class="sm-f">
               <span>端口</span>

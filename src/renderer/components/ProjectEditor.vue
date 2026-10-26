@@ -10,7 +10,7 @@
       <div class="frow">
         <div class="fitem">
           <label>项目说明（注入 AI 提示词：环境说明、注意事项，如"生产环境，写操作前必须备份"）</label>
-          <textarea v-model="form.description" rows="2" style="width:100%" placeholder="例如：LIS 生产环境。数据库改动需走变更流程；服务器为 CentOS，Oracle 19c 在 /u01/app"></textarea>
+          <textarea v-model="form.description" rows="2" style="width:100%" placeholder="例如：核心业务库生产环境。数据库改动需走变更流程；服务器为 CentOS，Oracle 19c 部署在 /u01/app"></textarea>
         </div>
       </div>
 

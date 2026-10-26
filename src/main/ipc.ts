@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 import { loadConfig, saveConfig } from './config'
+import { applyTitleBar } from './window-chrome'
 import { setPassword, deletePassword, getPassword, secretsAvailable } from './secrets'
 import { readAudit, appendAudit, queryAudit } from './audit'
 import { getAdapter, dropAdapter, closeAll } from './db/manager'
@@ -302,6 +303,8 @@ export function registerIpc(): void {
     // 终端偏好同理：渲染层的旧副本可能还没有 termPrefs，缺省保留主进程已存值
     if (!cfg.termPrefs) cfg.termPrefs = cur.termPrefs
     saveConfig(cfg)
+    // 主题切换时同步窗口标题栏（- □ ×）的底色，否则浅色主题配深色按钮区
+    if (cur.theme !== cfg.theme) applyTitleBar(cfg.theme === 'light' ? 'light' : 'dark', win)
     return { ok: true }
   })
 

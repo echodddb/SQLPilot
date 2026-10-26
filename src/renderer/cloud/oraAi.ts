@@ -240,7 +240,7 @@ export function clearOraDraft(): void {
   oraAi.draft = []
 }
 
-/** 当前范围的摘要：`PRODDB 生产 3/15 · PRODDB_STANDBY 备库 1/15` */
+/** 当前范围的摘要：`PRODDB 生产 3/15 · STANDBY 备库 1/15` */
 interface ScopeUnit {
   unit: string
   covered: number
