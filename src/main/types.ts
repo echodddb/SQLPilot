@@ -131,7 +131,7 @@ export interface CloudPlatform {
   name: string
   /** ocp = 调 OCP 的 REST 接口；oracle = 直连数据库查 v$ / dba_ 视图 */
   type: 'ocp' | 'oracle'
-  /** OCP 平台地址，形如 http://192.168.1.130:8080（可带 context path，如 /ocp）；oracle 类型不用 */
+  /** OCP 平台地址，形如 http://192.168.1.100:8080（可带 context path，如 /ocp）；oracle 类型不用 */
   baseUrl?: string
   /** Oracle 直连：主机 / 端口 / 服务名 */
   host?: string

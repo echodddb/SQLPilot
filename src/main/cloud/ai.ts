@@ -82,7 +82,7 @@ export type CloudAiSectionBase =
  * - `overview.kpi:hosts` 只读「主机数」这一个磁贴
  * - `overview.clusters:obcluster-prod` 只读某个集群的容量
  * - `clusters.topology:obcluster-prod` 只读该集群的拓扑
- * - `hosts.list:10.0.0.12` / `tenants.list:obtenant01` / `monitor.cluster:cpu_percent`
+ * - `hosts.list:<svr_ip>` / `tenants.list:<tenant_name>` / `monitor.cluster:cpu_percent`
  */
 export type CloudAiSectionKey = CloudAiSectionBase | `${CloudAiSectionBase}:${string}`
 

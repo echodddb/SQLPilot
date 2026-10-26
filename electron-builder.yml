@@ -11,10 +11,15 @@ files:
   # 内置技能包（首启播种到 userData/skills，用户可改可删）
   - resources/skills/**/*
 # 桥是 .mjs 子进程，必须解包到 app.asar.unpacked 才能被 spawn
+# asar: false 时用不到（文件本来就是散开的），保留配置便于将来切回 asar
 asarUnpack:
   - vendor/workbuddy-bridge/**
 # 生产依赖(oracledb/mysql2)由 builder 自动收进包；vue 已被 vite 打包无需分发
-asar: true
+# 关掉 asar：打包成 resources/app/ 真实目录。
+# asar 里的 node_modules 在 Electron 33 上会出现 package.json 读取失败
+# （ENOENT ...resources\app.asar\node_modules\<pkg>\package.json，主进程弹
+# "A JavaScript error occurred in the main process"），关掉后走真实文件系统最稳。
+asar: false
 win:
   target:
     - target: nsis
