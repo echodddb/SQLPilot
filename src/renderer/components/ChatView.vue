@@ -1,5 +1,7 @@
 <template>
   <div class="chat-wrap">
+    <!-- 对话内查找（Ctrl+F / 顶栏「⌕ 搜索」）：搜索范围就是下面这层渲染结果 -->
+    <ChatFind v-if="store.chatFindOpen" ref="findRef" :scroll="scrollEl" :signature="msgSignature" @close="closeFind" />
     <div class="chat-scroll" ref="scrollEl" @click="onChatClick">
       <div class="chat-inner">
         <div v-if="runningTasks.length" class="subtask-bar">
@@ -118,14 +120,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { store, curSession, sendMessage, newChat, stop, approvePlan, setSessionEffort, setSessionMode, MODES, archiveAndClear } from '../store'
 import ToolCard from './ToolCard.vue'
 import SubagentRunModal from './SubagentRunModal.vue'
+import ChatFind from './ChatFind.vue'
 import ArtifactChips from './artifacts/ArtifactChips.vue'
 import { collectArtifacts, type Artifact } from '../artifacts'
 
 const scrollEl = ref<HTMLElement | null>(null)
+const findRef = ref<{ focusInput: () => void } | null>(null)
 
 /** 按消息归组的产物（消息一变就重算；纯推导，工具结果到达后自动出现） */
 const msgArtifacts = computed<Record<number, Artifact[]>>(() => {
@@ -338,6 +342,41 @@ function onEnterKey(e: KeyboardEvent) {
   send()
 }
 
+// ---------- 对话内查找（Ctrl+F） ----------
+/**
+ * 只在 AI 助手模块抢键：本组件随模块 v-if 挂载，天然只在该模块生效。
+ * 终端走 xterm 自带的查找、弹窗打开时不抢键，避免把用户正要找的东西抢走。
+ */
+function onFindKey(e: KeyboardEvent): void {
+  const t = e.target as HTMLElement | null
+  if (e.key === 'Escape' && store.chatFindOpen) {
+    // 焦点已经不在输入框里（点了对话正文）时也要能 Esc 关掉
+    if (t?.closest?.('.xterm') || document.querySelector('.modal-mask')) return
+    closeFind()
+    return
+  }
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
+  if (e.key !== 'f' && e.key !== 'F') return
+  if (t?.closest?.('.xterm')) return
+  if (document.querySelector('.modal-mask')) return
+  e.preventDefault()
+  if (store.chatFindOpen) {
+    // 已开着就再次聚焦，而不是什么都不发生
+    findRef.value?.focusInput()
+    return
+  }
+  store.chatFindOpen = true
+}
+
+function closeFind(): void {
+  store.chatFindOpen = false
+  // 关掉浮条把焦点还给输入框，可以接着打字
+  nextTick(() => (document.querySelector('.chat-input textarea') as HTMLElement | null)?.focus())
+}
+
+onMounted(() => window.addEventListener('keydown', onFindKey))
+onBeforeUnmount(() => window.removeEventListener('keydown', onFindKey))
+
 // ---------- 上下文占用徽标 ----------
 function fmtTok(n: number): string {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
@@ -404,6 +443,8 @@ watch(msgSignature, async () => {
   if (!el) return
   const switched = store.currentId !== lastSessionId
   lastSessionId = store.currentId
+  // 查找浮条开着时别抢滚动：流式输出每来一段就把视图拽回底部，用户没法看匹配处
+  if (store.chatFindOpen) return
   // 切换会话时始终定位到最新消息；流式输出时贴近底部才跟随
   const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 320
   if (switched || nearBottom) el.scrollTo({ top: el.scrollHeight })

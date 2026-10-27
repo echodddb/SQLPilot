@@ -77,6 +77,14 @@
         <button
           v-if="store.module === 'agent'"
           class="btn ghost"
+          :class="{ on: store.chatFindOpen }"
+          title="在对话中搜索（Ctrl+F）：匹配正文 / 代码块 / 工具输出，回车下一条、Shift+回车上一条"
+          @click="store.chatFindOpen = !store.chatFindOpen"
+        >⌕ 搜索</button>
+
+        <button
+          v-if="store.module === 'agent'"
+          class="btn ghost"
           :class="{ on: store.artifactsOpen }"
           :title="`产物（Ctrl+Shift+A）：本次对话的查询结果 / DDL / 读写文件 / 命令输出${artifactCount ? '，共 ' + artifactCount + ' 项' : ''}`"
           @click="store.artifactsOpen = !store.artifactsOpen"

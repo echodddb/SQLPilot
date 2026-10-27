@@ -251,6 +251,12 @@ html[data-theme='light'] .topbar::after {
 .btn.danger:hover { filter: brightness(1.08); box-shadow: 0 6px 20px color-mix(in srgb, var(--red) 30%, transparent); }
 .btn.ghost { background: transparent; border-color: transparent; }
 .btn.ghost:hover { background: var(--bg-card-hover); border-color: var(--border); }
+/* 顶栏开关类按钮的「已打开」态（⌕ 搜索 / ▦ 产物） */
+.btn.on {
+  background: var(--accent-dim);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
 .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: grayscale(0.4); }
 
 /* input 不写 type 时默认就是 text，但属性选择器 input[type="text"] 匹配不到它，
@@ -384,6 +390,30 @@ option { background: var(--bg-card); color: var(--text); }
 .chat-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .chat-scroll { flex: 1; overflow-y: auto; padding: 24px 0; }
 .chat-inner { max-width: 920px; margin: 0 auto; padding: 0 26px; }
+
+/* 对话内查找高亮：走 CSS Custom Highlight（不插 DOM），所以选择器必须写在全局样式里。
+   ::highlight 只认 color / background-color / text-decoration / text-shadow。
+   color: inherit 是刻意的：亮主题 --yellow 是深琥珀、暗主题是亮黄，两套底色下的
+   正文本来就是「深字/浅字」，继承过来对比度自然成立。 */
+::highlight(sp-find) {
+  background-color: color-mix(in srgb, var(--yellow) 38%, transparent);
+  color: inherit;
+  text-decoration: underline;
+}
+::highlight(sp-find-cur) {
+  background-color: var(--yellow);
+  color: #1b1300;
+  text-decoration: underline;
+}
+html[data-theme='light'] ::highlight(sp-find-cur) { color: #fff; }
+/* 用户气泡是主色底 + 白字，跟着主题走会变成「深底深字」：这里固定亮琥珀 + 深字，
+   两个高亮名一起覆盖（否则当前条的色又叠回去），任何主题下都读得清 */
+.msg.user .bubble::highlight(sp-find),
+.msg.user .bubble::highlight(sp-find-cur) {
+  background-color: #fbbf24;
+  color: #1b1300;
+  text-decoration: underline;
+}
 
 .msg { margin-bottom: 20px; }
 

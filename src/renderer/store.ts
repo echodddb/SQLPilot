@@ -105,6 +105,8 @@ export const store = reactive({
   subRun: null as { runId: string; title: string } | null,
   /** 右侧「产物」栏：开关 / 当前聚焦的产物 id / 宽度（宽度落 localStorage） */
   artifactsOpen: false,
+  /** 对话内查找浮条（Ctrl+F 或顶栏「⌕ 搜索」开关；不随会话切换关闭） */
+  chatFindOpen: false,
   artifactFocus: null as string | null,
   artifactW: Number(localStorage.getItem('sqlpilot.artifactW') || 460) || 460
 })
