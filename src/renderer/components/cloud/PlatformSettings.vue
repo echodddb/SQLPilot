@@ -61,7 +61,7 @@
             </div>
             <label class="chk">
               <input v-model="form.insecure" type="checkbox" />
-              <span>跳过 HTTPS 证书校验（内网自签证书时勾选）</span>
+              <span>跳过 HTTPS 证书校验（仅内网自签证书时勾选；开启后该平台的登录密码与数据流量可被中间人截获）</span>
             </label>
           </template>
 

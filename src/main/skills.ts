@@ -277,6 +277,42 @@ function copySkillDir(src: string, dest: string): number {
 }
 
 /**
+ * 技能包解压后的安全校验：拒绝符号链接与硬链接。
+ *
+ * extract-zip 有两个未修复的路径穿越问题（GHSA-jmr9-qjv8-65gv / GHSA-7pqw-9j4j-h8q3）：
+ * 恶意 zip 里的链接条目可以让解压过程写到临时目录之外。技能包只应包含普通文件与目录，
+ * 因此在交给 findSkillRoots / copySkillDir 之前先全量扫一遍，发现链接直接拒绝。
+ */
+function assertNoLinks(root: string): void {
+  const stack = [root]
+  while (stack.length) {
+    const cur = stack.pop()!
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const ent of entries) {
+      const p = path.join(cur, ent.name)
+      let st: fs.Stats
+      try {
+        st = fs.lstatSync(p)
+      } catch {
+        continue // 解压过程中的临时文件可能已消失，无视
+      }
+      if (st.isSymbolicLink()) {
+        throw new Error(`技能包包含符号链接，已拒绝（可能是恶意包）：${path.relative(root, p)}`)
+      }
+      if (st.isFile() && st.nlink > 1) {
+        throw new Error(`技能包包含硬链接，已拒绝（可能是恶意包）：${path.relative(root, p)}`)
+      }
+      if (st.isDirectory()) stack.push(p)
+    }
+  }
+}
+
+/**
  * 导入技能包：zip 文件或本地目录。
  * 自动识别包内所有含 SKILL.md 的技能目录（如 oracle-skills 的 apex/db/fusion/graal/oci），
  * 整目录拷入技能库（保留附属资源）。同名技能视为更新（沿用原 ID，保留启用开关）。
@@ -294,6 +330,8 @@ export async function importSkillPack(srcPath: string): Promise<SkillPackResult>
       await extract(srcPath, { dir: tmpDir })
       root = tmpDir
     }
+    // zip 解压与本地目录都先拒绝链接，再进入技能目录识别与拷贝
+    assertNoLinks(root)
     const roots = findSkillRoots(root)
     if (!roots.length) {
       throw new Error('未在包中找到任何技能（需有含 SKILL.md 的目录；GitHub 仓库通常为 <仓库主目录>/<技能名>/SKILL.md）')
