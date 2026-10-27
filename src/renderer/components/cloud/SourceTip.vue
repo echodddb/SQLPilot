@@ -49,8 +49,9 @@
  * 2) mouseover 先于 mouseenter 触发，卡自身必须视为 pinned 并立刻 return，否则移入卡片瞬间被销毁，再悬停就不显示；
  * 3) 指针进入卡片即 pinned，方便选中复制 SQL；移出卡片才收起。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type SourceInfo } from '../../cloud/sources'
+import { cloud } from '../../cloud/state'
 
 const props = withDefaults(
   defineProps<{
@@ -144,6 +145,11 @@ function onOver(e: MouseEvent): void {
     return
   }
   if (pinned) return
+  // 工作模式：不弹来源详情卡（悬停只用于正常操作）；学习模式才有这层教学浮层
+  if (!cloud.learnMode) {
+    hide()
+    return
+  }
   // 正在勾选 AI 读取范围时不弹来源卡：两层浮层会互相打架
   if (document.body.classList.contains('ai-picking')) {
     hide()
@@ -194,6 +200,14 @@ async function copySql(): Promise<void> {
   await window.sqlpilot.writeClipboard(sql)
   hide()
 }
+
+// 切到工作模式时，屏幕上已经弹着的卡要立刻收起
+watch(
+  () => cloud.learnMode,
+  (on) => {
+    if (!on && tip.value) hide()
+  }
+)
 
 onMounted(() => {
   document.addEventListener('mouseover', onOver)

@@ -168,6 +168,12 @@ export const cloud = reactive({
   /** 全局搜索面板（Ctrl+K） */
   searchOpen: false,
 
+  /**
+   * 学习 / 工作模式。学习模式（默认）：悬停元素弹出「采集来源」详情卡（API / 查询位置 / SQL）；
+   * 工作模式：不弹详情卡，界面只用于干活。选择存 localStorage，跨会话保留。
+   */
+  learnMode: readCloudMode(),
+
   /** 备份恢复（对齐 OCP「备份恢复」：核心指标 / 对象 / 任务 / 存储 / 告警） */
   backup: {
     bundle: null as CloudBackupBundle | null,
@@ -221,6 +227,17 @@ export const cloud = reactive({
 })
 
 let seq = 0
+
+/** 读取持久化的云管模式：缺省 = 学习模式（悬浮详情卡照常弹） */
+function readCloudMode(): boolean {
+  try { return localStorage.getItem('sqlpilot.cloudMode') !== 'work' } catch { return true }
+}
+
+/** 切换学习 / 工作模式并持久化 */
+export function setLearnMode(on: boolean): void {
+  cloud.learnMode = on
+  try { localStorage.setItem('sqlpilot.cloudMode', on ? 'learn' : 'work') } catch { /* 存不上就只当次会话生效 */ }
+}
 
 export const activePlatform = (): CloudPlatformView | undefined =>
   cloud.platforms.find((p) => p.id === cloud.activeId)
