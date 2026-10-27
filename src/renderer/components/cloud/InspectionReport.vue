@@ -113,7 +113,7 @@ function toggleAbnormal(): void {
 </script>
 
 <style scoped>
-.imask { position: fixed; inset: 0; z-index: 830; background: rgba(0, 0, 0, 0.45); display: flex; justify-content: flex-end; backdrop-filter: blur(1px); }
+.imask { position: fixed; inset: 0; z-index: 830; background: rgba(0, 0, 0, 0.45); display: flex; justify-content: flex-end; backdrop-filter: blur(1px); padding-top: var(--titlebar-h); }
 .ireport {
   width: 980px; max-width: 96vw; height: 100%; display: flex; flex-direction: column;
   background: var(--bg-side); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-lg);

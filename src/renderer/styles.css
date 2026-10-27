@@ -1,6 +1,9 @@
 /* ============ SQLPilot 主题系统（科技暗 / 科技亮 · 日/夜双主题） ============ */
 
 :root, html[data-theme='dark'] {
+  /* 原生窗口按钮区（- □ ×，titleBarOverlay）高度：全屏 fixed 弹层（抽屉/弹窗）的面板
+     必须从这条线以下开始，否则面板右上角的关闭/操作按钮落进系统按钮区，点击被窗口吃掉 */
+  --titlebar-h: 54px;
   /* 科技暗：近黑带蓝的底 + 青蓝主色，边框是冷调细线 */
   --bg: #060910;
   --bg-side: #04060c;
@@ -140,7 +143,7 @@ html[data-theme='light'] body::after { opacity: .5; }
   display: flex;
   align-items: center;
   gap: 12px;
-  /* 右侧让出窗口按钮区（- □ ×，约 138px），否则模型下拉会钻到按钮底下 */
+  /* 右侧让出自绘窗口按钮区（WindowControls.vue，- □ ×，约 138px），否则模型下拉会钻到按钮底下 */
   padding: 0 146px 0 18px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-side);
@@ -640,6 +643,8 @@ html[data-theme='light'] ::highlight(sp-find-cur) { color: #fff; }
 .modal-mask {
   position: fixed;
   inset: 0;
+  /* 让出右上角原生窗口按钮区（--titlebar-h），弹窗头部才不会被 - □ × 压住 */
+  padding-top: var(--titlebar-h);
   background: rgba(8, 10, 18, 0.6);
   backdrop-filter: blur(4px);
   display: flex;

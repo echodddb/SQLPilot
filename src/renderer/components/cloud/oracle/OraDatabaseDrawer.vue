@@ -217,6 +217,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 .od-mask {
   position: fixed; inset: 0; z-index: 260; background: rgba(6, 8, 14, 0.46);
   display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px);
+  /* 面板从原生窗口按钮区（- □ ×）以下开始，头部 ✕ 才点得到 */
+  padding-top: var(--titlebar-h);
 }
 .od-shell {
   width: min(1320px, 96vw); height: 92vh; background: var(--bg-card);

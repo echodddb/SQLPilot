@@ -128,6 +128,8 @@ const params = computed(() => {
 .omask {
   position: fixed; inset: 0; z-index: 820; background: rgba(0, 0, 0, 0.42);
   display: flex; justify-content: flex-end; backdrop-filter: blur(1px);
+  /* 面板从原生窗口按钮区（- □ ×）以下开始，头部 ✕ 才点得到 */
+  padding-top: var(--titlebar-h);
 }
 .odrawer {
   width: 900px; max-width: 96vw; height: 100%; display: flex; flex-direction: column;

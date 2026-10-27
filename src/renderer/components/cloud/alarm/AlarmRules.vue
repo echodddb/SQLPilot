@@ -210,7 +210,7 @@ function open(rule: CloudAlarmRule): void {
 .lv.info { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
 .lv.idle { color: var(--text-dim); }
 
-.rl-mask { position: fixed; inset: 0; z-index: 300; background: rgba(6, 8, 14, 0.42); display: flex; justify-content: flex-end; }
+.rl-mask { position: fixed; inset: 0; z-index: 300; background: rgba(6, 8, 14, 0.42); display: flex; justify-content: flex-end; padding-top: var(--titlebar-h); }
 .rl-drawer {
   width: 620px; max-width: 96vw; height: 100%; background: var(--bg-card); border-left: 1px solid var(--border-strong);
   display: flex; flex-direction: column;

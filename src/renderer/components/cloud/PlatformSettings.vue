@@ -323,6 +323,7 @@ function close(): void { emit('close') }
 .mask {
   position: fixed; inset: 0; z-index: 300; background: rgba(5, 7, 12, 0.55);
   display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px); padding: 22px;
+  padding-top: var(--titlebar-h);
 }
 .panel {
   width: 620px; max-width: 100%; max-height: 88vh; display: flex; flex-direction: column;

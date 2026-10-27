@@ -113,6 +113,8 @@ function goCluster(): void {
 .drawer-mask {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 800;
   display: flex; justify-content: flex-end; backdrop-filter: blur(1px);
+  /* 面板从原生窗口按钮区（- □ ×）以下开始，头部 ✕ 才点得到 */
+  padding-top: var(--titlebar-h);
 }
 .drawer {
   width: 560px; max-width: 94vw; height: 100%; background: var(--bg-side);

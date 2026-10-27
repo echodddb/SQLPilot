@@ -264,7 +264,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.mask { position: fixed; inset: 0; z-index: 310; background: rgba(5, 7, 12, 0.55); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px); padding: 22px; }
+.mask { position: fixed; inset: 0; z-index: 310; background: rgba(5, 7, 12, 0.55); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(2px); padding: 22px; padding-top: var(--titlebar-h); }
 .panel { width: 820px; max-width: 100%; max-height: 90vh; display: flex; flex-direction: column; background: var(--bg-side); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: var(--shadow-lg); }
 .ph { display: flex; align-items: flex-start; padding: 14px 16px 12px; border-bottom: 1px solid var(--border); }
 .ph b { font-size: 14.5px; display: block; }

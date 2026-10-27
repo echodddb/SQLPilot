@@ -710,6 +710,7 @@ onMounted(async () => {
   background: rgba(0, 0, 0, .48);
   display: flex; align-items: center; justify-content: center;
   padding: 28px;
+  padding-top: var(--titlebar-h);
 }
 .rules-modal {
   width: min(1000px, 94vw);
