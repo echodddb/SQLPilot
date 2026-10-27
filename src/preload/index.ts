@@ -27,6 +27,16 @@ const plain = (v: any): any => {
 }
 
 const api = {
+  // 窗口控制（自绘 - □ × 按钮，见 renderer/components/WindowControls.vue）
+  winMinimize: () => ipcRenderer.invoke('win:minimize'),
+  winMaxToggle: () => ipcRenderer.invoke('win:maxToggle'),
+  winClose: () => ipcRenderer.invoke('win:close'),
+  winIsMaximized: () => ipcRenderer.invoke('win:isMaximized'),
+  onWinMaxState: (cb: (maxed: boolean) => void): (() => void) => {
+    const l = (_e: unknown, v: boolean): void => cb(v)
+    ipcRenderer.on('win:maxstate', l)
+    return () => { ipcRenderer.removeListener('win:maxstate', l as any) }
+  },
   // 配置
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (cfg: any) => ipcRenderer.invoke('config:set', plain(cfg)),

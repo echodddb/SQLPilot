@@ -7,7 +7,7 @@ import { seedBuiltinSkills } from './skills'
 import { dirsFromArgv, filesFromArgv, setPendingOpens, setPendingWorkspace } from './editor'
 import { appendAudit } from './audit'
 import { loadConfig } from './config'
-import { applyTitleBar, TITLEBAR_COLORS, TITLEBAR_HEIGHT } from './window-chrome'
+import { applyTitleBar } from './window-chrome'
 
 let win: BrowserWindow | null = null
 
@@ -95,17 +95,8 @@ function createWindow(): void {
     backgroundColor: theme === 'light' ? '#e9f0f9' : '#04060c',
     title: 'SQLPilot — DBA 智能助手',
     autoHideMenuBar: true,
-    // 隐藏系统标题栏，只保留右上角 - □ ×，底色交给应用（见 window-chrome.ts）
+    // 隐藏系统标题栏；- □ × 由渲染层自绘（WindowControls.vue），遮罩/毛玻璃才能盖住它
     titleBarStyle: 'hidden',
-    ...(process.platform === 'win32' || process.platform === 'linux'
-      ? {
-          titleBarOverlay: {
-            color: TITLEBAR_COLORS[theme].color,
-            symbolColor: TITLEBAR_COLORS[theme].symbolColor,
-            height: TITLEBAR_HEIGHT
-          }
-        }
-      : {}),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,

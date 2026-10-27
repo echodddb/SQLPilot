@@ -122,8 +122,11 @@
           @click="newServerSession"
         >＋ 新建会话</button>
 
-
       </div>
+
+      <!-- 自绘窗口控制按钮（- □ ×）：fixed 顶右，占顶栏预留的 146px；低于弹层遮罩，
+           抽屉打开时按钮跟顶栏一起被虚化盖住 -->
+      <WindowControls />
 
       <!-- AI 助手：对话为主视图；SSH 终端面板与任务栏挂在本模块下 -->
       <template v-if="store.module === 'agent'">
@@ -223,6 +226,7 @@ import ArchiveModal from './components/ArchiveModal.vue'
 import ProjectModal from './components/ProjectModal.vue'
 import ProjectEditor from './components/ProjectEditor.vue'
 import SessionModal from './components/SessionModal.vue'
+import WindowControls from './components/WindowControls.vue'
 import { edState } from './editor/session'
 import { cloud } from './cloud/state'
 

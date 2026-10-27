@@ -206,6 +206,11 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
 
   interface Window {
     sqlpilot: {
+      winMinimize(): Promise<void>
+      winMaxToggle(): Promise<boolean>
+      winClose(): Promise<void>
+      winIsMaximized(): Promise<boolean>
+      onWinMaxState(cb: (maxed: boolean) => void): () => void
       getConfig(): Promise<any>
       setConfig(cfg: any): Promise<{ ok: boolean; error?: string }>
       maskDefaults(): Promise<any>

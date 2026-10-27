@@ -217,6 +217,14 @@ function previewLlmRequest(url: string, body: any, sessionId: string): Promise<b
 
 export function bindWindow(w: BrowserWindow): void {
   win = w
+  // 最大化状态变化广播给渲染层（自绘窗口按钮的 □ / ❐ 图标要跟着切）
+  const sendMax = (): void => {
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('win:maxstate', win.isMaximized()) } catch { /* 窗口可能正在关闭 */ }
+    }
+  }
+  w.on('maximize', sendMax)
+  w.on('unmaximize', sendMax)
 }
 
 function emit(ev: AgentEvent): void {
@@ -278,6 +286,17 @@ export function registerIpc(): void {
       try { win.webContents.send('editor:ai:event', ev) } catch { /* 窗口关闭中 */ }
     }
   })
+
+  // ---------- 窗口控制（自绘 - □ × 按钮，见 renderer/components/WindowControls.vue） ----------
+  ipcMain.handle('win:minimize', () => { win?.minimize() })
+  ipcMain.handle('win:maxToggle', () => {
+    if (!win || win.isDestroyed()) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+  ipcMain.handle('win:close', () => { win?.close() })
+  ipcMain.handle('win:isMaximized', () => !!win && !win.isDestroyed() && win.isMaximized())
 
   // ---------- 配置 ----------
   // API Key 不下发渲染层：真实值仅留在主进程内存，界面凭 hasKey 判断是否已保存
