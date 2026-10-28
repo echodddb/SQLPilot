@@ -17,6 +17,27 @@
           <b>{{ isOracle ? 'Oracle' : 'OceanBase' }}</b>
           <em>切换平台</em>
         </button>
+        <!-- OceanBase 二级接入方式：OCP 托管 / 直连集群（直连支持多套，合并展示） -->
+        <div v-if="!isOracle" class="accseg" role="tablist" aria-label="接入方式">
+          <button
+            role="tab"
+            :class="{ on: cloud.access === 'ocp' }"
+            :disabled="!hasOcpPlatform"
+            :title="hasOcpPlatform ? '通过 OCP 接口管理集群' : '尚未配置 OCP 平台'"
+            @click="switchAccess('ocp')"
+          >
+            OCP
+          </button>
+          <button
+            role="tab"
+            :class="{ on: cloud.access === 'direct' }"
+            :disabled="!hasDirectPlatform"
+            :title="hasDirectPlatform ? `直连集群 SQL 端口，已配置 ${directCount} 套，合并展示` : '尚未配置直连平台'"
+            @click="switchAccess('direct')"
+          >
+            直连<em v-if="directCount > 1" class="accn">{{ directCount }}</em>
+          </button>
+        </div>
       </div>
       <!-- AI 助手：点一下先在页面上勾选读取范围（各子模块 / tab 右上角出现勾选框），勾完再开对话 -->
       <button
@@ -37,7 +58,7 @@
         <span class="tbi-ico">⚠</span><em>告警</em>
         <i v-if="alarmCount" class="tbi-badge" :class="{ bad: criticalCount }">{{ alarmCount }}</i>
       </button>
-      <button v-if="!isOracle" class="tbi" :class="{ on: cloud.view === 'tasks' }" :disabled="!platform" title="运维任务流水" @click="setView('tasks')">
+      <button v-if="!isOracle && !isDirect" class="tbi" :class="{ on: cloud.view === 'tasks' }" :disabled="!platform" title="运维任务流水" @click="setView('tasks')">
         <span class="tbi-ico">⟳</span><em>任务</em>
       </button>
       <span class="ctop-sep"></span>
@@ -195,7 +216,7 @@ import CloudAi from './CloudAi.vue'
 import AiPickOverlay from './AiPickOverlay.vue'
 import OraAi from './OraAi.vue'
 import OracleConsole from './oracle/OracleConsole.vue'
-import { CLOUD_VIEWS, cloud, activePlatform, initCloud, load, platformsOf, selectPlatform, setVendor, setView, setLearnMode } from '../../cloud/state'
+import { CLOUD_VIEWS, cloud, activePlatform, initCloud, load, platformsOf, selectPlatform, setVendor, setView, setLearnMode, setAccess } from '../../cloud/state'
 import { ora, loadEnvs } from '../../cloud/oracle'
 import type { CloudView as CloudViewKey } from '../../cloud/state'
 import { ai, cancelPick, clearDraft, finishPick, openSession, toggleAi, toggleDraft } from '../../cloud/ai'
@@ -293,7 +314,18 @@ const viewDesc = computed(() => CLOUD_VIEWS.find((v) => v.key === cloud.view)?.d
 const viewOf = (k: CloudViewKey) => CLOUD_VIEWS.find((v) => v.key === k)!
 
 /** 直连模式（无 OCP）没有代理 / 备份任务 / 平台用户体系，导航只留能取到数的页 */
-const isDirect = computed(() => activePlatform()?.type === 'obdirect')
+const isDirect = computed(() =>
+  cloud.vendor === 'ocp' && (cloud.access === 'direct' || activePlatform()?.type === 'obdirect')
+)
+
+const hasOcpPlatform = computed(() => cloud.platforms.some((p) => p.type === 'ocp'))
+const hasDirectPlatform = computed(() => cloud.platforms.some((p) => p.type === 'obdirect'))
+const directCount = computed(() => cloud.platforms.filter((p) => p.type === 'obdirect').length)
+
+function switchAccess(a: 'ocp' | 'direct'): void {
+  if (cloud.access === a) return
+  void setAccess(a)
+}
 
 const NAV_GROUPS = computed<{ title: string; items: ReturnType<typeof viewOf>[] }[]>(() => {
   if (isDirect.value) {
@@ -487,6 +519,47 @@ onBeforeUnmount(() => {
 .vback i { font-style: normal; font-size: 14px; color: var(--text-faint); margin-right: -2px; }
 .vback b { font-weight: 600; color: var(--text); }
 .vback em { font-style: normal; font-size: 10.5px; color: var(--text-faint); }
+
+/* OceanBase 二级接入方式开关（OCP / 直连） */
+.accseg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 10px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+.accseg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.accseg button:hover:not(:disabled) { color: var(--text); }
+.accseg button.on {
+  background: rgba(90, 160, 255, .14);
+  color: #bcd9ff;
+  box-shadow: inset 0 0 0 1px rgba(90, 160, 255, .35);
+}
+.accseg button:disabled { opacity: .38; cursor: not-allowed; }
+.accn {
+  font-style: normal;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: rgba(90, 160, 255, .22);
+  color: #cfe3ff;
+}
 
 .vswitch { display: flex; gap: 4px; margin-left: 12px; }
 .vswitch > button {

@@ -48,6 +48,14 @@ export const cloud = reactive({
   platforms: [] as CloudPlatformView[],
   /** 当前选中的厂商入口（左侧「OceanBase / Oracle」同级切换） */
   vendor: 'ocp' as CloudVendor,
+  /**
+   * OceanBase 下的二级接入方式：
+   *   ocp    = 调 OCP 接口（一台 OCP 管一片集群）
+   *   direct = 直连各集群的 SQL 端口（可配置多套，界面合并展示）
+   */
+  access: 'ocp' as 'ocp' | 'direct',
+  /** 直连模式下 clusterId → 所属平台 id（详情接口要按平台取） */
+  directOf: {} as Record<number, string>,
   /** 是否停在「选择数据库云平台」整页（进来了但还没选类型） */
   picking: true,
   /** 选完类型后的架构装配动画；null = 已经进到控制台 */
@@ -245,9 +253,21 @@ export function setLearnMode(on: boolean): void {
 export const activePlatform = (): CloudPlatformView | undefined =>
   cloud.platforms.find((p) => p.id === cloud.activeId)
 
-/** 某个厂商下的所有平台：OCP 通常一个，Oracle 可能有多套环境 */
-export const platformsOf = (vendor: CloudVendor): CloudPlatformView[] =>
-  cloud.platforms.filter((p) => (p.type === 'oracle' ? 'oracle' : 'ocp') === vendor)
+/** 某个厂商下的所有平台：OCP 通常一个，Oracle 可能有多套环境；直连可能有多套集群 */
+export const platformsOf = (vendor: CloudVendor): CloudPlatformView[] => {
+  if (vendor === 'oracle') return cloud.platforms.filter((p) => p.type === 'oracle')
+  // OceanBase 按二级接入方式分流
+  return cloud.access === 'direct'
+    ? cloud.platforms.filter((p) => p.type === 'obdirect')
+    : cloud.platforms.filter((p) => p.type === 'ocp')
+}
+
+/** 当前接入方式下选中的平台集合（直连是全部平台一起展示） */
+export const currentPlatforms = (): CloudPlatformView[] => platformsOf(cloud.vendor)
+
+/** 是否处于「多集群合并」模式：直连且配了不止一个平台 */
+export const isAggregateMode = (): boolean =>
+  cloud.vendor === 'ocp' && cloud.access === 'direct' && currentPlatforms().length > 1
 
 /** 清空 OCP 各页缓存（切平台/切厂商时用，避免看到上一家的数据） */
 function resetOcpData(): void {
@@ -276,6 +296,7 @@ function resetOcpData(): void {
   cloud.inspection.reportOpen = false
   cloud.platform.bundle = null
   cloud.error = ''
+  cloud.directOf = {}
 }
 
 export async function loadPlatforms(): Promise<void> {
@@ -308,8 +329,24 @@ export async function setVendor(vendor: CloudVendor): Promise<void> {
   }
 }
 
-/** 进入模块时的初始化：拉平台清单 → 探活 → 载入当前视图 */
-export async function initCloud(): Promise<void> {
+/**
+ * 切换 OceanBase 的二级接入方式（OCP 托管 / 直连集群）。
+ * 直连模式会把配置里的**所有**直连平台一起加载并合并展示。
+ */
+export async function setAccess(access: 'ocp' | 'direct'): Promise<void> {
+  if (cloud.access === access) return
+  cloud.access = access
+  cloud.view = 'overview'
+  resetOcpData()
+  cloud.status = null
+  const list = platformsOf('ocp')
+  cloud.activeId = list[0]?.id || ''
+  if (!cloud.activeId) return
+  await checkStatus()
+  if ((cloud.status as { ok?: boolean } | null)?.ok) await load()
+}
+
+/** 进入模块时的初始化：拉平台清单 → 探活 → 载入当前视图 */export async function initCloud(): Promise<void> {
   try {
     await loadPlatforms()
   } catch (e: any) {
@@ -319,9 +356,22 @@ export async function initCloud(): Promise<void> {
   // 记住上次用的厂商：activeId 指向 Oracle 平台就直接进 Oracle 入口
   const cur = activePlatform()
   if (cur?.type === 'oracle') cloud.vendor = 'oracle'
+  // 上次停在直连平台的，直接回到 OB 的直连分支
+  if (cur?.type === 'obdirect') { cloud.vendor = 'ocp'; cloud.access = 'direct' }
   if (!cloud.activeId) {
-    // 没有任何平台时：哪个厂商有平台就进哪个，都没有则停在 OceanBase 的空态
-    cloud.vendor = platformsOf('ocp').length || !platformsOf('oracle').length ? 'ocp' : 'oracle'
+    // 没有任何平台时：哪个入口有平台就进哪个，都没有则停在 OceanBase 的空态
+    const hasOcp = cloud.platforms.some((p) => p.type === 'ocp')
+    const hasDirect = cloud.platforms.some((p) => p.type === 'obdirect')
+    const hasOracle = cloud.platforms.some((p) => p.type === 'oracle')
+    if (hasOcp || hasDirect) {
+      cloud.vendor = 'ocp'
+      cloud.access = hasOcp ? 'ocp' : 'direct'
+      cloud.activeId = platformsOf('ocp')[0]?.id || ''
+    } else if (hasOracle) {
+      cloud.vendor = 'oracle'
+    } else {
+      cloud.vendor = 'ocp'
+    }
     return
   }
   if (cloud.vendor === 'oracle') return
@@ -498,6 +548,163 @@ export async function exportCsv(fileName: string, columns: string[], rows: (stri
   return r
 }
 
+/** 多集群合并时给集群名加平台前缀，避免两套环境里同名的 perf 分不清 */
+const tagCluster = <T extends { name: string; id: number }>(c: T, platform: CloudPlatformView, multi: boolean): T =>
+  multi ? { ...c, name: `${platform.name} · ${c.name}` } : c
+
+function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOverview }[], multi: boolean): CloudOverview {
+  const sum = items.reduce(
+    (a, it) => ({
+      clusters: a.clusters + it.data.kpis.clusters,
+      clustersRunning: a.clustersRunning + it.data.kpis.clustersRunning,
+      hosts: a.hosts + it.data.kpis.hosts,
+      hostsOnline: a.hostsOnline + it.data.kpis.hostsOnline,
+      tenants: a.tenants + it.data.kpis.tenants,
+      alarms: a.alarms + it.data.kpis.alarms,
+      alarmsCritical: a.alarmsCritical + it.data.kpis.alarmsCritical,
+      cpuUsed: a.cpuUsed + it.data.kpis.cpuUsed,
+      cpuTotal: a.cpuTotal + it.data.kpis.cpuTotal
+    }),
+    { clusters: 0, clustersRunning: 0, hosts: 0, hostsOnline: 0, tenants: 0, alarms: 0, alarmsCritical: 0, cpuUsed: 0, cpuTotal: 0 }
+  )
+  const totalHosts = items.reduce((n, it) => n + it.data.hosts.total, 0)
+  const online = items.reduce((n, it) => n + it.data.hosts.online, 0)
+  return {
+    info: {
+      version: items[0]?.data.info.version ?? '',
+      edition: multi ? `OceanBase 直连 · 已合并 ${items.length} 套集群` : (items[0]?.data.info.edition ?? ''),
+      buildTime: ''
+    },
+    kpis: sum,
+    hosts: { total: totalHosts, online, offline: totalHosts - online, agentAbnormal: 0 },
+    clusters: items.flatMap((it) => it.data.clusters.map((c) => tagCluster(c, it.platform, multi))),
+    alarms: items.flatMap((it) => it.data.alarms).slice(0, 50),
+    tasks: [],
+    warnings: [...new Set(items.flatMap((it) => it.data.warnings))]
+  }
+}
+
+/**
+ * 直连模式的数据加载：把配置里所有直连平台各拉一遍再合并。
+ * 单个平台连不上只跳过它并记一条告警文本，不影响其它集群的展示。
+ */
+async function loadDirect(my: number): Promise<void> {
+  const list = currentPlatforms()
+  if (!list.length) {
+    cloud.overview = null
+    cloud.clusters = []
+    cloud.tenants = []
+    cloud.hosts = []
+    cloud.error = ''
+    return
+  }
+  const multi = list.length > 1
+  const failures: string[] = []
+
+  // 集群详情：按 clusterId 反查所属平台
+  if (cloud.view === 'clusters' && cloud.clusterId !== null) {
+    const pid = cloud.directOf[cloud.clusterId] || list[0].id
+    const r = await window.sqlpilot.cloudCluster(pid, cloud.clusterId)
+    if (my !== seq) return
+    if (!r.ok || !r.data) { cloud.error = r.error || '获取集群详情失败'; return }
+    cloud.cluster = r.data
+    return
+  }
+
+  if (cloud.view === 'overview') {
+    const parts = await Promise.all(
+      list.map((p) => window.sqlpilot.cloudOverview(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
+    )
+    if (my !== seq) return
+    const ok: { platform: CloudPlatformView; data: CloudOverview }[] = []
+    for (const x of parts) if (x.r.ok && x.r.data) ok.push({ platform: x.platform, data: x.r.data })
+    for (const bad of parts.filter((x) => !(x.r.ok && x.r.data))) failures.push(`${bad.platform.name}：${bad.r.error || '连接失败'}`)
+    if (!ok.length) { cloud.error = failures.join('；') || '获取直连集群概览失败'; return }
+    cloud.overview = mergeOverviews(ok, multi)
+    const map: Record<number, string> = {}
+    for (const it of ok) for (const c of it.data.clusters) map[c.id] = it.platform.id
+    cloud.directOf = map
+    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    return
+  }
+
+  if (cloud.view === 'clusters') {
+    const parts = await Promise.all(
+      list.map((p) => window.sqlpilot.cloudClusters(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
+    )
+    if (my !== seq) return
+    const map: Record<number, string> = {}
+    const all: CloudCluster[] = []
+    for (const it of parts) {
+      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
+      for (const c of it.r.data) {
+        map[c.id] = it.platform.id
+        all.push(tagCluster(c, it.platform, multi))
+      }
+    }
+    cloud.directOf = map
+    cloud.clusters = all
+    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    return
+  }
+
+  if (cloud.view === 'tenants') {
+    const parts = await Promise.all(
+      list.map((p) => window.sqlpilot.cloudTenants(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
+    )
+    if (my !== seq) return
+    const all: CloudTenant[] = []
+    const map: Record<number, string> = { ...cloud.directOf }
+    for (const it of parts) {
+      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
+      for (const t of it.r.data) {
+        map[t.clusterId] = it.platform.id
+        all.push(multi ? { ...t, clusterName: `${it.platform.name} · ${t.clusterName}` } : t)
+      }
+    }
+    cloud.directOf = map
+    cloud.tenants = all
+    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    return
+  }
+
+  if (cloud.view === 'hosts') {
+    const parts = await Promise.all(
+      list.map((p) => window.sqlpilot.cloudHosts(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
+    )
+    if (my !== seq) return
+    const all: CloudHost[] = []
+    for (const it of parts) {
+      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
+      for (const h of it.r.data) {
+        all.push(multi ? { ...h, alias: `${it.platform.name} · ${h.alias}`, clusters: h.clusters.map((n: string) => `${it.platform.name} · ${n}`) } : h)
+      }
+    }
+    cloud.hosts = all
+    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    return
+  }
+
+  if (cloud.view === 'alarms') {
+    const parts = await Promise.all(
+      list.map((p) => window.sqlpilot.cloudAlarms(p.id, { size: 200 }).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
+    )
+    if (my !== seq) return
+    const all: CloudAlarm[] = []
+    for (const it of parts) {
+      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
+      all.push(...(it.r.data.items || []))
+    }
+    cloud.alarms = all
+    cloud.alarmTotal = all.length
+    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    return
+  }
+
+  // 直连模式没有监控 / 巡检 / 备份 / 任务 / 平台管理页（导航已隐藏），其余视图统一空态
+  cloud.error = ''
+}
+
 export async function load(): Promise<void> {
   if (!cloud.activeId) return
   // Oracle 直连平台不走 OCP 接口：它的数据由 OracleConsole 按环境/分区分批查库
@@ -506,6 +713,11 @@ export async function load(): Promise<void> {
   cloud.loading = true
   cloud.error = ''
   try {
+    // OceanBase 的直连分支：多平台合并
+    if (cloud.vendor === 'ocp' && cloud.access === 'direct') {
+      await loadDirect(my)
+      return
+    }
     if (cloud.view === 'overview') {
       const r = await window.sqlpilot.cloudOverview(cloud.activeId)
       if (my !== seq) return
@@ -652,7 +864,9 @@ export function closeCluster(): void {
 let tenantSeq = 0
 export async function openTenant(clusterId: number, tenantId: number): Promise<void> {
   const my = ++tenantSeq
-  const r = await window.sqlpilot.cloudTenant(cloud.activeId, clusterId, tenantId)
+  // 直连多集群：租户详情必须问它所属的那套平台
+  const pid = cloud.directOf[clusterId] || cloud.activeId
+  const r = await window.sqlpilot.cloudTenant(pid, clusterId, tenantId)
   if (my !== tenantSeq) return
   if (!r.ok || !r.data) {
     cloud.error = r.error || '获取租户详情失败'
