@@ -141,8 +141,8 @@ export interface ServerGroup {
 export interface CloudPlatform {
   id: string
   name: string
-  /** ocp = 调 OCP 的 REST 接口；oracle = 直连数据库查 v$ / dba_ 视图 */
-  type: 'ocp' | 'oracle'
+  /** ocp = 调 OCP 的 REST 接口；obdirect = 直连 OB SQL 端口读系统视图（无 OCP）；oracle = 直连数据库查 v$ / dba_ 视图 */
+  type: 'ocp' | 'obdirect' | 'oracle'
   /** OCP 平台地址，形如 http://192.168.1.100:8080（可带 context path，如 /ocp）；oracle 类型不用 */
   baseUrl?: string
   /** Oracle 直连：主机 / 端口 / 服务名 */

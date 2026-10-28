@@ -242,6 +242,19 @@ const api = {
     ipcRenderer.invoke('cloud:oraSection', { id, section, opts: plain(opts || {}), force: !!force }),
   cloudOraSqlDetail: (id: string, sqlId: string) => ipcRenderer.invoke('cloud:oraSqlDetail', { id, sqlId }),
   cloudOverview: (id: string) => ipcRenderer.invoke('cloud:overview', { id }),
+
+  // 直连模式（无 OCP）专有
+  cloudDirectCapability: (id: string) => ipcRenderer.invoke('cloud:directCapability', { id }),
+  cloudDirectTopSql: (id: string, opts?: any) => ipcRenderer.invoke('cloud:directTopSql', { id, opts }),
+  cloudDirectSqlText: (id: string, sqlId: string) => ipcRenderer.invoke('cloud:directSqlText', { id, sqlId }),
+  cloudDirectParameters: (id: string, opts?: any) => ipcRenderer.invoke('cloud:directParameters', { id, opts }),
+  cloudDirectEvents: (id: string, opts?: any) => ipcRenderer.invoke('cloud:directEvents', { id, opts }),
+  cloudDirectOpenTxns: (id: string) => ipcRenderer.invoke('cloud:directOpenTxns', { id }),
+  cloudDirectMajorFreeze: (id: string) => ipcRenderer.invoke('cloud:directMajorFreeze', { id }),
+  cloudDirectMergeSuspend: (id: string, suspended: boolean) => ipcRenderer.invoke('cloud:directMergeSuspend', { id, suspended }),
+  cloudDirectSetParameter: (id: string, name: string, value: string, tenant?: string) =>
+    ipcRenderer.invoke('cloud:directSetParameter', { id, name, value, tenant }),
+  cloudDirectKillSession: (id: string, sessionId: number) => ipcRenderer.invoke('cloud:directKillSession', { id, sessionId }),
   cloudClusters: (id: string) => ipcRenderer.invoke('cloud:clusters', { id }),
   cloudCluster: (id: string, clusterId: number) => ipcRenderer.invoke('cloud:cluster', { id, clusterId }),
   cloudTenants: (id: string) => ipcRenderer.invoke('cloud:tenants', { id }),

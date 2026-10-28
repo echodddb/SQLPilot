@@ -21,6 +21,8 @@ export type CloudView =
   | 'alarms'
   | 'tasks'
   | 'platform'
+  /** 直连模式专有：参数 / TopSQL / 事件 / 写操作（OCP 平台不显示） */
+  | 'direct'
 
 export const CLOUD_VIEWS: { key: CloudView; label: string; icon: string; desc: string }[] = [
   { key: 'overview', label: '总览', icon: '◎', desc: '集群健康 / 容量水位 / 活跃告警 / 最近任务' },
@@ -34,7 +36,8 @@ export const CLOUD_VIEWS: { key: CloudView; label: string; icon: string; desc: s
   { key: 'sqldiag', label: 'SQL 诊断', icon: '⌁', desc: 'TopSQL / 慢 SQL：按 CPU、耗时、执行次数排序，定位吃资源的语句' },
   { key: 'alarms', label: '告警', icon: '⚠', desc: '当前活跃告警，按级别筛选' },
   { key: 'tasks', label: '任务', icon: '⟳', desc: 'OCP 运维任务流水与子任务进度' },
-  { key: 'platform', label: '平台管理', icon: '⚙', desc: 'OCP 用户 / 角色 / 平台参数 / 登录审计' }
+  { key: 'platform', label: '平台管理', icon: '⚙', desc: 'OCP 用户 / 角色 / 平台参数 / 登录审计' },
+  { key: 'direct', label: '直连运维', icon: '⌗', desc: '无 OCP 直连：系统参数、TopSQL、运维事件与写操作（直接执行 SQL，不可回滚）' }
 ]
 
 /** 云管平台的两类厂商入口：OceanBase（调 OCP 接口）/ Oracle（直连查库） */

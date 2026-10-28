@@ -58,6 +58,17 @@ import {
   taskDetail as cloudTaskDetail,
   taskStats as cloudTaskStats,
   taskCreators as cloudTaskCreators,
+  // 直连模式（无 OCP）专有接口
+  directCapability as cloudDirectCapability,
+  directTopSql as cloudDirectTopSql,
+  directSqlText as cloudDirectSqlText,
+  directParameters as cloudDirectParameters,
+  directEvents as cloudDirectEvents,
+  directOpenTransactions as cloudDirectOpenTxns,
+  directMajorFreeze as cloudDirectMajorFreeze,
+  directMergeSuspend as cloudDirectMergeSuspend,
+  directSetParameter as cloudDirectSetParameter,
+  directKillSession as cloudDirectKillSession,
   metrics as cloudMetrics,
   clusterAction as cloudClusterAction,
   createTenant as cloudCreateTenant,
@@ -2734,6 +2745,25 @@ export function registerIpc(): void {
     cloudTaskDetail(String(id || ''), Number(taskId)))
   ipcMain.handle('cloud:taskStats', (_e, { id }: { id: string }) => cloudTaskStats(String(id || '')))
   ipcMain.handle('cloud:taskCreators', (_e, { id }: { id: string }) => cloudTaskCreators(String(id || '')))
+
+  // 直连模式（无 OCP）：参数 / TopSQL / 事件 / 写操作
+  ipcMain.handle('cloud:directCapability', (_e, { id }: { id: string }) => cloudDirectCapability(String(id || '')))
+  ipcMain.handle('cloud:directTopSql', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudDirectTopSql(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:directSqlText', (_e, { id, sqlId }: { id: string; sqlId: string }) =>
+    cloudDirectSqlText(String(id || ''), String(sqlId || '')))
+  ipcMain.handle('cloud:directParameters', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudDirectParameters(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:directEvents', (_e, { id, opts }: { id: string; opts?: any }) =>
+    cloudDirectEvents(String(id || ''), opts || {}))
+  ipcMain.handle('cloud:directOpenTxns', (_e, { id }: { id: string }) => cloudDirectOpenTxns(String(id || '')))
+  ipcMain.handle('cloud:directMajorFreeze', (_e, { id }: { id: string }) => cloudDirectMajorFreeze(String(id || '')))
+  ipcMain.handle('cloud:directMergeSuspend', (_e, { id, suspended }: { id: string; suspended: boolean }) =>
+    cloudDirectMergeSuspend(String(id || ''), !!suspended))
+  ipcMain.handle('cloud:directSetParameter', (_e, { id, name, value, tenant }: { id: string; name: string; value: string; tenant?: string }) =>
+    cloudDirectSetParameter(String(id || ''), String(name || ''), String(value ?? ''), tenant ? String(tenant) : undefined))
+  ipcMain.handle('cloud:directKillSession', (_e, { id, sessionId }: { id: string; sessionId: number }) =>
+    cloudDirectKillSession(String(id || ''), Number(sessionId)))
   // 告警事件 / 任务列表导出 CSV：渲染层给列定义与行数据，主进程落盘
   ipcMain.handle('cloud:exportCsv', async (_e, { fileName, columns, rows }: { fileName: string; columns: string[]; rows: any[][] }) => {
     if (!Array.isArray(columns) || !Array.isArray(rows)) return { ok: false, error: '导出数据无效' }

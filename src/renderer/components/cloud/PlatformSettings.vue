@@ -18,6 +18,7 @@
               <div class="pname">
                 {{ p.name }}
                 <span v-if="p.type === 'oracle'" class="tag">Oracle 直连</span>
+                <span v-if="p.type === 'obdirect'" class="tag">OceanBase 直连 · 无 OCP</span>
                 <span v-if="p.insecure" class="tag">跳过证书校验</span>
               </div>
               <div class="purl mono">{{ addrOf(p) }}</div>
@@ -34,6 +35,7 @@
             <label>类型</label>
             <div class="seg">
               <button :class="{ on: form.type === 'ocp' }" @click="setType('ocp')">OceanBase（OCP）</button>
+              <button :class="{ on: form.type === 'obdirect' }" @click="setType('obdirect')">OceanBase（直连）</button>
               <button :class="{ on: form.type === 'oracle' }" @click="setType('oracle')">Oracle（直连）</button>
             </div>
           </div>
@@ -63,6 +65,35 @@
               <input v-model="form.insecure" type="checkbox" />
               <span>跳过 HTTPS 证书校验（仅内网自签证书时勾选；开启后该平台的登录密码与数据流量可被中间人截获）</span>
             </label>
+          </template>
+
+          <template v-else-if="form.type === 'obdirect'">
+            <div class="frow three">
+              <div>
+                <label>主机</label>
+                <input v-model="form.host" placeholder="192.168.1.100" spellcheck="false" />
+              </div>
+              <div>
+                <label>SQL 端口</label>
+                <input v-model.number="form.port" type="number" placeholder="2881" />
+              </div>
+              <div>
+                <label>用户名</label>
+                <input v-model="form.username" placeholder="root@sys" spellcheck="false" />
+              </div>
+            </div>
+            <div class="frow two">
+              <div>
+                <label>密码</label>
+                <input v-model="password" type="password" :placeholder="form.id && form.hasPassword ? '已保存，留空则不修改' : 'root@sys 的密码'" />
+              </div>
+            </div>
+            <span class="fhint">
+              直连模式<b>不需要 OCP</b>：直接连 OBServer 的 SQL 端口（默认 2881）读 oceanbase 库的系统视图。
+              用户名必须带租户后缀（<code>root@sys</code>）；默认库为 oceanbase，无需填写。
+              当前仅以 sys 租户视角采集，业务租户的内存 / 会话数据不在覆盖范围内。
+              没有 OCP 代理层，因此没有运维任务编排、告警推送与 Agent 管理；集群「写操作」是直接执行 SQL，不可回滚。
+            </span>
           </template>
 
           <template v-else>
@@ -146,7 +177,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 
 const form = reactive<{
   id: string
-  type: 'ocp' | 'oracle'
+  type: 'ocp' | 'obdirect' | 'oracle'
   name: string
   baseUrl: string
   host: string
@@ -190,19 +221,33 @@ function reset(): void {
   msg.value = ''
 }
 
-function setType(t: 'ocp' | 'oracle'): void {
+function setType(t: 'ocp' | 'obdirect' | 'oracle'): void {
   if (form.type === t) return
   form.type = t
+  // 两类直连的默认端口不同，切换时给一个合理默认，避免沿用上一个类型的端口
+  if (t === 'obdirect') form.port = 2881
+  if (t === 'oracle') form.port = 1521
   msg.value = ''
 }
 
 function addrOf(p: CloudPlatformView): string {
   if (p.type === 'oracle') return `${p.host}:${p.port}${p.serviceName ? '/' + p.serviceName : ''}`
+  if (p.type === 'obdirect') return `${p.host}:${p.port}`
   return p.baseUrl || ''
 }
 
 /** 表单 → IPC 入参（Oracle 不带 baseUrl，OCP 不带库连接字段） */
 function payload() {
+  if (form.type === 'obdirect') {
+    return {
+      id: form.id || undefined,
+      type: 'obdirect' as const,
+      name: form.name,
+      host: form.host,
+      port: Number(form.port) || 2881,
+      username: form.username
+    }
+  }
   if (form.type === 'oracle') {
     return {
       id: form.id || undefined,
@@ -228,7 +273,7 @@ function payload() {
 
 function edit(p: CloudPlatformView): void {
   form.id = p.id
-  form.type = p.type === 'oracle' ? 'oracle' : 'ocp'
+  form.type = p.type === 'oracle' ? 'oracle' : p.type === 'obdirect' ? 'obdirect' : 'ocp'
   form.name = p.name
   form.baseUrl = p.baseUrl || ''
   form.host = p.host || ''
@@ -262,6 +307,9 @@ async function test(): Promise<void> {
         msgKind.value = 'ok'
         msg.value = `连接成功：${r.version || 'Oracle'}（${mode} 模式）${priv}`
       }
+    } else if (r.ok && form.type === 'obdirect') {
+      msgKind.value = 'ok'
+      msg.value = `连接成功：OceanBase ${r.version || ''}（直连模式）${r.note ? ' · ' + r.note : ''}`
     } else if (r.ok && r.info) {
       // 地址会被归一化（去掉 /login 之类的网页路由）：回填到表单，让用户看到真正生效的地址
       if (r.baseUrl && r.baseUrl !== form.baseUrl) form.baseUrl = r.baseUrl

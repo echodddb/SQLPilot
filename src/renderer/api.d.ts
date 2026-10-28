@@ -381,6 +381,27 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       cloudOraSection<K extends CloudOraSectionKey>(id: string, section: K, opts?: Record<string, any>, force?: boolean): Promise<CloudOraSectionResult<CloudOraSections[K]>>
       cloudOraSqlDetail(id: string, sqlId: string): Promise<{ ok: boolean; text?: string; plan?: { id: number; depth: number; operation: string; options: string; objectName: string; cost: number; cardinality: number; bytes: number }[]; error?: string }>
       cloudOverview(id: string): Promise<CloudApi<CloudOverview>>
+
+      // 直连模式（无 OCP）
+      cloudDirectCapability(id: string): Promise<CloudApi<{ version: string; clusterName: string; tenant: string; views: Record<string, boolean>; at: number }>>
+      cloudDirectTopSql(id: string, opts?: { hours?: number; limit?: number; minElapsedMs?: number }): Promise<CloudApi<{
+        sqlId: string; sqlText: string; executions: number; avgElapsedMs: number; maxElapsedMs: number
+        avgCpuMs: number; rowsExamined: number; retCode: number; tenantId: number; lastActiveTime: string
+      }[]>>
+      cloudDirectSqlText(id: string, sqlId: string): Promise<CloudApi<string>>
+      cloudDirectParameters(id: string, opts?: { keyword?: string; limit?: number }): Promise<CloudApi<{
+        name: string; value: string; defaultValue: string; editLevel: string; info: string; zone: string; server: string
+      }[]>>
+      cloudDirectEvents(id: string, opts?: { limit?: number; hours?: number; keyword?: string }): Promise<CloudApi<{
+        timestamp: string; module: string; event: string; name1: string; value1: string; name2: string; value2: string; rsSvrIp: string
+      }[]>>
+      cloudDirectOpenTxns(id: string): Promise<CloudApi<{
+        sessionId: number; tenant: string; user: string; host: string; seconds: number; state: string; sqlId: string
+      }[]>>
+      cloudDirectMajorFreeze(id: string): Promise<CloudApi<{ message: string }>>
+      cloudDirectMergeSuspend(id: string, suspended: boolean): Promise<CloudApi<{ message: string }>>
+      cloudDirectSetParameter(id: string, name: string, value: string, tenant?: string): Promise<CloudApi<{ message: string }>>
+      cloudDirectKillSession(id: string, sessionId: number): Promise<CloudApi<{ message: string }>>
       cloudClusters(id: string): Promise<CloudApi<CloudCluster[]>>
       cloudCluster(id: string, clusterId: number): Promise<CloudApi<CloudClusterDetail>>
       cloudTenants(id: string): Promise<CloudApi<CloudTenant[]>>

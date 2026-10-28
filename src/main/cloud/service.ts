@@ -6,7 +6,10 @@
 
 import crypto from 'node:crypto'
 import { loadConfig, saveConfig } from '../config'
+import { appendAudit } from '../audit'
 import { getPassword, setPassword, deletePassword, secretsAvailable } from '../secrets'
+import * as obd from './obdirect'
+import type { ObDirectPlatform } from './obdirect'
 import {
   OcpClient,
   normalizeBase,
@@ -207,8 +210,7 @@ export function getPlatform(id: string): OcpPlatform {
 }
 
 /** Oracle 直连平台（查库而不是调接口） */
-export function getOraclePlatform(id: string): CloudOraclePlatform {
-  const p = (loadConfig().cloudPlatforms || []).find((x) => x.id === id)
+export function getOraclePlatform(id: string): CloudOraclePlatform {  const p = (loadConfig().cloudPlatforms || []).find((x) => x.id === id)
   if (!p) throw new Error('云管平台未配置或已被删除')
   if (p.type !== 'oracle') throw new Error(`该平台类型为 ${p.type}，不是 Oracle 平台`)
   if (!p.host || !p.username) throw new Error('Oracle 平台缺少主机或用户名，请在平台设置里补全')
@@ -223,6 +225,39 @@ export function getOraclePlatform(id: string): CloudOraclePlatform {
     role: p.role || 'default',
     instantClientDir: p.instantClientDir || ''
   }
+}
+
+/**
+ * OceanBase 直连平台（没有 OCP，直接连 SQL 端口读系统视图）。
+ * 与 OCP 平台互不影响：同一个应用里可以同时配一个 OCP 平台和一个直连平台。
+ */
+export function getObDirectPlatform(id: string): ObDirectPlatform {
+  const p = (loadConfig().cloudPlatforms || []).find((x) => x.id === id)
+  if (!p) throw new Error('云管平台未配置或已被删除')
+  if (p.type !== 'obdirect') throw new Error(`该平台类型为 ${p.type}，不是 OceanBase 直连平台`)
+  if (!p.host || !p.username) throw new Error('直连平台缺少主机或用户名，请在平台设置里补全')
+  return {
+    id: p.id,
+    name: p.name,
+    type: 'obdirect',
+    host: p.host,
+    port: Number(p.port) || 2881,
+    username: p.username,
+    defaultTenant: String((p as any).defaultTenant || '')
+  }
+}
+
+/** 该平台是否走直连模式（所有数据入口据此分派，避免每个函数都去 loadConfig） */
+export function isDirectPlatform(id: string): boolean {
+  const p = (loadConfig().cloudPlatforms || []).find((x) => x.id === id)
+  return !!p && p.type === 'obdirect'
+}
+
+/** 直连平台的密码：没有 OCP 的会话概念，每次取用即可（DPAPI 解密） */
+function directPassword(id: string): string {
+  const pw = getPassword(secretKey(id))
+  if (!pw) throw new Error('平台尚未保存密码，请先在云管平台设置中填写')
+  return pw
 }
 
 function clientOf(id: string): OcpClient {
@@ -254,6 +289,9 @@ export async function savePlatform(input: CloudPlatform & { hasPassword?: boolea
     return { ok: false, error: '系统加密不可用（DPAPI），为避免密码明文落盘，本次保存已取消' }
   }
   if (input.type === 'oracle') return saveOraclePlatform(cfg, input, effPassword, id, exists)
+  if (input.type === 'obdirect') {
+    return saveObDirectPlatform(cfg, input, effPassword, id, exists, password !== undefined && password !== '')
+  }
 
   // 地址归一化：允许用户直接粘浏览器地址栏（带 /login、#/overview 之类的网页路由）
   let baseUrl = ''
@@ -285,6 +323,50 @@ export async function savePlatform(input: CloudPlatform & { hasPassword?: boolea
   }
   saveConfig(cfg)
   dropClient(id)
+  return { ok: true, platform: { ...platform, hasPassword: true } }
+}
+
+/** OceanBase 直连平台的保存：先真连一次拿到版本与拓扑，再落盘 */
+async function saveObDirectPlatform(
+  cfg: any,
+  input: CloudPlatform,
+  effPassword: string,
+  id: string,
+  exists: boolean,
+  newPassword: boolean
+): Promise<SaveResult> {
+  const host = String(input.host || '').trim()
+  const username = String(input.username || '').trim()
+  const port = Number(input.port) || 2881
+  if (!host) return { ok: false, error: '请填写 OceanBase 主机' }
+  if (!username) return { ok: false, error: '请填写用户名（形如 root@sys）' }
+  if (!username.includes('@')) return { ok: false, error: '用户名需带租户后缀，例如 root@sys' }
+
+  const platform: CloudPlatform = {
+    id,
+    name: String(input.name || '').trim() || `${host}:${port}`,
+    type: 'obdirect',
+    host,
+    port,
+    username
+  }
+
+  try {
+    await obd.test({ id, name: platform.name, type: 'obdirect', host, port, username }, effPassword)
+  } catch (e: any) {
+    return { ok: false, error: e?.message || '连接 OceanBase 失败' }
+  }
+
+  if (newPassword) setPassword(secretKey(id), effPassword)
+  if (exists) {
+    cfg.cloudPlatforms = cfg.cloudPlatforms.map((p: CloudPlatform) => (p.id === id ? platform : p))
+  } else {
+    cfg.cloudPlatforms.push(platform)
+  }
+  saveConfig(cfg)
+  // 换目标或换密码后旧连接池必须失效
+  obd.dropPool(id)
+  obd.dropCapability(id)
   return { ok: true, platform: { ...platform, hasPassword: true } }
 }
 
@@ -337,6 +419,8 @@ export function deletePlatform(id: string): { ok: boolean; error?: string } {
   dropClient(id)
   dropOracleConn(id)
   dropOracleCache(id)
+  obd.dropPool(id)
+  obd.dropCapability(id)
   return { ok: true }
 }
 
@@ -371,6 +455,27 @@ export async function testPlatform(input: CloudPlatform, password?: string): Pro
       return { ok: false, error: '使用已保存密码时不能修改地址/端口/用户名/服务名；测试新目标请先填写密码。' }
     }
   }
+  if (input.type === 'obdirect') {
+    if (!input.host || !input.username) return { ok: false, error: '请填写主机与用户名（形如 root@sys）' }
+    try {
+      const r = await obd.test({
+        id: input.id || 'tmp-obdirect',
+        name: input.name,
+        type: 'obdirect',
+        host: String(input.host),
+        port: Number(input.port) || 2881,
+        username: String(input.username)
+      }, eff)
+      return {
+        ok: true,
+        version: r.version,
+        mode: 'direct',
+        note: `集群 ${r.clusterName} · ${r.topology.servers} 台 OBServer / ${r.topology.zones} 个 Zone / ${r.topology.tenants} 个租户 · 可用视图 ${r.capability.available}/${r.capability.total}`
+      }
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) }
+    }
+  }
   if (input.type === 'oracle') {
     const r = await oraTestConn(input as CloudOraclePlatform, eff)
     return { ok: r.ok, error: r.error, version: r.version, mode: r.mode, downgraded: r.downgraded, note: r.note, privileges: r.privileges }
@@ -389,6 +494,15 @@ export async function loginStatus(id: string): Promise<{ ok: boolean; info?: Ocp
       const st = await oracleStatus(getOraclePlatform(id))
       if (!st.ok) return { ok: false, error: st.error || '连接 Oracle 失败' }
       return { ok: true, oracle: { version: st.version, mode: st.mode } }
+    }
+    if (p?.type === 'obdirect') {
+      // 直连模式"登录"就是连通性检查：没有会话，也不缓存登录态
+      const st = await obd.status(getObDirectPlatform(id), directPassword(id))
+      if (!st.ok) return { ok: false, error: st.error || '连接 OceanBase 失败' }
+      return {
+        ok: true,
+        info: { version: st.version || '', edition: `OceanBase 直连 · ${st.clusterName || ''}`, buildTime: '' }
+      }
     }
     const client = clientOf(id)
     const info = await client.ensureLogin()
@@ -427,25 +541,50 @@ async function wrap<T>(fn: () => Promise<T>): Promise<{ ok: boolean; data?: T; e
 }
 
 export const overview = (id: string): Promise<{ ok: boolean; data?: CloudOverview; error?: string }> =>
-  wrap(() => ocpOverview(clientOf(id)))
+  isDirectPlatform(id)
+    ? wrap(() => obd.overview(getObDirectPlatform(id), directPassword(id)))
+    : wrap(() => ocpOverview(clientOf(id)))
 
 export const clusters = (id: string): Promise<{ ok: boolean; data?: CloudCluster[]; error?: string }> =>
-  wrap(() => ocpClusters(clientOf(id)))
+  isDirectPlatform(id)
+    ? wrap(() => obd.clusters(getObDirectPlatform(id), directPassword(id)))
+    : wrap(() => ocpClusters(clientOf(id)))
 
 export const clusterDetail = (id: string, clusterId: number): Promise<{ ok: boolean; data?: CloudClusterDetail; error?: string }> =>
-  wrap(() => ocpClusterDetail(clientOf(id), clusterId))
+  isDirectPlatform(id)
+    ? wrap(() => obd.clusterDetail(getObDirectPlatform(id), directPassword(id), clusterId))
+    : wrap(() => ocpClusterDetail(clientOf(id), clusterId))
 
 export const tenants = (id: string): Promise<{ ok: boolean; data?: CloudTenant[]; error?: string }> =>
-  wrap(() => ocpTenants(clientOf(id)))
+  isDirectPlatform(id)
+    ? wrap(() => obd.tenants(getObDirectPlatform(id), directPassword(id)))
+    : wrap(() => ocpTenants(clientOf(id)))
 
 export const tenantDetail = (id: string, clusterId: number, tenantId: number): Promise<{ ok: boolean; data?: CloudTenantDetail; error?: string }> =>
-  wrap(() => ocpTenantDetail(clientOf(id), clusterId, tenantId))
+  isDirectPlatform(id)
+    ? wrap(async () => {
+        const d = await obd.tenantDetail(getObDirectPlatform(id), directPassword(id), tenantId)
+        if (!d) throw new Error('租户不存在或已删除')
+        return d
+      })
+    : wrap(() => ocpTenantDetail(clientOf(id), clusterId, tenantId))
 
 export const hosts = (id: string): Promise<{ ok: boolean; data?: CloudHost[]; error?: string }> =>
-  wrap(() => ocpHosts(clientOf(id)))
+  isDirectPlatform(id)
+    ? wrap(() => obd.hosts(getObDirectPlatform(id), directPassword(id)))
+    : wrap(() => ocpHosts(clientOf(id)))
 
 export const alarms = (id: string, opts: AlarmQuery = {}): Promise<{ ok: boolean; data?: AlarmListResult; error?: string }> =>
-  wrap(() => ocpAlarms(clientOf(id), opts))
+  isDirectPlatform(id)
+    ? wrap(async () => {
+        // 直连模式的告警是规则引擎算出来的当前状态，没有分页与"历史"概念，
+        // 这里按 AlarmQuery 的级别过滤后整包返回，保持与 OCP 分支同形。
+        const r = await obd.alarms(getObDirectPlatform(id), directPassword(id))
+        const level = Number((opts as any)?.level) || 0
+        const items = level ? r.items.filter((a) => a.level === level) : r.items
+        return { items, total: items.length, warnings: r.skipped } as unknown as AlarmListResult
+      })
+    : wrap(() => ocpAlarms(clientOf(id), opts))
 
 export const alarmHistory = (id: string, opts: { page?: number; size?: number; hours?: number; level?: number; scope?: string; keyword?: string; alarmType?: string; appType?: string } = {}): Promise<{ ok: boolean; data?: AlarmHistoryResult; error?: string }> =>
   wrap(() => ocpAlarmHistory(clientOf(id), opts))
@@ -747,3 +886,106 @@ export const platformProperties = (id: string, page?: number, size?: number): Pr
 
 export const platformLogins = (id: string, page?: number, size?: number): Promise<{ ok: boolean; data?: { items: PlatformLoginRecord[]; total: number }; error?: string }> =>
   wrap(() => ocpPlatformLogins(clientOf(id), page, size))
+
+// ---------- 直连模式（无 OCP）专有接口 ----------
+// 这些接口只对 type === 'obdirect' 的平台有意义，OCP 平台调用会直接报错，
+// 避免渲染层误用时拿到一堆空数据而不是明确的提示。
+
+function requireDirect(id: string): { p: ObDirectPlatform; pw: string } {
+  if (!isDirectPlatform(id)) throw new Error('该平台不是 OceanBase 直连模式')
+  return { p: getObDirectPlatform(id), pw: directPassword(id) }
+}
+
+/** 能力探测结果：界面据此裁决哪些页签可用 */
+export const directCapability = (id: string): Promise<{ ok: boolean; data?: any; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    const cap = await obd.capability(p, pw)
+    return { version: cap.version, clusterName: cap.clusterName, tenant: cap.tenant, views: cap.views, at: cap.at }
+  })
+
+export const directTopSql = (
+  id: string,
+  opts: { hours?: number; limit?: number; minElapsedMs?: number } = {}
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.topSqlOf(p, pw, opts)
+  })
+
+export const directSqlText = (id: string, sqlId: string): Promise<{ ok: boolean; data?: string; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.sqlTextOf(p, pw, String(sqlId || ''))
+  })
+
+export const directParameters = (
+  id: string,
+  opts: { keyword?: string; limit?: number } = {}
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.parametersOf(p, pw, opts)
+  })
+
+export const directEvents = (
+  id: string,
+  opts: { limit?: number; hours?: number; keyword?: string } = {}
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.eventsOf(p, pw, opts)
+  })
+
+export const directOpenTransactions = (id: string): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.openTransactions(p, pw)
+  })
+
+/** 写操作统一走这里：记录审计，失败也留痕（生产环境追责用） */
+async function runWrite(
+  id: string,
+  action: string,
+  detail: string,
+  run: (p: ObDirectPlatform, pw: string) => Promise<{ ok: boolean; message: string }>
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> {
+  try {
+    const { p, pw } = requireDirect(id)
+    const r = await run(p, pw)
+    appendAudit({
+      kind: 'ui.error',
+      detail: `[直连写操作] ${action} ${detail} → ${r.ok ? '成功' : '失败'}：${r.message}`
+    } as any)
+    return r.ok ? { ok: true, data: { message: r.message } } : { ok: false, error: r.message }
+  } catch (e: any) {
+    const msg = e?.message || String(e)
+    appendAudit({ kind: 'ui.error', detail: `[直连写操作] ${action} ${detail} → 异常：${msg}` } as any)
+    return { ok: false, error: msg }
+  }
+}
+
+export const directMajorFreeze = (id: string): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'ALERT SYSTEM MAJOR FREEZE', '', (p, pw) => obd.majorFreeze(p, pw))
+
+export const directMergeSuspend = (
+  id: string,
+  suspended: boolean
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, suspended ? 'SUSPEND MERGE' : 'RESUME MERGE', '', (p, pw) => obd.setMergeSuspended(p, pw, suspended))
+
+export const directSetParameter = (
+  id: string,
+  name: string,
+  value: string,
+  tenant?: string
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'SET PARAMETER', `${tenant ? `租户 ${tenant} ` : ''}${name}=${value}`, (p, pw) =>
+    obd.setParameter(p, pw, name, value, tenant)
+  )
+
+export const directKillSession = (
+  id: string,
+  sessionId: number
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'KILL SESSION', String(sessionId), (p, pw) => obd.killSession(p, pw, sessionId))

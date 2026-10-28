@@ -138,6 +138,7 @@
           <AlarmsPane v-else-if="cloud.view === 'alarms'" />
           <TasksPane v-else-if="cloud.view === 'tasks'" />
           <PlatformPane v-else-if="cloud.view === 'platform'" />
+          <DirectOpsPane v-else-if="cloud.view === 'direct'" />
         </template>
         </div>
       </section>
@@ -170,7 +171,7 @@
  * 云管平台（一级模块）：左侧二级导航 + 主区。
  * 目前只有 OceanBase（OCP）一组入口，结构上按"厂商分组"预留后续扩展位。
  */
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import DbPicker from './DbPicker.vue'
 import DbIntro from './DbIntro.vue'
 import EnginePreview from './EnginePreview.vue'
@@ -186,6 +187,7 @@ import SqlDiagPane from './SqlDiagPane.vue'
 import AlarmsPane from './AlarmsPane.vue'
 import TasksPane from './TasksPane.vue'
 import PlatformPane from './PlatformPane.vue'
+import DirectOpsPane from './DirectOpsPane.vue'
 import PlatformSettings from './PlatformSettings.vue'
 import CloudSearch from './CloudSearch.vue'
 import SourceTip from './SourceTip.vue'
@@ -289,14 +291,36 @@ const viewDesc = computed(() => CLOUD_VIEWS.find((v) => v.key === cloud.view)?.d
 
 /** 左侧导航按 OCP 的分组铺开：数据库对象 / 备份与巡检 / 平台 */
 const viewOf = (k: CloudViewKey) => CLOUD_VIEWS.find((v) => v.key === k)!
-const NAV_GROUPS: { title: string; items: ReturnType<typeof viewOf>[] }[] = [
-  {
-    title: 'OceanBase',
-    items: (['overview', 'clusters', 'tenants', 'obproxy', 'hosts', 'monitor', 'sqldiag', 'alarms', 'tasks'] as CloudViewKey[]).map(viewOf)
-  },
-  { title: '备份与巡检', items: (['backup', 'inspection'] as CloudViewKey[]).map(viewOf) },
-  { title: '平台', items: (['platform'] as CloudViewKey[]).map(viewOf) }
-]
+
+/** 直连模式（无 OCP）没有代理 / 备份任务 / 平台用户体系，导航只留能取到数的页 */
+const isDirect = computed(() => activePlatform()?.type === 'obdirect')
+
+const NAV_GROUPS = computed<{ title: string; items: ReturnType<typeof viewOf>[] }[]>(() => {
+  if (isDirect.value) {
+    return [
+      { title: 'OceanBase 直连', items: (['overview', 'clusters', 'tenants', 'hosts'] as CloudViewKey[]).map(viewOf) },
+      { title: '直连运维', items: (['direct'] as CloudViewKey[]).map(viewOf) },
+      { title: '告警', items: (['alarms'] as CloudViewKey[]).map(viewOf) }
+    ]
+  }
+  return [
+    {
+      title: 'OceanBase',
+      items: (['overview', 'clusters', 'tenants', 'obproxy', 'hosts', 'monitor', 'sqldiag', 'alarms', 'tasks'] as CloudViewKey[]).map(viewOf)
+    },
+    { title: '备份与巡检', items: (['backup', 'inspection'] as CloudViewKey[]).map(viewOf) },
+    { title: '平台', items: (['platform'] as CloudViewKey[]).map(viewOf) }
+  ]
+})
+
+// 切到直连平台时，当前视图可能是 OCP 专有页（如 obproxy），回落到总览避免空白
+watch(isDirect, (direct) => {
+  if (!direct) return
+  if (!['overview', 'clusters', 'tenants', 'hosts', 'alarms', 'direct'].includes(cloud.view)) {
+    setView('overview')
+  }
+})
+
 
 /** 未建备份策略的集群数（侧栏角标，提醒「还有集群没备份」） */
 const backupNoStrategy = computed(
