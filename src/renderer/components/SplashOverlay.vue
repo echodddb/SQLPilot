@@ -79,6 +79,20 @@
         </button>
       </div>
     </div>
+
+    <!-- 右上角关闭：位置/尺寸与主界面自绘的 - □ × 严格重合（贴角 46×var(--titlebar-h)），
+         字形也是同一个 10×10 十字，退场时与真实按钮交叉溶解不会跳位。
+         放在最后是为了 Tab 顺序上「进入」优先。 -->
+    <button
+      class="sp-quit"
+      :class="{ armed: quitting }"
+      type="button"
+      title="关闭 SQLPilot"
+      aria-label="关闭 SQLPilot"
+      @click="quit"
+    >
+      <svg viewBox="0 0 10 10"><path d="M0.5 0.5 L9.5 9.5 M9.5 0.5 L0.5 9.5" /></svg>
+    </button>
   </div>
 </template>
 
@@ -146,6 +160,8 @@ const seqDone = ref(false)
 const scanning = ref(false)
 const leaving = ref(false)
 const hover = ref(-1)
+/** 已点关闭（挡住连点；关窗失败时还原） */
+const quitting = ref(false)
 // run=动画进行中 hold=演完停住等用户点「进入」 wait=已点但主界面还没就绪
 const phase = ref<'run' | 'hold' | 'wait'>('run')
 
@@ -181,6 +197,7 @@ function start(): void {
   seqDone.value = false
   scanning.value = false
   leaving.value = false
+  quitting.value = false
   phase.value = 'run'
   hover.value = -1
   status.value = isLock.value ? 'LOCK · 会话已锁定' : 'POWER ON · INIT BUS'
@@ -239,6 +256,28 @@ function close(): void {
 
 function onKey(e: KeyboardEvent): void {
   if (e.key === 'Escape') requestEnter()
+}
+
+/**
+ * 关闭程序。
+ *
+ * 锁屏态先确认一次：这时候所有终端都还连着，误触一下就把会话全断了。
+ * 真正关窗交给主进程（winClose）；这里只挡住连点，失败时把状态还原，
+ * 否则按钮会变成点了没反应的"砖头"。
+ */
+async function quit(): Promise<void> {
+  if (quitting.value) return
+  if (isLock.value) {
+    const ok = await window.sqlpilot.uiConfirm('退出 SQLPilot？', '锁屏状态下退出会断开所有已连接的终端会话。')
+    if (!ok) return
+  }
+  quitting.value = true
+  clearTimers()
+  try {
+    await window.sqlpilot.winClose()
+  } catch {
+    quitting.value = false
+  }
 }
 
 // 点了「进入」但当时还没就绪：一就绪就放行，不用再点一次
@@ -469,7 +508,9 @@ html[data-theme='light'] .sp {
   border: 1px solid var(--ring-a);
 }
 .sp-brk.a { left: 12px; top: 12px; border-right: 0; border-bottom: 0; }
-.sp-brk.b { right: 12px; top: 12px; border-left: 0; border-bottom: 0; }
+/* 右上角现在是关闭按钮的地盘：原来的 L 型角标会和 × 字形交叉，
+   改成按钮左边界上的一道短刻度——继续"框住窗口"，又成了那个角落有控件的暗示 */
+.sp-brk.b { right: 46px; top: 20px; width: 1px; height: 14px; border: none; background: var(--ring-a); }
 .sp-brk.c { left: 12px; bottom: 12px; border-right: 0; border-top: 0; }
 .sp-brk.d { right: 12px; bottom: 12px; border-left: 0; border-top: 0; }
 
@@ -952,5 +993,81 @@ html[data-theme='light'] .sp {
    整条变绿会在灰阶画面里抢成焦点，跟 ZCode 的克制调性不符 */
 .sp-bot.done .bar > i {
   box-shadow: 0 0 8px 0 var(--bar-glow);
+}
+
+/* ============ 右上角关闭（关闭程序） ============
+   位置与尺寸必须和 WindowControls.vue 的 .wc-btn.wc-x 完全一致：
+   .wc 是 fixed 贴角高 var(--titlebar-h)，每个按钮 46px 宽，× 在最右侧 —— 这里用
+   「贴角 + 46 × var(--titlebar-h) + flex 居中 + 同一个 10×10 十字」复刻，
+   于是开屏淡出、主界面淡入时两颗按钮重叠，鼠标底下的位置不会跳。
+   静止态只留一条很淡的叉（0.42 + HUD 灰），融进扫描线/网格里不抢戏；
+   悬停才露出 Windows 惯例的红色和白色叉，手感与主界面那颗保持一致。 */
+.sp-quit {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 6;
+  width: 46px;
+  height: var(--titlebar-h, 54px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--hud-dim);
+  cursor: default;
+  opacity: 0.42;
+  /* 只过渡颜色；opacity 的过渡交给下面「未 boot」那条，避免一进场就闪一下 */
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.4s ease;
+}
+/* 动画起跑前先藏着，等 HUD 浮上来再一起出现（booted 是 mount 后 30ms 置位） */
+.sp:not(.boot) .sp-quit {
+  opacity: 0;
+  transition: none;
+}
+.sp-quit svg {
+  width: 10px;
+  height: 10px;
+  stroke: currentColor;
+  stroke-width: 1;
+  fill: none;
+  transition: rotate 0.18s ease;
+}
+.sp-quit:hover,
+.sp-quit:focus-visible {
+  background: #e81123;
+  color: #fff;
+  opacity: 1;
+  outline: none;
+  /* 悬停反馈要跟手：别用基础规则里那条 0.4s 的淡入曲线 */
+  transition: opacity 0.12s ease, background 0.15s ease, color 0.15s ease;
+}
+/* 悬停时叉转 90°：十字变成"收起"的手势，呼应动画里的角标与旋转环 */
+.sp-quit:hover svg {
+  rotate: 90deg;
+}
+.sp-quit:active {
+  opacity: 0.85;
+}
+/* 已点关闭：不等主进程回话就先压成红色，点击有即时反馈 */
+.sp-quit.armed {
+  background: #e81123;
+  color: #fff;
+  opacity: 1;
+}
+/* 驻留态（动画演完、停在"等点击"）：跟「进入」按钮一起提亮，提示这个角落还有第二个出口。
+   放这么靠后是因为选择器权重高于 :hover，悬停要能压回 1。 */
+.sp.ready .sp-quit {
+  opacity: 0.6;
+}
+.sp.ready .sp-quit:hover,
+.sp.ready .sp-quit:focus-visible {
+  opacity: 1;
+}
+/* 退场时跟随整层一起淡出（写在 hover 之后才压得住） */
+.sp.leaving .sp-quit {
+  opacity: 0;
+  transition: opacity 0.2s ease;
 }
 </style>
