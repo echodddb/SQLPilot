@@ -244,6 +244,9 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       testServer(server: any, password?: string, keyPassphrase?: string): Promise<{ ok: boolean; label?: string; locale?: string; viaJump?: string; error?: string }>
       saveServer(server: any, password?: string, keyPassphrase?: string): Promise<{ ok: boolean; id?: string; error?: string }>
       deleteServer(id: string): Promise<{ ok: boolean }>
+      saveServerGroup(name: string, oldName?: string): Promise<{ ok: boolean; name?: string; moved?: number; error?: string }>
+      deleteServerGroup(name: string, moveTo?: string): Promise<{ ok: boolean; moved?: number; error?: string }>
+      moveServersToGroup(ids: string[], group: string): Promise<{ ok: boolean; moved?: number; error?: string }>
       forgetHostKey(host: string, port: number): Promise<{ ok: boolean; removed: boolean }>
       importSshConfig(): Promise<{ ok: boolean; error?: string; path: string; entries: SshConfigEntryView[] }>
       termOpen(termId: string, serverId: string, opts?: { cols?: number; rows?: number; encoding?: string; cwd?: string; term?: string }): Promise<{ ok: boolean; error?: string }>

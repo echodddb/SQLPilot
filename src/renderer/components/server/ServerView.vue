@@ -205,9 +205,12 @@ function closeTab(id: string): void {
   closeTabState(id)
 }
 
-function newSession(): void {
+function newSession(group?: unknown): void {
   srv.editingNew = true
-  srv.editing = { id: `srv_${Date.now()}_${Math.floor(Math.random() * 1000)}` }
+  // 从分组右键「在此分组新建会话」进来时带着分组名：新建完直接落在那个文件夹里。
+  // 空态那个按钮是 @click="newSession"，会把 MouseEvent 传进来，这里只认字符串。
+  const g = typeof group === 'string' && group.trim() ? group.trim() : ''
+  srv.editing = { id: `srv_${Date.now()}_${Math.floor(Math.random() * 1000)}`, ...(g ? { group: g } : {}) }
 }
 
 function editSession(server: SshServerCfg): void {

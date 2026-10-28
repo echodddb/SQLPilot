@@ -2,6 +2,7 @@ import { app } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AppConfig, ConnProfile, ProjectConfig, TermPrefs } from './types'
+import { normalizeServerGroups } from './server-groups'
 import { setPassword, getPassword, deletePassword, secretsAvailable } from './secrets'
 import { writeFileAtomic } from './atomic'
 import { defaultMaskingConfig, normalizeMaskingConfig } from './masking'
@@ -53,6 +54,7 @@ const DEFAULT: AppConfig = {
   mode: 'readonly',
   projects: [],
   servers: [],
+  serverGroups: [],
   skillsEnabled: {},
   masking: defaultMaskingConfig(),
   cloudPlatforms: [],
@@ -96,6 +98,9 @@ export function loadConfig(): AppConfig {
   if (!cfg.skillsEnabled || typeof cfg.skillsEnabled !== 'object') cfg.skillsEnabled = {}
   cfg.masking = normalizeMaskingConfig(cfg.masking)
   cfg.termPrefs = normalizeTermPrefs(cfg.termPrefs)
+  // 分组文件夹清单：清非法/重复项，并把只在服务器 group 字段上出现的分组补登记
+  // （分组最初只存在服务器对象里，旧配置靠这一步才能长出文件夹）
+  normalizeServerGroups(cfg)
   // 一次性迁移：旧版服务器内联在项目里 → 折叠进全局注册表，项目改为 serverIds 引用。
   // 密码键本来就是全局的 server:<id>，迁移后原密码直接生效；迁移幂等，落盘一次后此分支不再进
   if (cfg.projects.some((p) => Array.isArray(p.servers) && p.servers.length)) {

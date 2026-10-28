@@ -122,6 +122,18 @@ export interface SshServer {
 }
 
 /**
+ * 服务器分组文件夹（侧栏按文件夹收会话）。
+ *
+ * 身份就是名字本身：SshServer.group 存的也是同一个字符串，改名时两边一起改。
+ * 之所以要有这份清单，是因为「分组」不能只从服务器的 group 字段推导——空文件夹会立刻消失，
+ * 用户就没办法先建好分组再往里放机器。
+ */
+export interface ServerGroup {
+  /** 分组名（唯一；不能是「未分组」——那是没有分组的兜底桶） */
+  name: string
+}
+
+/**
  * 云管平台接入（左侧一级模块「云管平台」）。
  * 目前只接 OceanBase 云平台（OCP）；type 预留，后续加其它云平台时按 type 分发。
  * 密码不落在这里：DPAPI 加密存 secrets.json，键 cloud:<id>。
@@ -167,6 +179,8 @@ export interface AppConfig {
   projects: ProjectConfig[]
   /** 全局 SSH 服务器注册表（项目经 serverIds 引用；密码 DPAPI 加密存 secrets，键 server:<id>） */
   servers: SshServer[]
+  /** 服务器分组文件夹清单（决定侧栏文件夹的顺序；空文件夹靠它保留） */
+  serverGroups?: ServerGroup[]
   /** 终端外观与交互偏好（字体/配色/复制粘贴/编码，全局共享） */
   termPrefs?: TermPrefs
   /** 技能启用状态（技能本体在 userData/skills/） */

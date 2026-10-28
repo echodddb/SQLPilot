@@ -188,4 +188,80 @@ Host b
   eq(joinLocal(W('C:/a/'), 'b'), W('C:/a/b'), '去掉多余尾分隔符')
 }
 
+// ---------- 分组文件夹（名字即身份：config.serverGroups ∪ 服务器 group 字段） ----------
+{
+  const sg = await import('../src/main/server-groups.ts')
+
+  eq(sg.normalizeGroupName('  生产   环境 '), '生产 环境', '分组名去首尾空白并折叠内部空白')
+  eq(sg.normalizeGroupName('a\u0000b'), 'ab', '分组名剔掉控制字符')
+  eq(sg.normalizeGroupName(null), '', '空值归一为空串')
+  eq(sg.normalizeGroupName('x'.repeat(80)).length, 40, '超长分组名截断')
+
+  eq(sg.validateGroupName('   ').ok, false, '空分组名不合法')
+  eq(sg.validateGroupName('未分组').ok, false, '「未分组」是内置兜底桶，不允许当分组名')
+  eq(sg.validateGroupName(' 生产 ').name, '生产', '合法分组名返回清洗后的值')
+
+  // 旧配置：分组只写在服务器 group 字段上 → 要能长出文件夹清单，并且空文件夹靠清单保留
+  const cfg = {
+    serverGroups: [{ name: '生产' }, { name: '空组' }, { name: '生产' }],
+    servers: [
+      { id: 'a', name: 'A', host: 'h', port: 22, user: 'u', group: '生产' },
+      { id: 'b', name: 'B', host: 'h', port: 22, user: 'u', group: '测试' },
+      { id: 'c', name: 'C', host: 'h', port: 22, user: 'u' }
+    ]
+  }
+  eq(sg.groupNames(cfg), ['生产', '空组', '测试'], '文件夹顺序在前、服务器独有分组补后、去重')
+  ok(sg.hasGroup(cfg, '空组'), '空文件夹也算存在')
+  ok(!sg.hasGroup(cfg, '未分组'), '兜底桶不算真分组')
+
+  // 只写在服务器上的分组，登记一次后就有了固定位置（否则每次载入都要靠推导，顺序会飘）
+  eq(sg.ensureGroup(cfg, '测试'), true, '服务器上独有的分组补登记进清单')
+  eq(sg.ensureGroup(cfg, '测试'), false, '已登记的分组不重复添加')
+  eq(sg.ensureGroup(cfg, '开发'), true, '新分组追加')
+  eq(cfg.serverGroups.map((g) => g.name), ['生产', '空组', '测试', '开发'], 'ensureGroup 顺序按创建先后')
+
+  // 改名：文件夹与服务器同步改，位置不变
+  const moved = sg.renameGroup(cfg, '生产', '生产环境')
+  eq(moved, 1, '改名搬动 1 台服务器')
+  eq(cfg.servers[0].group, '生产环境', '服务器 group 跟着改名')
+  eq(cfg.serverGroups.map((g) => g.name), ['生产环境', '空组', '测试', '开发'], '文件夹原位改名')
+  eq(sg.renameGroup(cfg, '生产环境', '生产环境'), 0, '改成一模一样不做事')
+
+  // 删除分组：有 moveTo 就搬，没有就回到未分组
+  eq(sg.deleteGroup(cfg, '生产环境', '开发'), 1, '删除分组并搬到目标分组')
+  eq(cfg.servers[0].group, '开发', '会话落到 moveTo 指定的分组')
+  eq(sg.groupNames(cfg).includes('生产环境'), false, '被删的分组从清单消失')
+  eq(sg.deleteGroup(cfg, '开发'), 1, '删除分组且不指定目标 → 组内会话全部移出')
+  eq(cfg.servers[0].group, undefined, '移出分组后 group 字段被删掉')
+  eq(sg.deleteGroup(cfg, '未分组'), 0, '兜底桶不可删除')
+
+  // 会话搬家：空串 = 未分组；非空自动登记文件夹
+  eq(sg.moveServers(cfg, ['b'], '新组'), 1, '移入新分组')
+  eq(cfg.servers[1].group, '新组', 'group 字段写入')
+  ok(sg.groupNames(cfg).includes('新组'), '移动时自动登记文件夹（否则空组会消失）')
+  eq(sg.moveServers(cfg, ['b'], ''), 1, '空分组名 = 移出分组')
+  eq(cfg.servers[1].group, undefined, '移出后不留空 group')
+  eq(sg.moveServers(cfg, [], '新组'), 0, '没有目标会话时不动配置')
+
+  // 回归：server:save 是先把机器写进 cfg.servers 再调 ensureGroup，
+  // 早前用 hasGroup 判断"已登记"会把刚写进去那台机器的分组误判成已存在，文件夹永远进不了清单
+  const flow = { serverGroups: [], servers: [{ id: 'x', name: 'X', host: 'h', port: 22, user: 'u', group: '新写的组' }] }
+  eq(sg.ensureGroup(flow, '新写的组'), true, '先写服务器再登记分组也能进清单（回归）')
+  eq(flow.serverGroups.map((g) => g.name), ['新写的组'], '清单里真的有了这个文件夹')
+
+  // 载入配置时的整理：去重、剔非法、迁移旧数据、服务器上的脏名字对齐
+  const dirty = {
+    serverGroups: [{ name: ' 生产 ' }, { name: '生产' }, { name: '未分组' }, { name: '' }, '裸字符串'],
+    servers: [
+      { id: 'a', name: 'A', host: 'h', port: 22, user: 'u', group: '生产' },
+      { id: 'b', name: 'B', host: 'h', port: 22, user: 'u', group: '未分组' },
+      { id: 'c', name: 'C', host: 'h', port: 22, user: 'u', group: ' 机房A ' }
+    ]
+  }
+  sg.normalizeServerGroups(dirty)
+  eq(dirty.serverGroups.map((g) => g.name), ['生产', '裸字符串', '机房A'], '清理重复/空/保留名，并补登记服务器上的分组')
+  eq(dirty.servers[1].group, undefined, '服务器上写着「未分组」等于没分组')
+  eq(dirty.servers[2].group, '机房A', '服务器上的分组名对齐清洗后的写法')
+}
+
 console.log(`\x1b[32m✓ unit-server: ${passed} 个断言通过\x1b[0m`)

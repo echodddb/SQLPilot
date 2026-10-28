@@ -43,8 +43,8 @@ export const srv = reactive({
   collapsed: {} as Record<string, boolean>,
   /** 每台机器的目录记忆（SFTP 双栏） */
   paths: {} as Record<string, PathMemory>,
-  /** SFTP 面板是否展开（默认开：与 MobaXterm 一致，连上就能看到文件） */
-  sftpOpen: true,
+  /** SFTP 面板是否展开（默认收起：只连终端时它白占一半宽度，需要时点标签栏的 SFTP 按钮） */
+  sftpOpen: false,
   /** SFTP 面板宽度（双栏各占一半；放在终端左侧，太宽会挤掉终端，见 ServerView 的 max-width 兜底） */
   sftpW: 420,
   /** 传输队列（跨会话共享，切走再回来还能看到进度） */
@@ -79,6 +79,27 @@ export function servers(): SshServerCfg[] {
 
 export function findServer(id: string): SshServerCfg | undefined {
   return servers().find((s) => s.id === id)
+}
+
+/** 兜底桶的显示名：没有分组的会话全挂这里，不是用户建的文件夹 */
+export const UNGROUPED = '未分组'
+
+/**
+ * 分组文件夹清单：配置里登记的（保持用户排序）在前，只在会话 group 上出现的补在后面。
+ * 空文件夹靠配置里这条清单活着——不能只从服务器 group 字段推导。
+ */
+export function serverGroups(): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const push = (raw: unknown) => {
+    const n = String(raw ?? '').trim()
+    if (!n || n === UNGROUPED || seen.has(n)) return
+    seen.add(n)
+    out.push(n)
+  }
+  for (const g of (store.cfg as any)?.serverGroups || []) push(g?.name)
+  for (const s of servers()) push(s.group)
+  return out
 }
 
 export function newTermId(): string {

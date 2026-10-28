@@ -158,7 +158,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
 import type { SshServerCfg } from '../../../main/types'
-import { servers, flash } from '../../server/state'
+import { servers, flash, serverGroups } from '../../server/state'
 import { FONT_SIZES, ENCODINGS } from '../../server/prefs'
 import { TERM_SCHEMES } from '../../server/schemes'
 import { SERVER_COLORS } from '../../server/colors'
@@ -214,11 +214,8 @@ const fontSizeOr = computed({
   set: (v: any) => { form.fontSize = v === '' ? '' : Number(v) }
 })
 
-const groupNames = computed(() => {
-  const set = new Set<string>()
-  for (const s of servers()) if (s.group) set.add(s.group)
-  return [...set].sort()
-})
+/** 分组候选：配置里登记的文件夹（含空文件夹）+ 会话上已有的分组名 */
+const groupNames = computed(() => serverGroups())
 
 /** 跳板候选：不能选自己；也不能选以自己为跳板的下游（否则成环，主进程也会拒绝） */
 const jumpCandidates = computed(() =>

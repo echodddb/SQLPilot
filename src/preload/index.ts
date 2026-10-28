@@ -87,6 +87,10 @@ const api = {
   testServer: (server: any, password?: string, keyPassphrase?: string) => ipcRenderer.invoke('server:test', { server: plain(server), password, keyPassphrase }),
   saveServer: (server: any, password?: string, keyPassphrase?: string) => ipcRenderer.invoke('server:save', { server: plain(server), password, keyPassphrase }),
   deleteServer: (id: string) => ipcRenderer.invoke('server:delete', { id }),
+  // 分组文件夹（名字即身份；改名/删除由主进程连带改服务器上的 group 字段）
+  saveServerGroup: (name: string, oldName?: string) => ipcRenderer.invoke('server:groupSave', { name, oldName }),
+  deleteServerGroup: (name: string, moveTo?: string) => ipcRenderer.invoke('server:groupDelete', { name, moveTo }),
+  moveServersToGroup: (ids: string[], group: string) => ipcRenderer.invoke('server:groupMove', { ids: [...ids], group }),
   forgetHostKey: (host: string, port: number) => ipcRenderer.invoke('server:forgetHostKey', { host, port }),
   importSshConfig: () => ipcRenderer.invoke('server:importSshConfig'),
   // 交互式 SSH 终端

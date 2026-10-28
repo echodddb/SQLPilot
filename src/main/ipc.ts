@@ -10,6 +10,7 @@ import { getAdapter, dropAdapter, closeAll } from './db/manager'
 import { testServer, probeServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, forgetHostKey, sftpList, sftpDownload, sftpUpload } from './ssh'
 import * as sftpOps from './sftp'
 import { readSshConfig } from './ssh-config'
+import { UNGROUPED, deleteGroup, ensureGroup, groupNames, moveServers, normalizeGroupName, renameGroup, validateGroupName } from './server-groups'
 import { classifySql, dialectOf } from './db/guard'
 import { OracleAdapter } from './db/oracle'
 import { ObOracleAdapter } from './db/ob-oracle'
@@ -725,6 +726,8 @@ export function registerIpc(): void {
       const v = String(raw?.[k] ?? '').trim()
       if (v) s[k] = v
     }
+    // 「未分组」是兜底桶的显示名，不是真分组：存进去会让侧栏出现一个同名文件夹
+    if (s.group === UNGROUPED) delete s.group
     if (auth === 'key') s.keyPath = String(raw.keyPath || '').trim()
     if (raw.jumpId) s.jumpId = String(raw.jumpId)
     if (raw.scheme) s.scheme = String(raw.scheme)
@@ -767,6 +770,8 @@ export function registerIpc(): void {
     const prev = idx >= 0 ? cfg.servers[idx] : null
     if (idx >= 0) cfg.servers[idx] = clean
     else cfg.servers.push(clean)
+    // 会话上填的分组名自动登记成文件夹：否则新分组里只可能"恰好"有机器，没法先建再拖
+    if (clean.group) ensureGroup(cfg, clean.group)
     saveConfig(cfg)
     // 口令单独走 DPAPI；空值 = 保持已存（编辑备注时不该逼用户重填密码）
     if (password) setPassword(`server:${clean.id}`, password)
@@ -827,6 +832,55 @@ export function registerIpc(): void {
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) }
     }
+  })
+
+  // ---------- 服务器分组文件夹 ----------
+  // 分组名就是身份（服务器 group 字段引用同一字符串），所以改名的语义是"批量改服务器 + 改文件夹清单"。
+  // 单独建一份清单是为了空文件夹不消失——先建分组再往里放机器是 DBA 的常见顺序。
+  ipcMain.handle('server:groupSave', (_e, { name, oldName }: { name: string; oldName?: string }) => {
+    const v = validateGroupName(name)
+    if (!v.ok) return { ok: false, error: v.error }
+    const cfg = loadConfig()
+    const from = normalizeGroupName(oldName)
+    if (from && from !== UNGROUPED) {
+      if (from !== v.name) {
+        if (groupNames(cfg).includes(v.name)) return { ok: false, error: `分组「${v.name}」已存在` }
+        const moved = renameGroup(cfg, from, v.name)
+        saveConfig(cfg)
+        return { ok: true, name: v.name, moved }
+      }
+      ensureGroup(cfg, v.name)
+      saveConfig(cfg)
+      return { ok: true, name: v.name, moved: 0 }
+    }
+    if (groupNames(cfg).includes(v.name)) return { ok: false, error: `分组「${v.name}」已存在` }
+    ensureGroup(cfg, v.name)
+    saveConfig(cfg)
+    return { ok: true, name: v.name, moved: 0 }
+  })
+
+  ipcMain.handle('server:groupDelete', (_e, { name, moveTo }: { name: string; moveTo?: string }) => {
+    const v = validateGroupName(name)
+    if (!v.ok) return { ok: false, error: v.error }
+    const cfg = loadConfig()
+    const moved = deleteGroup(cfg, v.name, moveTo)
+    saveConfig(cfg)
+    return { ok: true, moved }
+  })
+
+  /** 会话搬家：ids 非空，group 为空串 = 移出分组（回「未分组」） */
+  ipcMain.handle('server:groupMove', (_e, { ids, group }: { ids: string[]; group: string }) => {
+    const list = Array.isArray(ids) ? ids.map((x) => String(x)) : []
+    if (!list.length) return { ok: false, error: '没有选择会话' }
+    const target = normalizeGroupName(group)
+    if (target && target !== UNGROUPED) {
+      const v = validateGroupName(target)
+      if (!v.ok) return { ok: false, error: v.error }
+    }
+    const cfg = loadConfig()
+    const moved = moveServers(cfg, list, target)
+    saveConfig(cfg)
+    return { ok: true, moved }
   })
 
   ipcMain.handle('server:forgetHostKey', (_e, { host, port }: { host: string; port: number }) => {
