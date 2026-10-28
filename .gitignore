@@ -10,6 +10,9 @@ tmp-electron-diagnose/
 MEMORY.md
 test/.*.mjs
 
+# 工作区元数据（AI 助手的项目笔记与记忆，仅本地保留）
+.workbuddy/
+
 # 编辑器/系统临时文件
 .vscode/
 .idea/
