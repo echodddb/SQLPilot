@@ -23,7 +23,6 @@
     @drop.prevent="onDrop"
   >
     <ModuleNav />
-    <Sidebar v-if="store.module === 'agent'" />
     <div class="main-area">
       <!-- 顶栏：所有模块共用（含文本编辑），品牌标识 + 模块标识 + 模块级操作 -->
       <div class="topbar">
@@ -128,35 +127,42 @@
            抽屉打开时按钮跟顶栏一起被虚化盖住 -->
       <WindowControls />
 
-      <!-- AI 助手：对话为主视图；SSH 终端面板与任务栏挂在本模块下 -->
-      <template v-if="store.module === 'agent'">
-        <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
-             改由宿主 div 承担布局，子组件只管内容 -->
-        <!-- 右侧「产物」栏：查询结果 / DDL / 文件 / 命令输出的结果预览（WorkBuddy 式） -->
-        <div class="agent-row">
-          <div class="chat-view-host">
-            <ChatView />
-          </div>
-          <ArtifactsPanel v-if="store.artifactsOpen" />
+      <!-- 模块内容区。AI 助手的项目侧栏也放在顶栏之下（与数据库/服务器/云管一致），
+           于是顶栏横跨整幅宽度、各模块内容的上边框统一落在 --titlebar-h 那条线上 -->
+      <div class="main-body">
+        <Sidebar v-if="store.module === 'agent'" />
+        <div class="main-content">
+          <!-- AI 助手：对话为主视图；SSH 终端面板与任务栏挂在本模块下 -->
+          <template v-if="store.module === 'agent'">
+            <!-- ChatView 的 attrs 继承在运行中不稳定（style/v-show 未落到根元素），
+                 改由宿主 div 承担布局，子组件只管内容 -->
+            <!-- 右侧「产物」栏：查询结果 / DDL / 文件 / 命令输出的结果预览（WorkBuddy 式） -->
+            <div class="agent-row">
+              <div class="chat-view-host">
+                <ChatView />
+              </div>
+              <ArtifactsPanel v-if="store.artifactsOpen" />
+            </div>
+
+            <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
+                 SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
+            <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" @destroy="wbEverOpen = false; store.workbench = null" />
+            <Taskbar />
+          </template>
+          <ReportView v-else-if="store.module === 'report'" style="flex: 1; min-height: 0" />
+          <TextEditorView v-else-if="store.module === 'editor'" style="flex: 1; min-height: 0" />
+          <MaskingView v-else-if="store.module === 'masking'" style="flex: 1; min-height: 0" />
+          <CloudView v-else-if="store.module === 'cloud'" style="flex: 1; min-height: 0" />
+
+          <!-- 数据库控制台（独立一级模块）：v-show 保活——切到别的模块处理完再回来，
+               查询标签页 / 结果集 / 未提交事务全部还在；只有 ✕ 关闭控制台才销毁 -->
+          <DbWorkbenchView v-if="store.dbOpen" v-show="store.module === 'db'" style="flex: 1; min-height: 0" />
+
+          <!-- 服务器模块（独立一级模块）：终端与 SSH 连接必须保活，切模块不能断线重连，
+               所以首次进入后常驻 + v-show 显隐 -->
+          <ServerView v-if="srvState.mounted || store.module === 'server'" v-show="store.module === 'server'" style="flex: 1; min-height: 0" />
         </div>
-
-      <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
-           SSH 连接与回滚缓冲保留，重开恢复原样（切会话自动隐藏，见下方 watch） -->
-        <WorkbenchPanel v-if="wbEverOpen" v-show="store.workbench === 'terminal'" @close="store.workbench = null" @destroy="wbEverOpen = false; store.workbench = null" />
-        <Taskbar />
-      </template>
-      <ReportView v-else-if="store.module === 'report'" style="flex: 1; min-height: 0" />
-      <TextEditorView v-else-if="store.module === 'editor'" style="flex: 1; min-height: 0" />
-      <MaskingView v-else-if="store.module === 'masking'" style="flex: 1; min-height: 0" />
-      <CloudView v-else-if="store.module === 'cloud'" style="flex: 1; min-height: 0" />
-
-      <!-- 数据库控制台（独立一级模块）：v-show 保活——切到别的模块处理完再回来，
-           查询标签页 / 结果集 / 未提交事务全部还在；只有 ✕ 关闭控制台才销毁 -->
-      <DbWorkbenchView v-if="store.dbOpen" v-show="store.module === 'db'" style="flex: 1; min-height: 0" />
-
-      <!-- 服务器模块（独立一级模块）：终端与 SSH 连接必须保活，切模块不能断线重连，
-           所以首次进入后常驻 + v-show 显隐 -->
-      <ServerView v-if="srvState.mounted || store.module === 'server'" v-show="store.module === 'server'" style="flex: 1; min-height: 0" />
+      </div>
     </div>
 
     <ConnManager v-if="connModal" :editing="connModalEditing" @close="closeConnModal" />

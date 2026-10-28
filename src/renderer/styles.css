@@ -137,6 +137,14 @@ html[data-theme='light'] body::after { opacity: .5; }
 
 .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
+/* 顶栏之下的整块内容：左侧项目栏 + 右侧模块内容。
+   项目栏放在这里（而不是 .layout 的兄弟位）是为了让顶栏横跨整幅宽度——
+   这样 AI 助手与数据库/服务器/云管的内容上边缘都落在同一条线上（顶栏下沿），
+   侧栏标题「项目」也成了内容区的第一行，不再钻到标题栏高度里 */
+.main-body { flex: 1; display: flex; min-height: 0; min-width: 0; }
+/* 右侧模块内容：仍是纵向排布（顶栏外的第二层 flex），Taskbar / 工作台面板照旧贴底横排 */
+.main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
 .topbar {
   position: relative;
   height: 54px;
