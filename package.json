@@ -13,7 +13,7 @@
     "start": "electron .",
     "dev": "npm run build && electron .",
     "pack:exe": "npm run build && electron-builder --win nsis",
-    "test": "node test/unit-context.mjs && node test/unit-guard.mjs && node test/unit-csv.mjs && node test/unit-connection-profile.mjs && node test/unit-masking.mjs && node test/unit-editor.mjs && node test/unit-markdown.mjs && node test/unit-artifacts.mjs && node test/unit-cloud.mjs && node test/unit-oracle.mjs && node test/unit-ai-sections.mjs && node test/unit-ora-ai.mjs && node test/unit-editor-ai.mjs && node test/unit-redact.mjs && node test/unit-skill-context.mjs && node test/unit-server.mjs && node test/unit-app-mode.mjs && node test/unit-obdirect-tenant.mjs && node test/unit-transfer.mjs"
+    "test": "node test/unit-context.mjs && node test/unit-guard.mjs && node test/unit-csv.mjs && node test/unit-connection-profile.mjs && node test/unit-masking.mjs && node test/unit-editor.mjs && node test/unit-markdown.mjs && node test/unit-artifacts.mjs && node test/unit-cloud.mjs && node test/unit-oracle.mjs && node test/unit-ai-sections.mjs && node test/unit-ora-ai.mjs && node test/unit-editor-ai.mjs && node test/unit-redact.mjs && node test/unit-skill-context.mjs && node test/unit-server.mjs && node test/unit-conn-groups.mjs && node test/unit-app-mode.mjs && node test/unit-obdirect-tenant.mjs && node test/unit-transfer.mjs"
   },
   "dependencies": {
     "extract-zip": "^2.0.1",

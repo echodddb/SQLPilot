@@ -17,7 +17,7 @@
     class="layout"
     :class="{ 'app-revealed': appRevealed }"
     :inert="locked ? '' : null"
-    v-if="store.ready && curSession()"
+    v-if="store.ready"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop.prevent="onDrop"
@@ -80,7 +80,7 @@
         >文本编辑</span>
 
         <button
-          v-if="store.module === 'agent'"
+          v-if="store.module === 'agent' && curSession()"
           class="btn ghost"
           :class="{ on: store.chatFindOpen }"
           title="在对话中搜索（Ctrl+F）：匹配正文 / 代码块 / 工具输出，回车下一条、Shift+回车上一条"
@@ -88,7 +88,7 @@
         >⌕ 搜索</button>
 
         <button
-          v-if="store.module === 'agent'"
+          v-if="store.module === 'agent' && curSession()"
           class="btn ghost"
           :class="{ on: store.artifactsOpen }"
           :title="`产物（Ctrl+Shift+A）：本次对话的查询结果 / DDL / 读写文件 / 命令输出${artifactCount ? '，共 ' + artifactCount + ' 项' : ''}`"
@@ -103,7 +103,7 @@
           @click="store.settingsOpen = true"
         >配置模型 →</button>
         <select
-          v-else-if="store.module === 'agent'"
+          v-else-if="store.module === 'agent' && curSession()"
           :value="curSession().meta.providerId || store.cfg.activeProviderId || ''"
           style="min-width: 190px"
           title="当前会话使用的模型（各会话可不同）"
@@ -145,9 +145,22 @@
             <!-- 右侧「产物」栏：查询结果 / DDL / 文件 / 命令输出的结果预览（WorkBuddy 式） -->
             <div class="agent-row">
               <div class="chat-view-host">
-                <ChatView />
+                <ChatView v-if="curSession()" />
+                <!-- 启动不自动打开会话，这里是"两手空空"的落点：不渲染 ChatView（它内部
+                     到处直接读 curSession()），只给一个明确的下一步 -->
+                <div v-else class="no-session">
+                  <div class="empty-state">
+                    <div class="big">◆</div>
+                    <b>未打开会话</b>
+                    <div class="ns-hint">左侧项目树里点一个会话继续，或者新建一个。</div>
+                    <div class="ns-actions">
+                      <button class="btn primary" @click="openSessionModal('new')">＋ 新建会话</button>
+                    </div>
+                    <div class="ns-tip">数据库控制台 / 服务器 / 云管平台不受影响，左侧导航随时可进</div>
+                  </div>
+                </div>
               </div>
-              <ArtifactsPanel v-if="store.artifactsOpen" />
+              <ArtifactsPanel v-if="store.artifactsOpen && curSession()" />
             </div>
 
             <!-- 底部工作台面板（SSH 终端 / 本机资源）：首次打开后常驻 + v-show 显隐——隐藏不销毁，
@@ -256,8 +269,9 @@ const theme = ref<'dark' | 'light'>('dark')
 const showSplash = ref(new URLSearchParams(location.search).get('nosplash') !== '1')
 // 主界面是否已放行：启动遮罩开始退场的同时翻成 true，两段动画叠成一次交叉溶解
 const appRevealed = ref(!showSplash.value)
-// 「应用已可用」= 配置读完且当前会话能渲染出来，否则收起启动画面会露出空窗口
-const splashAppReady = computed(() => store.ready && !!curSession())
+// 启动画面何时放行：只看应用外壳是否就绪（配置 + 会话列表已加载完）。
+// 不能再要求"有当前会话"——现在启动刻意不打开会话，否则开屏会一直卡在 WAITING WORKBENCH…
+const splashAppReady = computed(() => store.ready)
 
 function onSplashClosed(): void {
   showSplash.value = false
@@ -547,6 +561,28 @@ window.sqlpilot.onEditorOpenRequest((p) => {
 .mode-sw button + button { border-left: 1px solid var(--border); }
 .mode-sw button:hover:not(.on) { color: var(--text); }
 .mode-sw button.on { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
+
+/* 启动不打开会话时的空态：填满对话区，视觉沿用全局 .empty-state（.big 图标已是统一形态） */
+.no-session {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.ns-hint { color: var(--text-dim); }
+.ns-actions {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ns-tip {
+  margin-top: 10px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
 
 /* 启动遮罩还在时主界面藏在它后面；遮罩开始退场，这里同步淡入，两段叠成一次交叉溶解。
    只动 opacity：给 .layout 加 transform 会让内部 position:fixed 的弹层失去视口基准。 */

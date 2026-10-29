@@ -48,6 +48,10 @@ const api = {
   // 连接管理
   saveConn: (profile: any, password?: string) => ipcRenderer.invoke('conn:save', { profile: plain(profile), password }),
   deleteConn: (id: string) => ipcRenderer.invoke('conn:delete', { id }),
+  // 数据库连接分组文件夹（与服务器分组同语义：名字即身份，改名/删除由主进程连带改连接上的 group）
+  saveConnGroup: (name: string, oldName?: string) => ipcRenderer.invoke('conn:groupSave', { name, oldName }),
+  deleteConnGroup: (name: string, moveTo?: string) => ipcRenderer.invoke('conn:groupDelete', { name, moveTo }),
+  moveConnsToGroup: (ids: string[], group: string) => ipcRenderer.invoke('conn:groupMove', { ids: [...ids], group }),
   testConn: (profile: any, password?: string) => ipcRenderer.invoke('conn:test', { profile, password }),
   getSchemas: (connId: string, refresh?: boolean) => ipcRenderer.invoke('conn:schemas', { id: connId, refresh }),
   getTables: (connId: string, schema: string, refresh?: boolean) => ipcRenderer.invoke('conn:tables', { id: connId, schema, refresh }),

@@ -1,7 +1,7 @@
 <template>
   <div class="modal-mask" @click.self="$emit('close')">
     <div class="modal">
-      <h3>{{ editing ? '编辑连接' : '新增连接' }}</h3>
+      <h3>{{ isNew ? '新增连接' : '编辑连接' }}</h3>
 
       <div class="form-row">
         <div>
@@ -68,7 +68,7 @@
         </div>
         <div>
           <label>密码</label>
-          <input type="password" v-model="password" :placeholder="editing ? '（未修改则留空）' : ''" />
+          <input type="password" v-model="password" :placeholder="isNew ? '' : '（未修改则留空）'" />
         </div>
         <div>
           <label>账号角色</label>
@@ -107,9 +107,16 @@
 
       <div class="form-row">
         <div>
-          <label>关联项目（可选：关联后作为该项目的库；不关联则全局可用）</label>
+          <label title="数据库模块左侧对象树按分组文件夹展示；留空 = 未分组">分组（留空 = 未分组）</label>
+          <input v-model="form.group" list="conn-groups" placeholder="如 核心业务库" />
+          <datalist id="conn-groups">
+            <option v-for="g in connGroups" :key="g" :value="g" />
+          </datalist>
+        </div>
+        <div>
+          <label title="不填就是全局连接，任何会话可用；只有显式选择项目才关联">关联项目（留空 = 全局，默认）</label>
           <select v-model="form.projectId">
-            <option value="">不关联（全局）</option>
+            <option value="">不关联（全局 · 默认）</option>
             <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
         </div>
@@ -130,6 +137,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { store } from '../store'
+import { connGroupFolders } from '../grouping'
 
 const props = defineProps<{ editing: any }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -146,6 +154,10 @@ function parseObUser(user?: string): { user: string; tenant: string; cluster: st
     cluster: match?.[3] || ''
   }
 }
+
+// 调用方可能只带预填字段（如项目属性里「新建连接」带 projectId、分组右键带 group）：
+// 没有 id 就是新增，别显示成"编辑连接"
+const isNew = !props.editing?.id
 
 const editingObUser = parseObUser(props.editing?.user)
 const editingIsObTenant = props.editing?.type === 'ob-mysql' || props.editing?.type === 'ob-oracle'
@@ -169,12 +181,17 @@ const form = reactive({
   sslVerifyServer: props.editing?.sslVerifyServer || false,
   sslCa: props.editing?.sslCa || '',
   instantClientDir: props.editing?.instantClientDir || '',
+  // 新建时可带上分组（数据库模块在某个分组上右键「在此分组新建连接」）
+  group: props.editing?.group || '',
   projectId: (props.editing?.projectId as string) || ''
 })
 
 const isObTenant = computed(() => form.type === 'ob-mysql' || form.type === 'ob-oracle')
 
 const projects = computed(() => store.cfg?.projects || [])
+
+/** 已有分组（datalist 提示，避免手打错字建出两个相似分组） */
+const connGroups = computed(() => connGroupFolders())
 
 const password = ref('')
 const testing = ref(false)
@@ -183,7 +200,7 @@ const testMsg = ref('')
 
 // 切换数据库类型时联动默认端口（用户已手改过端口则不覆盖）
 let portTouched = false
-let sslDefaultInitialized = !!props.editing
+let sslDefaultInitialized = !isNew
 watch(
   () => form.type,
   (t, old) => {

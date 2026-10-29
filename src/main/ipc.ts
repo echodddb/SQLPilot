@@ -11,6 +11,9 @@ import { testServer, probeServer, openShell, shellInput, shellResize, closeShell
 import * as sftpOps from './sftp'
 import { readSshConfig } from './ssh-config'
 import { UNGROUPED, deleteGroup, ensureGroup, groupNames, moveServers, normalizeGroupName, renameGroup, validateGroupName } from './server-groups'
+import {
+  deleteConnGroup, ensureConnGroup, connGroupNames, moveConnections, renameConnGroup
+} from './conn-groups'
 import { classifySql, dialectOf } from './db/guard'
 import { OracleAdapter } from './db/oracle'
 import { ObOracleAdapter } from './db/ob-oracle'
@@ -375,6 +378,10 @@ export function registerIpc(): void {
   // ---------- 连接管理 ----------
   ipcMain.handle('conn:save', (_e, { profile: rawProfile, password }: { profile: ConnProfile; password?: string }) => {
     const profile = normalizeConnectionProfile(rawProfile)
+    // 分组名清洗后再落盘：手改 config.json / 旧配置里的多余空白在这里对齐成清单写法
+    const groupName = normalizeGroupName(profile.group)
+    if (groupName && groupName !== UNGROUPED) profile.group = groupName
+    else delete profile.group
     const validationError = validateConnectionProfile(profile, true)
     if (validationError) return { ok: false, error: validationError }
     // DPAPI 的键就是连接 id，而密钥表是全项目共用的一张平表（server:/server-key:/cloud:/provider: 也在这里）。
@@ -391,6 +398,8 @@ export function registerIpc(): void {
     const idx = cfg.connections.findIndex((c) => c.id === profile.id)
     if (idx >= 0) cfg.connections[idx] = profile
     else cfg.connections.push(profile)
+    // 连接上填的分组名自动登记成文件夹（与服务器一致：否则空分组无法保留）
+    if (profile.group) ensureConnGroup(cfg, profile.group)
     saveConfig(cfg)
     metaDropConn(profile.id) // 连接参数变了，元数据缓存全部作废
     if (password !== undefined) setPassword(profile.id, password)
@@ -406,6 +415,55 @@ export function registerIpc(): void {
     dropAdapter(id)
     metaDropConn(id)
     return { ok: true }
+  })
+
+  // ---------- 数据库连接分组文件夹 ----------
+  // 与服务器分组同一套语义（名字即身份）。清单独立保存是为了空文件夹不消失——
+  // 先建好分组再往里放连接是常见顺序。
+  ipcMain.handle('conn:groupSave', (_e, { name, oldName }: { name: string; oldName?: string }) => {
+    const v = validateGroupName(name)
+    if (!v.ok) return { ok: false, error: v.error }
+    const cfg = loadConfig()
+    const from = normalizeGroupName(oldName)
+    if (from && from !== UNGROUPED) {
+      if (from !== v.name) {
+        if (connGroupNames(cfg).includes(v.name)) return { ok: false, error: `分组「${v.name}」已存在` }
+        const moved = renameConnGroup(cfg, from, v.name)
+        saveConfig(cfg)
+        return { ok: true, name: v.name, moved }
+      }
+      ensureConnGroup(cfg, v.name)
+      saveConfig(cfg)
+      return { ok: true, name: v.name, moved: 0 }
+    }
+    if (connGroupNames(cfg).includes(v.name)) return { ok: false, error: `分组「${v.name}」已存在` }
+    ensureConnGroup(cfg, v.name)
+    saveConfig(cfg)
+    return { ok: true, name: v.name, moved: 0 }
+  })
+
+  ipcMain.handle('conn:groupDelete', (_e, { name, moveTo }: { name: string; moveTo?: string }) => {
+    const v = validateGroupName(name)
+    if (!v.ok) return { ok: false, error: v.error }
+    const cfg = loadConfig()
+    const moved = deleteConnGroup(cfg, v.name, moveTo)
+    saveConfig(cfg)
+    return { ok: true, moved }
+  })
+
+  /** 连接搬家：ids 非空，group 为空串 = 移出分组（回「未分组」） */
+  ipcMain.handle('conn:groupMove', (_e, { ids, group }: { ids: string[]; group: string }) => {
+    const list = Array.isArray(ids) ? ids.map((x) => String(x)) : []
+    if (!list.length) return { ok: false, error: '没有选择连接' }
+    const target = normalizeGroupName(group)
+    if (target && target !== UNGROUPED) {
+      const v = validateGroupName(target)
+      if (!v.ok) return { ok: false, error: v.error }
+    }
+    const cfg = loadConfig()
+    const moved = moveConnections(cfg, list, target)
+    saveConfig(cfg)
+    return { ok: true, moved }
   })
 
   ipcMain.handle('conn:test', async (_e, { profile, password }: { profile: ConnProfile; password?: string }) => {
