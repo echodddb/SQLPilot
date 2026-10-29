@@ -4,6 +4,13 @@
          每项目会话首屏 5 条，"显示更多"每次 +5；点击项目行展开/收起 -->
     <div class="side-head">
       <span>项目</span>
+      <!-- 会话没挂项目时在这里提醒（原来挂在顶栏，跟模式开关挤；项目的事留在项目区说） -->
+      <span
+        v-if="showProjMiss"
+        class="proj-miss"
+        title="当前会话还没有挂项目，点击选择一个"
+        @click="openSessionModal('switch')"
+      >⚠ 未选择项目</span>
       <span style="display:flex; gap:2px">
         <button class="icon-btn" title="新建会话（当前/最近项目；无项目时先选择）" @click="newSessionClick">＋</button>
         <button class="icon-btn" title="新建项目（选择文件夹）" @click="openProjectModal()">▣</button>
@@ -192,6 +199,22 @@ const openSessionModal = inject<(mode: 'new' | 'switch') => void>('openSessionMo
 const openServerModal = inject<(s?: any) => void>('openServerModal')!
 const openProjectEditor = inject<(p: any) => void>('openProjectEditor')!
 const openArchiveView = inject<(p: any) => void>('openArchiveView')!
+
+/** 当前会话挂的项目名（空 = 没挂）：项目区据此显示「未选择项目」提醒 */
+const boundProjectName = computed(() => {
+  const pid = curSession()?.meta.projectId
+  if (!pid) return ''
+  return (store.cfg?.projects || []).find((p: any) => p.id === pid)?.name || ''
+})
+
+/**
+ * 什么时候催「未选择项目」：只在 Agent 模块、且本机已经建过项目时。
+ * 数据库 / 服务器 / 编辑器模块跟项目没关系，一个项目都没建的用户也没有可选项——
+ * 这两种情况下常驻一条黄提示只会变成噪音（顶栏那个 badge 原本也只在 Agent 模块显示）。
+ */
+const showProjMiss = computed(
+  () => store.module === 'agent' && !boundProjectName.value && (store.cfg?.projects?.length || 0) > 0
+)
 
 // ---------- 本机资源迷你监控（默认展开；收起即停表） ----------
 const resOpen = ref(true)
@@ -493,6 +516,27 @@ async function removeServer(s: any) {
 </script>
 
 <style scoped>
+/* 「未选择项目」提醒：项目区自己的事，样式压到最小，别抢项目名与 ＋/▣ 的位置。
+   flex 允许收缩 + 省略号：侧栏最窄时宁可把文字截断，也不能把 ＋/▣ 顶出去。 */
+.proj-miss {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  margin-right: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--yellow);
+  background: var(--yellow-dim);
+  border-radius: 99px;
+  padding: 2px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.proj-miss:hover { background: color-mix(in srgb, var(--yellow) 26%, transparent); }
 .session-list { padding: 0 10px 8px; max-height: 260px; overflow-y: auto; }
 .session-group-title {
   padding: 8px 4px 4px;

@@ -81,6 +81,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { engineOf, type EngineId } from '../../cloud/engines'
 import { INTRO_MODELS } from '../../cloud/introModels'
+import { autoAdvance, introScale } from '../../app-mode'
 
 const W = 720
 const H = 420
@@ -191,18 +192,26 @@ function play(): void {
   pct.value = 0
   status.value = model.value.boot[0]
 
+  // 各引擎的序列长度并不相同（OCP / Oracle 8 块 2760ms，达梦、高斯 12 块要 3200ms），
+  // 所以先算出真实的收尾时点，再拿它当缩放基准。按常量 2760 算的话，块多的引擎
+  // 在工作模式下会跑到 1.7s，收尾还没演完就进云管了。
+  const wiresAt = 120 + src.length * 130 + 120
+  const end = Math.max(2760, wiresAt + wc * 90 + 320)
+  // 工作模式整段压到 1.5s：所有时点乘同一个系数，模块不会挤成一团
+  const k = introScale(end)
+  const at = (ms: number) => Math.round(ms * k)
+
   src.forEach((_, i) => {
-    later(120 + i * 130, () => {
+    later(at(120 + i * 130), () => {
       shown.value[i] = true
       pct.value = Math.round(((i + 1) / src.length) * 62)
     })
   })
 
-  const wiresAt = 120 + src.length * 130 + 120
-  later(wiresAt, () => {
+  later(at(wiresAt), () => {
     status.value = model.value.boot[1]
     ws.forEach((_, i) => {
-      later(i * 90, () => {
+      later(at(i * 90), () => {
         wireLit.value[i] = true
         pct.value = 62 + Math.round(((i + 1) / wc) * 30)
       })
@@ -210,11 +219,12 @@ function play(): void {
   })
 
   // 模块多的引擎（达梦 12 块）要把收尾时间一起往后推，别抢在连线前面
-  const end = Math.max(2760, wiresAt + wc * 90 + 320)
-  later(end, () => {
+  later(at(end), () => {
     seqDone.value = true
     pct.value = 100
     status.value = model.value.boot[2]
+    // 工作模式：到点直接进云管，不再停在就绪态等人点
+    if (autoAdvance(end)) enter()
   })
 }
 

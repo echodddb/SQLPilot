@@ -99,6 +99,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ENGINES } from '../cloud/engines'
+import { autoAdvance, introScale } from '../app-mode'
 
 /**
  * 环形顺序与云管「选择云平台」页共用 engines.ts 的那一份清单，
@@ -190,6 +191,23 @@ function updateScale(): void {
   el.style.setProperty('--hu', Math.min(1.35, Math.max(1, u * 0.8)).toFixed(4))
 }
 
+/**
+ * 按当前模式排时间表。
+ * 学习模式＝原节奏（约 2.9s 演完，停在就绪态等点击）；
+ * 工作模式＝整段等比压到 1.5s，并且演完直接进主界面（auto），不再让人多点一次。
+ * 锁屏态（mode="lock"）永远不自动放行：锁屏的意义就是要人主动解锁。
+ */
+function profile() {
+  const k = introScale(T_READY)
+  return {
+    start: Math.round(T_START * k),
+    step: Math.max(40, Math.round(T_STEP * k)),
+    scan: Math.round(T_SCAN * k),
+    ready: Math.round(T_READY * k),
+    auto: autoAdvance(T_READY)
+  }
+}
+
 function start(): void {
   clearTimers()
   booted.value = false
@@ -206,10 +224,11 @@ function start(): void {
   // 不用 requestAnimationFrame 起跑：窗口在后台/未聚焦时 rAF 会被 Chromium 暂停，
   // 整个序列会卡在初始帧（实测会停在 POWER ON）。定时器 + 已渲染的一帧足够触发 CSS 过渡。
   window.setTimeout(() => {
+    const t = profile()
     booted.value = true
 
     nodes.value.forEach((n, i) => {
-      later(T_START + i * T_STEP, () => {
+      later(t.start + i * t.step, () => {
         shown.value[i] = true
         // 锁屏只是借这套动画，别再说"挂载驱动"，改成在逐个核对引擎
         status.value = isLock.value ? 'LOCK · ' + n.name.toUpperCase() : 'MOUNT · ' + n.name.toUpperCase() + ' DRIVER'
@@ -217,19 +236,20 @@ function start(): void {
       })
     })
 
-    later(T_SCAN, () => {
+    later(t.scan, () => {
       scanning.value = true
       status.value = 'VERIFY · HANDSHAKE'
     })
 
-    // 3s 演完就停在这儿等用户：不自动进主界面
-    later(T_READY, () => {
+    // 学习模式：演完停在这儿等用户；工作模式：到点自动进模块
+    later(t.ready, () => {
       pct.value = 100
       seqDone.value = true
       phase.value = 'hold'
       status.value = isLock.value
         ? `LOCKED · 空闲 ${props.idleMin || 3} 分钟已自动锁定，点右下角进入`
         : 'SYSTEM READY · ' + DB.length + ' ENGINES ONLINE'
+      if (t.auto && !isLock.value) requestEnter()
     })
   }, 30)
 }

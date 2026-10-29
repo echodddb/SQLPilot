@@ -5,6 +5,7 @@
  */
 
 import { reactive } from 'vue'
+import { appMode } from '../app-mode'
 import { METRIC_SETS, type MonitorScope } from './metrics'
 import type { EngineId } from './engines'
 
@@ -180,10 +181,15 @@ export const cloud = reactive({
   searchOpen: false,
 
   /**
-   * 学习 / 工作模式。学习模式（默认）：悬停元素弹出「采集来源」详情卡（API / 查询位置 / SQL）；
-   * 工作模式：不弹详情卡，界面只用于干活。选择存 localStorage，跨会话保留。
+   * 学习 / 工作模式现在是全局设置（renderer/app-mode.ts，按钮在顶栏 logo 旁）。
+   * 这里只留一个只读入口给云管自己的调用点（目前只有 SourceTip 的两处判断），
+   * 写入口统一走顶栏的 setAppMode —— 不再有 setLearnMode 之类的云管专用 setter，
+   * 免得出现"云管一个模式、全局另一个模式"。
+   * 写成 getter 而不是同步字段：省掉初始化时把值抄一遍，也就没有两边打架的可能。
    */
-  learnMode: readCloudMode(),
+  get learnMode(): boolean {
+    return appMode.value === 'learn'
+  },
 
   /** 备份恢复（对齐 OCP「备份恢复」：核心指标 / 对象 / 任务 / 存储 / 告警） */
   backup: {
@@ -238,17 +244,6 @@ export const cloud = reactive({
 })
 
 let seq = 0
-
-/** 读取持久化的云管模式：缺省 = 学习模式（悬浮详情卡照常弹） */
-function readCloudMode(): boolean {
-  try { return localStorage.getItem('sqlpilot.cloudMode') !== 'work' } catch { return true }
-}
-
-/** 切换学习 / 工作模式并持久化 */
-export function setLearnMode(on: boolean): void {
-  cloud.learnMode = on
-  try { localStorage.setItem('sqlpilot.cloudMode', on ? 'learn' : 'work') } catch { /* 存不上就只当次会话生效 */ }
-}
 
 export const activePlatform = (): CloudPlatformView | undefined =>
   cloud.platforms.find((p) => p.id === cloud.activeId)

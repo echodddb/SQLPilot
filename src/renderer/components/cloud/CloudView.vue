@@ -62,12 +62,7 @@
         <span class="tbi-ico">⟳</span><em>任务</em>
       </button>
       <span class="ctop-sep"></span>
-      <!-- 学习 / 工作模式：学习模式悬停元素弹出数据来源详情卡（OCP / Oracle 通用），工作模式不弹 -->
-      <div class="mode-sw" title="学习模式：鼠标悬停展示数据来源与查询 SQL 等详情；工作模式：关闭悬停详情，界面只用于操作">
-        <button :class="{ on: cloud.learnMode }" @click="setLearnMode(true)">学习模式</button>
-        <button :class="{ on: !cloud.learnMode }" @click="setLearnMode(false)">工作模式</button>
-      </div>
-      <span class="ctop-sep"></span>
+      <!-- 学习 / 工作模式已提到顶栏 logo 旁（全局设置），云管这里不再重复放开关 -->
       <select v-if="!isOracle && ocpPlatforms.length" class="ctop-select" :value="cloud.activeId" title="切换 OCP 平台" @change="onPlatformChange">
         <option v-for="p in ocpPlatforms" :key="p.id" :value="p.id">{{ p.name }}</option>
       </select>
@@ -216,7 +211,7 @@ import CloudAi from './CloudAi.vue'
 import AiPickOverlay from './AiPickOverlay.vue'
 import OraAi from './OraAi.vue'
 import OracleConsole from './oracle/OracleConsole.vue'
-import { CLOUD_VIEWS, cloud, activePlatform, initCloud, load, platformsOf, selectPlatform, setVendor, setView, setLearnMode, setAccess } from '../../cloud/state'
+import { CLOUD_VIEWS, cloud, activePlatform, initCloud, load, platformsOf, selectPlatform, setVendor, setView, setAccess } from '../../cloud/state'
 import { ora, loadEnvs } from '../../cloud/oracle'
 import type { CloudView as CloudViewKey } from '../../cloud/state'
 import { ai, cancelPick, clearDraft, finishPick, openSession, toggleAi, toggleDraft } from '../../cloud/ai'
@@ -481,19 +476,6 @@ onBeforeUnmount(() => {
 }
 .tbi-badge.bad { background: var(--red); border-color: var(--red); color: #fff; }
 .ctop-sep { width: 1px; height: 16px; background: var(--border); margin: 0 5px; flex-shrink: 0; }
-/* 学习 / 工作模式切换：两段式小开关，选中态用 accent */
-.mode-sw {
-  display: flex; align-items: center; flex-shrink: 0;
-  border: 1px solid var(--border); border-radius: 7px; overflow: hidden;
-}
-.mode-sw button {
-  height: 24px; padding: 0 9px; border: none; background: var(--bg-input); color: var(--text-faint);
-  font-family: inherit; font-size: 11px; line-height: 1; cursor: pointer; white-space: nowrap;
-  transition: color 0.14s ease, background 0.14s ease;
-}
-.mode-sw button + button { border-left: 1px solid var(--border); }
-.mode-sw button:hover:not(.on) { color: var(--text); }
-.mode-sw button.on { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
 .ctop-select {
   background: var(--bg-input); border: 1px solid var(--border); border-radius: 7px; color: var(--text);
   font-family: inherit; font-size: 11.5px; padding: 3px 7px; outline: none; max-width: 130px;

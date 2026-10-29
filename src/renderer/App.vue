@@ -28,6 +28,19 @@
       <div class="topbar">
         <span class="logo">◆ SQLPilot</span>
 
+        <!-- 学习 / 工作模式：全局开关（renderer/app-mode.ts）。
+             学习模式＝界面可讲解（悬停看来源、进场动画完整播并停住等你点）；
+             工作模式＝只干活（关讲解、启动与进场压到 1.5s 后自动进模块） -->
+        <div
+          class="mode-sw"
+          :title="isWorkMode
+            ? '工作模式：悬停讲解已关闭，启动/进场画面压到 1.5 秒并自动进入模块（点击切回学习模式）'
+            : '学习模式：悬停元素可看数据来源与查询路径，进场动画播完停住等你确认（点击切到工作模式）'"
+        >
+          <button :class="{ on: !isWorkMode }" :aria-pressed="!isWorkMode" @click="setAppMode('learn')">学习</button>
+          <button :class="{ on: isWorkMode }" :aria-pressed="isWorkMode" @click="setAppMode('work')">工作</button>
+        </div>
+
         <span
           v-if="store.module === 'agent' && boundProject"
           class="badge blue"
@@ -35,13 +48,6 @@
           style="cursor: pointer"
           @click="openSessionModal('switch')"
         >{{ boundProject.name }}</span>
-        <span
-          v-else-if="store.module === 'agent'"
-          class="badge yellow"
-          title="会话必须挂在一个项目下，点击选择"
-          style="cursor: pointer"
-          @click="openSessionModal('switch')"
-        >⚠ 未选择项目</span>
 
         <span class="spacer"></span>
 
@@ -207,6 +213,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { store, curSession, init, setSessionProvider, toPlain, createSessionInProject, bindSessionProject } from './store'
+import { isWorkMode, setAppMode } from './app-mode'
 import SplashOverlay from './components/SplashOverlay.vue'
 import Sidebar from './components/Sidebar.vue'
 import ModuleNav from './components/ModuleNav.vue'
@@ -513,6 +520,34 @@ window.sqlpilot.onEditorOpenRequest((p) => {
 </script>
 
 <style scoped>
+/* 学习 / 工作模式开关：紧贴品牌标识，两段式；宽度压到最小，别把顶栏的模型下拉挤走 */
+.mode-sw {
+  display: flex;
+  align-items: center;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+.mode-sw button {
+  height: 22px;
+  padding: 0 9px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: .5px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .14s ease, background .14s ease;
+}
+.mode-sw button + button { border-left: 1px solid var(--border); }
+.mode-sw button:hover:not(.on) { color: var(--text); }
+.mode-sw button.on { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
+
 /* 启动遮罩还在时主界面藏在它后面；遮罩开始退场，这里同步淡入，两段叠成一次交叉溶解。
    只动 opacity：给 .layout 加 transform 会让内部 position:fixed 的弹层失去视口基准。 */
 .layout {

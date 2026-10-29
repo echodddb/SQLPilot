@@ -1,5 +1,5 @@
 <template>
-  <div class="si" :class="{ closing, ready }" @click="finish" @keydown.esc="finish">
+  <div class="si" :class="{ closing, ready }" :style="{ '--k': seqScale }" @click="finish" @keydown.esc="finish">
     <div class="si-grid"></div>
     <div class="si-scan"></div>
 
@@ -72,6 +72,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { autoAdvance, introScale } from '../../app-mode'
 import { DISTRO_IDS, markFor, type DistroMark } from '../../server/distros'
 
 const emit = defineEmits<{ (e: 'done'): void }>()
@@ -131,13 +132,27 @@ function finish(): void {
   sleep(260).then(() => emit('done'))
 }
 
+/** 整段序列的基准时长（进度条走满 + 翻就绪态的时点） */
+const FULL_MS = 1820
+/**
+ * 工作模式压到 1.5s：JS 时点与 CSS 时长（--k 倍）用同一个系数，条和卡片不会跑在前面。
+ * 故意在 setup 里取一次快照、不跟模式变化重算：序列已经开演，中途改时长只会让
+ * CSS 过渡和定时器对不上，不如让它按开演那一刻的节奏走完。
+ */
+const seqScale = introScale(FULL_MS)
+const at = (ms: number) => Math.round(ms * seqScale)
+
 onMounted(() => {
   // 下一帧再点亮，保证 transition 有初始状态可过渡
   requestAnimationFrame(() => { lit.value = true })
-  timers.push(setTimeout(() => { line.value = LINES[1] }, 620))
-  timers.push(setTimeout(() => { line.value = LINES[2] }, 1180))
-  // 进度条 1.75s 走满后才翻就绪态，否则按钮先亮、条还在爬
-  timers.push(setTimeout(() => { ready.value = true }, 1820))
+  timers.push(setTimeout(() => { line.value = LINES[1] }, at(620)))
+  timers.push(setTimeout(() => { line.value = LINES[2] }, at(1180)))
+  // 进度条走满后才翻就绪态，否则按钮先亮、条还在爬。
+  // 工作模式（序列被压缩过）：到点直接进模块，不停在就绪态等一次点击
+  timers.push(setTimeout(() => {
+    ready.value = true
+    if (autoAdvance(FULL_MS)) finish()
+  }, at(FULL_MS)))
   window.addEventListener('keydown', onKey)
 })
 
@@ -178,7 +193,8 @@ onBeforeUnmount(() => {
 .si-scan {
   position: absolute; top: 0; bottom: 0; left: -180px; width: 180px; pointer-events: none;
   background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 14%, transparent), transparent);
-  animation: sweep 1.3s cubic-bezier(.4, 0, .2, 1) .06s forwards;
+  /* 时长/延迟都乘 --k：工作模式整段压到 1.5s 时，扫光不会拖在序列后面 */
+  animation: sweep calc(1.3s * var(--k, 1)) cubic-bezier(.4, 0, .2, 1) calc(.06s * var(--k, 1)) forwards;
 }
 @keyframes sweep { to { left: 100% } }
 
@@ -201,7 +217,7 @@ onBeforeUnmount(() => {
 .si-rack { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .si-colno {
   font-family: var(--mono); font-size: 10px; color: var(--text-faint);
-  opacity: .3; transition: opacity .4s ease, color .4s ease; transition-delay: var(--d);
+  opacity: .3; transition: opacity .4s ease, color .4s ease; transition-delay: calc(var(--d) * var(--k, 1));
 }
 .si-colno.on { opacity: 1; color: var(--accent); }
 
@@ -213,7 +229,7 @@ onBeforeUnmount(() => {
   opacity: .16; transform: translateY(8px) scale(.94);
   transition: opacity .5s cubic-bezier(.2, .9, .2, 1), transform .5s cubic-bezier(.2, .9, .2, 1),
     border-color .5s ease, box-shadow .5s ease, background .5s ease;
-  transition-delay: var(--d);
+  transition-delay: calc(var(--d) * var(--k, 1));
 }
 .si-mark.on {
   opacity: 1; transform: none;
@@ -255,7 +271,7 @@ onBeforeUnmount(() => {
 .si-bar { height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; }
 .si-bar-fill {
   height: 100%; width: 0; background: var(--accent); border-radius: 2px;
-  animation: fill 1.75s cubic-bezier(.3, .9, .3, 1) .05s forwards;
+  animation: fill calc(1.75s * var(--k, 1)) cubic-bezier(.3, .9, .3, 1) calc(.05s * var(--k, 1)) forwards;
 }
 .si-bar-fill.done { animation: none; width: 100%; }
 @keyframes fill { to { width: 92% } }
