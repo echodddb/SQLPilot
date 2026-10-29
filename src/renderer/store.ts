@@ -183,13 +183,11 @@ export async function init(): Promise<void> {
     return
   }
 
-  // 恢复会话列表与各会话历史
+  // 恢复会话列表与各会话历史。
+  // 注意：**启动时不自动打开任何会话**（currentId 留空）——一进来就接上上次的对话
+  // 上下文，容易在没看清历史的情况下把话发进旧会话。由用户自己在左侧项目树里点。
   let list: any[] = []
   try { list = await window.sqlpilot.listSessions() } catch { /* 列表读取失败时按空处理 */ }
-  if (!list.length) {
-    const s = await window.sqlpilot.newSession()
-    list.push(s)
-  }
   for (const meta of list) {
     const rec = ensureSessionRecord(meta)
     try {
@@ -197,7 +195,7 @@ export async function init(): Promise<void> {
       if (hist.ok && Array.isArray(hist.messages)) rec.msgs = historyToUi(hist.messages)
     } catch { /* 忽略单会话恢复失败 */ }
   }
-  store.currentId = list[list.length - 1].id
+  store.currentId = ''
 
   // ---------- 流式文本节流 ----------
   // 每 token 直接 text += 会触发 mdLite 全量重跑（O(n²)，长回答卡 UI）。
@@ -378,18 +376,14 @@ export async function sendMessage(text: string): Promise<void> {
 }
 
 export async function newChat(): Promise<void> {
+  const s = curSession()
+  if (!s) return
   await window.sqlpilot.resetChat(store.currentId)
-  curSession().msgs = []
+  s.msgs = []
 }
 
 export async function stop(): Promise<void> {
   await window.sqlpilot.stopChat(store.currentId)
-}
-
-export async function createSession(): Promise<void> {
-  const meta = await window.sqlpilot.newSession()
-  ensureSessionRecord(meta)
-  store.currentId = meta.id
 }
 
 /** 在指定项目下新建会话（会话必须挂项目） */
@@ -413,15 +407,13 @@ export async function removeSession(id: string): Promise<void> {
     await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
-  // 归档瞬时完成（消息保留在 sessions.json，可在项目树归档区 ↻ 恢复）：立即从活跃列表移除
-  // 最后一个会话要先建新的再删：否则 curSession() 短暂为空，App 会卸载整棵 layout，
-  // 连带关掉数据库查询会话（未提交事务回滚）与 SSH 终端
-  const wasLast = store.sessionOrder.length === 1
-  if (wasLast) await createSession()
+  // 归档瞬时完成（消息保留在 sessions.json，可在项目树归档区 ↻ 恢复）：立即从活跃列表移除。
+  // 归掉的若是当前会话，就交还给「未打开会话」空态（和启动一致），不再偷偷新建一个空会话；
+  // 应用外壳不依赖当前会话，所以这里 currentId 为空是合法的正常状态。
   delete store.sessions[id]
   store.sessionOrder = store.sessionOrder.filter((x) => x !== id)
-  if (!wasLast && store.currentId === id) {
-    store.currentId = store.sessionOrder[store.sessionOrder.length - 1]
+  if (store.currentId === id) {
+    store.currentId = store.sessionOrder[store.sessionOrder.length - 1] || ''
   }
   pushNotice(r.archived
     ? `会话「${title}」已归档（智能总结后台生成中，可在项目树归档区恢复）`
@@ -455,8 +447,8 @@ export async function archiveAndClear(): Promise<void> {
     await window.sqlpilot.uiAlert(r.error || '归档失败')
     return
   }
-  // 先建新会话并切过去，最后才删旧会话：一旦先 delete，curSession() 会短暂为空，
-  // App 根节点的 v-if 会把整棵 layout 卸载 —— 数据库标签页（含未提交事务）与 SSH 终端全被销毁
+  // 先建新会话并切过去，最后才删旧会话：中途不让 currentId 指向已删除的会话
+  // （那样界面会闪一下「未打开会话」空态，而且旧会话的消息还在内存里挂着）
   const meta = await window.sqlpilot.newSession()
   ensureSessionRecord(meta)
   store.currentId = meta.id

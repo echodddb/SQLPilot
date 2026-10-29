@@ -208,12 +208,17 @@ const boundProjectName = computed(() => {
 })
 
 /**
- * 什么时候催「未选择项目」：只在 Agent 模块、且本机已经建过项目时。
- * 数据库 / 服务器 / 编辑器模块跟项目没关系，一个项目都没建的用户也没有可选项——
- * 这两种情况下常驻一条黄提示只会变成噪音（顶栏那个 badge 原本也只在 Agent 模块显示）。
+ * 什么时候催「未选择项目」：只在 Agent 模块、已经打开某个会话、且本机已建过项目时。
+ * 启动不自动打开会话（currentId 为空），此时没有"这个会话挂哪个项目"可谈；
+ * 数据库 / 服务器 / 编辑器模块跟项目没关系；一个项目都没建的用户也没有可选项——
+ * 这几种情况下常驻一条黄提示只会变成噪音（顶栏那个 badge 原本也只在 Agent 模块显示）。
  */
 const showProjMiss = computed(
-  () => store.module === 'agent' && !boundProjectName.value && (store.cfg?.projects?.length || 0) > 0
+  () =>
+    store.module === 'agent' &&
+    !!store.currentId &&
+    !boundProjectName.value &&
+    (store.cfg?.projects?.length || 0) > 0
 )
 
 // ---------- 本机资源迷你监控（默认展开；收起即停表） ----------
