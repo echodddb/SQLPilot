@@ -219,6 +219,9 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       maskSave(fileName: string, content: string): Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>
       saveConn(profile: any, password?: string): Promise<{ ok: boolean; error?: string }>
       deleteConn(id: string): Promise<{ ok: boolean }>
+      saveConnGroup(name: string, oldName?: string): Promise<{ ok: boolean; name?: string; moved?: number; error?: string }>
+      deleteConnGroup(name: string, moveTo?: string): Promise<{ ok: boolean; moved?: number; error?: string }>
+      moveConnsToGroup(ids: string[], group: string): Promise<{ ok: boolean; moved?: number; error?: string }>
       testConn(profile: any, password?: string): Promise<{ ok: boolean; label?: string; error?: string }>
       getSchemas(connId: string, refresh?: boolean): Promise<{ ok: boolean; schemas?: string[]; error?: string }>
       getTables(connId: string, schema: string, refresh?: boolean): Promise<{ ok: boolean; tables?: { name: string; type: string }[]; error?: string }>

@@ -38,6 +38,8 @@ export interface ConnProfile {
   sslVerifyServer?: boolean
   /** Oracle 11g thick 模式需要 Instant Client 目录（留空则用全局设置） */
   instantClientDir?: string
+  /** 连接分组（数据库模块侧栏按文件夹分节；空 = 未分组） */
+  group?: string
   /** 可选：关联到某个项目（不关联 = 全局连接，任何会话可用） */
   projectId?: string | null
 }
@@ -122,16 +124,22 @@ export interface SshServer {
 }
 
 /**
- * 服务器分组文件夹（侧栏按文件夹收会话）。
+ * 分组文件夹（侧栏按文件夹收会话 / 连接）。
  *
- * 身份就是名字本身：SshServer.group 存的也是同一个字符串，改名时两边一起改。
- * 之所以要有这份清单，是因为「分组」不能只从服务器的 group 字段推导——空文件夹会立刻消失，
+ * 身份就是名字本身：SshServer.group / ConnProfile.group 存的也是同一个字符串，改名时两边一起改。
+ * 之所以要有这份清单，是因为「分组」不能只从记录的 group 字段推导——空文件夹会立刻消失，
  * 用户就没办法先建好分组再往里放机器。
  */
-export interface ServerGroup {
+export interface GroupFolder {
   /** 分组名（唯一；不能是「未分组」——那是没有分组的兜底桶） */
   name: string
 }
+
+/** 服务器会话分组（serverGroups 清单项） */
+export type ServerGroup = GroupFolder
+
+/** 数据库连接分组（connGroups 清单项） */
+export type ConnGroup = GroupFolder
 
 /**
  * 云管平台接入（左侧一级模块「云管平台」）。
@@ -181,6 +189,8 @@ export interface AppConfig {
   servers: SshServer[]
   /** 服务器分组文件夹清单（决定侧栏文件夹的顺序；空文件夹靠它保留） */
   serverGroups?: ServerGroup[]
+  /** 数据库连接分组文件夹清单（同上，数据库模块左侧对象树用） */
+  connGroups?: ConnGroup[]
   /** 终端外观与交互偏好（字体/配色/复制粘贴/编码，全局共享） */
   termPrefs?: TermPrefs
   /** 技能启用状态（技能本体在 userData/skills/） */

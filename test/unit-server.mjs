@@ -190,7 +190,20 @@ Host b
 
 // ---------- 分组文件夹（名字即身份：config.serverGroups ∪ 服务器 group 字段） ----------
 {
-  const sg = await import('../src/main/server-groups.ts')
+  // server-groups 的分组核心在 group-folders.ts（与数据库连接分组共用），Node 的类型剥离
+  // 解析不了无扩展名的相对导入，所以与 SFTP 一样 bundle 后导入真实实现
+  const root = path.resolve(import.meta.dirname, '..')
+  const out = path.join(import.meta.dirname, '.sg-bundle.mjs')
+  await build({
+    entryPoints: [path.join(root, 'src/main/server-groups.ts')],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    outfile: out,
+    logLevel: 'silent'
+  })
+  const sg = await import(`${pathToFileURL(out).href}?t=${Date.now()}`)
+  fs.unlinkSync(out)
 
   eq(sg.normalizeGroupName('  生产   环境 '), '生产 环境', '分组名去首尾空白并折叠内部空白')
   eq(sg.normalizeGroupName('a\u0000b'), 'ab', '分组名剔掉控制字符')
