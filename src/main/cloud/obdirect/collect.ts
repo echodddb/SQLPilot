@@ -392,10 +392,13 @@ export async function tenantDetailOf(
     })
   }
 
+  // 字符集/排序规则随兼容模式不同：Oracle 模式固定 utf8mb4 + utf8mb4_bin，
+  // 之前一律按 MySQL 的 utf8mb4_general_ci 展示，属于错误信息。
+  const isOracle = tenant.mode === 'ORACLE'
   return {
     tenant,
     charset: 'utf8mb4',
-    collation: 'utf8mb4_general_ci',
+    collation: isOracle ? 'utf8mb4_bin' : 'utf8mb4_general_ci',
     whitelist: '',
     description: tenant.description ?? '',
     deadLockDetection: false,

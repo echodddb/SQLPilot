@@ -69,6 +69,39 @@ import {
   directMergeSuspend as cloudDirectMergeSuspend,
   directSetParameter as cloudDirectSetParameter,
   directKillSession as cloudDirectKillSession,
+  // 直连模式的租户生命周期（与 OCP 的 createTenant/deleteTenant 分开）
+  directUnitConfigs as cloudDirectUnitConfigs,
+  directResourcePools as cloudDirectResourcePools,
+  directCreateTenant as cloudDirectCreateTenant,
+  directDropTenant as cloudDirectDropTenant,
+  directSetTenantLocked as cloudDirectSetTenantLocked,
+  directCreateUnitConfig as cloudDirectCreateUnitConfig,
+  directDropUnitConfig as cloudDirectDropUnitConfig,
+  directDropResourcePool as cloudDirectDropResourcePool,
+  directCreateResourcePool as cloudDirectCreateResourcePool,
+  directTenantSessions as cloudDirectTenantSessions,
+  directTenantDatabases as cloudDirectTenantDbs,
+  directTenantUsers as cloudDirectTenantUsers,
+  directTenantParams as cloudDirectTenantParams,
+  directTenantTopSql as cloudDirectTenantTopSql,
+  initDirectTaskLog,
+  directTasks as cloudDirectTasks,
+  directTaskDetail as cloudDirectTaskDetail,
+  directTaskActions as cloudDirectTaskActions,
+  directClearTasks as cloudDirectClearTasks,
+  saveTenantCredential as cloudSaveTenantCred,
+  tenantCredentialStatus as cloudTenantCredStatus,
+  clearTenantCredential as cloudClearTenantCred,
+  directTestTenantLogin as cloudDirectTestTenantLogin,
+  directTenantDbsAs as cloudDirectTenantDbsAs,
+  directCreateDb as cloudDirectCreateDb,
+  directDropDb as cloudDirectDropDb,
+  directTenantUsersAs as cloudDirectTenantUsersAs,
+  directCreateUser as cloudDirectCreateUser,
+  directDropUser as cloudDirectDropUser,
+  directGrant as cloudDirectGrant,
+  directGrants as cloudDirectGrants,
+  directTenantConnections as cloudDirectTenantConnections,
   metrics as cloudMetrics,
   clusterAction as cloudClusterAction,
   createTenant as cloudCreateTenant,
@@ -2764,6 +2797,72 @@ export function registerIpc(): void {
     cloudDirectSetParameter(String(id || ''), String(name || ''), String(value ?? ''), tenant ? String(tenant) : undefined))
   ipcMain.handle('cloud:directKillSession', (_e, { id, sessionId }: { id: string; sessionId: number }) =>
     cloudDirectKillSession(String(id || ''), Number(sessionId)))
+  // 直连租户生命周期：独立通道名，避免与 OCP 的 cloud:createTenant 混用
+  ipcMain.handle('cloud:directUnitConfigs', (_e, { id }: { id: string }) => cloudDirectUnitConfigs(String(id || '')))
+  ipcMain.handle('cloud:directResourcePools', (_e, { id }: { id: string }) => cloudDirectResourcePools(String(id || '')))
+  ipcMain.handle('cloud:directCreateTenant', (e, { id, input, runId }: { id: string; input: any; runId?: string }) =>
+    cloudDirectCreateTenant(String(id || ''), input || {}, (ev: any) => {
+      // 执行进度实时推给发起窗口，界面据此打日志；窗口已关时静默失败
+      try {
+        e.sender.send('cloud:direct-tenant-log', { runId: String(runId || ''), ...ev })
+      } catch { /* 窗口已销毁 */ }
+    }))
+  ipcMain.handle('cloud:directDropTenant', (_e, { id, tenantName }: { id: string; tenantName: string }) =>
+    cloudDirectDropTenant(String(id || ''), String(tenantName || '')))
+  ipcMain.handle('cloud:directSetTenantLocked', (_e, { id, tenantName, locked }: { id: string; tenantName: string; locked: boolean }) =>
+    cloudDirectSetTenantLocked(String(id || ''), String(tenantName || ''), !!locked))
+  ipcMain.handle('cloud:directCreateUnitConfig', (_e, { id, spec }: { id: string; spec: any }) =>
+    cloudDirectCreateUnitConfig(String(id || ''), spec || {}))
+  ipcMain.handle('cloud:directDropUnitConfig', (_e, { id, name }: { id: string; name: string }) =>
+    cloudDirectDropUnitConfig(String(id || ''), String(name || '')))
+  ipcMain.handle('cloud:directDropResourcePool', (_e, { id, name }: { id: string; name: string }) =>
+    cloudDirectDropResourcePool(String(id || ''), String(name || '')))
+  ipcMain.handle('cloud:directCreateResourcePool', (_e, { id, input }: { id: string; input: any }) =>
+    cloudDirectCreateResourcePool(String(id || ''), input || {}))
+  ipcMain.handle('cloud:directTenantSessions', (_e, { id, tenantName, limit }: { id: string; tenantName: string; limit?: number }) =>
+    cloudDirectTenantSessions(String(id || ''), String(tenantName || ''), Number(limit) || 200))
+  ipcMain.handle('cloud:directTenantDbs', (_e, { id, tenantId }: { id: string; tenantId: number }) =>
+    cloudDirectTenantDbs(String(id || ''), Number(tenantId) || 0))
+  ipcMain.handle('cloud:directTenantUsers', (_e, { id, tenantId }: { id: string; tenantId: number }) =>
+    cloudDirectTenantUsers(String(id || ''), Number(tenantId) || 0))
+  ipcMain.handle('cloud:directTenantParams', (_e, { id, tenantId, opts }: { id: string; tenantId: number; opts?: any }) =>
+    cloudDirectTenantParams(String(id || ''), Number(tenantId) || 0, opts || {}))
+  ipcMain.handle('cloud:directTenantTopSql', (_e, { id, tenantId, opts }: { id: string; tenantId: number; opts?: any }) =>
+    cloudDirectTenantTopSql(String(id || ''), Number(tenantId) || 0, opts || {}))
+  // 任务日志（本地文本）：列表 / 详情 / 动作清单 / 清理
+  ipcMain.handle('cloud:directTasks', (_e, q: any) => cloudDirectTasks(q || {}))
+  ipcMain.handle('cloud:directTaskDetail', (_e, { id }: { id: string }) => cloudDirectTaskDetail(String(id || '')))
+  ipcMain.handle('cloud:directTaskActions', () => cloudDirectTaskActions())
+  ipcMain.handle('cloud:directClearTasks', (_e, opts: any) => cloudDirectClearTasks(opts || {}))
+  // 业务租户凭据 + 租户内部操作（建库 / 账号 / 授权）
+  ipcMain.handle('cloud:tenantCredStatus', (_e, { id, tenant }: { id: string; tenant: string }) =>
+    ({ ok: true, data: cloudTenantCredStatus(String(id || ''), String(tenant || '')) }))
+  ipcMain.handle('cloud:tenantCredSave', (_e, { id, tenant, user, password }: any) =>
+    { const r = cloudSaveTenantCred(String(id || ''), String(tenant || ''), String(user || ''), String(password ?? '')); return r.ok ? { ok: true, data: { keptPassword: !!r.keptPassword } } : { ok: false, error: r.error } })
+  ipcMain.handle('cloud:tenantCredClear', (_e, { id, tenant }: { id: string; tenant: string }) =>
+    ({ ok: true, data: cloudClearTenantCred(String(id || ''), String(tenant || '')) }))
+  ipcMain.handle('cloud:directTestTenantLogin', (_e, { id, tenant }: { id: string; tenant: string }) =>
+    cloudDirectTestTenantLogin(String(id || ''), String(tenant || '')))
+  ipcMain.handle('cloud:directTenantDbsAs', (_e, { id, tenant }: { id: string; tenant: string }) =>
+    cloudDirectTenantDbsAs(String(id || ''), String(tenant || '')))
+  ipcMain.handle('cloud:directCreateDb', (_e, { id, tenant, input }: any) =>
+    cloudDirectCreateDb(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directDropDb', (_e, { id, tenant, name }: any) =>
+    cloudDirectDropDb(String(id || ''), String(tenant || ''), String(name || '')))
+  ipcMain.handle('cloud:directTenantUsersAs', (_e, { id, tenant, mode }: any) =>
+    cloudDirectTenantUsersAs(String(id || ''), String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL'))
+  ipcMain.handle('cloud:directCreateUser', (_e, { id, tenant, input }: any) =>
+    cloudDirectCreateUser(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directDropUser', (_e, { id, tenant, input }: any) =>
+    cloudDirectDropUser(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directGrant', (_e, { id, tenant, input }: any) =>
+    cloudDirectGrant(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directGrants', (_e, { id, tenant, input }: any) =>
+    cloudDirectGrants(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directTenantConnections', (_e, { id, tenant, mode }: any) =>
+    cloudDirectTenantConnections(String(id || ''), String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL'))
+  // 任务日志落到 userData，便于用户直接查看/备份
+  try { initDirectTaskLog(app.getPath('userData')) } catch { /* 取不到目录时退回 cwd */ }
   // 告警事件 / 任务列表导出 CSV：渲染层给列定义与行数据，主进程落盘
   ipcMain.handle('cloud:exportCsv', async (_e, { fileName, columns, rows }: { fileName: string; columns: string[]; rows: any[][] }) => {
     if (!Array.isArray(columns) || !Array.isArray(rows)) return { ok: false, error: '导出数据无效' }

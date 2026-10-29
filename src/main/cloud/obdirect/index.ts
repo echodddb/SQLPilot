@@ -43,6 +43,33 @@ export { topSqlOf, sqlTextOf, parametersOf, eventsOf }
 export { majorFreeze, setMergeSuspended, setParameter, killSession, openTransactions } from './write'
 export type { WriteResult } from './write'
 
+// 租户生命周期：与 OCP 的租户接口完全分开，互不复用（见 tenant.ts 头部说明）
+export {
+  createTenant as createTenantDirect,
+  dropTenant as dropTenantDirect,
+  setTenantLocked as setTenantLockedDirect,
+  createUnitConfig as createUnitConfigDirect,
+  dropUnitConfig as dropUnitConfigDirect,
+  createResourcePool as createResourcePoolDirect,
+  dropResourcePool as dropResourcePoolDirect,
+  tenantConnectionsOf,
+  unitConfigsOf,
+  unitMemoryStyleOf,
+  resourcePoolsOf,
+  assertSysTenant
+} from './tenant'
+export type { DirectCreateTenantInput, DirectTenantResult, ObUnitConfigRow, ObResourcePoolRow } from './tenant'
+
+// 租户内部数据（只读）：会话 / 数据库 / 用户 / 参数 / TopSQL
+export {
+  tenantSessionsOf,
+  tenantDatabasesOf,
+  tenantUsersOf,
+  tenantParametersOf,
+  tenantTopSqlOf
+} from './tenantInfo'
+export type { ObTenantSession, ObTenantDatabase, ObTenantUser, ObTenantParameter, ObTenantTopSql } from './tenantInfo'
+
 /** 供上层判断"这条连接是否直连模式" */
 export const isObDirect = (type: string): boolean => type === 'obdirect'
 

@@ -255,6 +255,63 @@ const api = {
   cloudDirectSetParameter: (id: string, name: string, value: string, tenant?: string) =>
     ipcRenderer.invoke('cloud:directSetParameter', { id, name, value, tenant }),
   cloudDirectKillSession: (id: string, sessionId: number) => ipcRenderer.invoke('cloud:directKillSession', { id, sessionId }),
+  // 直连租户生命周期（与 OCP 的租户接口是两条独立通道）
+  cloudDirectUnitConfigs: (id: string) => ipcRenderer.invoke('cloud:directUnitConfigs', { id }),
+  cloudDirectResourcePools: (id: string) => ipcRenderer.invoke('cloud:directResourcePools', { id }),
+  cloudDirectCreateTenant: (id: string, input: any, runId?: string) =>
+    ipcRenderer.invoke('cloud:directCreateTenant', { id, input: plain(input), runId: String(runId || '') }),
+  /** 订阅建租户的执行进度（主进程逐条推送），返回取消订阅函数 */
+  onDirectTenantLog: (cb: (e: any) => void): (() => void) => {
+    const l = (_e: unknown, v: any): void => cb(v)
+    ipcRenderer.on('cloud:direct-tenant-log', l)
+    return () => { ipcRenderer.removeListener('cloud:direct-tenant-log', l as any) }
+  },
+  cloudDirectDropTenant: (id: string, tenantName: string) => ipcRenderer.invoke('cloud:directDropTenant', { id, tenantName }),
+  cloudDirectSetTenantLocked: (id: string, tenantName: string, locked: boolean) =>
+    ipcRenderer.invoke('cloud:directSetTenantLocked', { id, tenantName, locked }),
+  cloudDirectCreateUnitConfig: (id: string, spec: any) => ipcRenderer.invoke('cloud:directCreateUnitConfig', { id, spec: plain(spec) }),
+  cloudDirectDropUnitConfig: (id: string, name: string) => ipcRenderer.invoke('cloud:directDropUnitConfig', { id, name }),
+  cloudDirectDropResourcePool: (id: string, name: string) => ipcRenderer.invoke('cloud:directDropResourcePool', { id, name }),
+  cloudDirectCreateResourcePool: (id: string, input: any) => ipcRenderer.invoke('cloud:directCreateResourcePool', { id, input: plain(input) }),
+  // 直连租户内部数据（只读），与 OCP 的 cloudTenantDbs / cloudTenantSessions 是两条通道
+  cloudDirectTenantSessions: (id: string, tenantName: string, limit?: number) =>
+    ipcRenderer.invoke('cloud:directTenantSessions', { id, tenantName, limit }),
+  cloudDirectTenantDbs: (id: string, tenantId: number) => ipcRenderer.invoke('cloud:directTenantDbs', { id, tenantId }),
+  cloudDirectTenantUsers: (id: string, tenantId: number) => ipcRenderer.invoke('cloud:directTenantUsers', { id, tenantId }),
+  cloudDirectTenantParams: (id: string, tenantId: number, opts?: { keyword?: string; limit?: number }) =>
+    ipcRenderer.invoke('cloud:directTenantParams', { id, tenantId, opts }),
+  cloudDirectTenantTopSql: (id: string, tenantId: number, opts?: { hours?: number; limit?: number }) =>
+    ipcRenderer.invoke('cloud:directTenantTopSql', { id, tenantId, opts }),
+  // 任务日志（本地文本存档）
+  cloudDirectTasks: (q?: { page?: number; size?: number; keyword?: string; action?: string; status?: string }) =>
+    ipcRenderer.invoke('cloud:directTasks', q || {}),
+  cloudDirectTaskDetail: (id: string) => ipcRenderer.invoke('cloud:directTaskDetail', { id }),
+  cloudDirectTaskActions: () => ipcRenderer.invoke('cloud:directTaskActions'),
+  cloudDirectClearTasks: (opts?: { before?: number }) => ipcRenderer.invoke('cloud:directClearTasks', opts || {}),
+  // 业务租户凭据
+  cloudTenantCredStatus: (id: string, tenant: string) => ipcRenderer.invoke('cloud:tenantCredStatus', { id, tenant }),
+  cloudTenantCredSave: (id: string, tenant: string, user: string, password: string) =>
+    ipcRenderer.invoke('cloud:tenantCredSave', { id, tenant, user, password }),
+  cloudTenantCredClear: (id: string, tenant: string) => ipcRenderer.invoke('cloud:tenantCredClear', { id, tenant }),
+  cloudDirectTestTenantLogin: (id: string, tenant: string) => ipcRenderer.invoke('cloud:directTestTenantLogin', { id, tenant }),
+  // 租户内部对象（基于凭据）
+  cloudDirectTenantDbsAs: (id: string, tenant: string) => ipcRenderer.invoke('cloud:directTenantDbsAs', { id, tenant }),
+  cloudDirectCreateDb: (id: string, tenant: string, input: { name: string; charset?: string }) =>
+    ipcRenderer.invoke('cloud:directCreateDb', { id, tenant, input: plain(input) }),
+  cloudDirectDropDb: (id: string, tenant: string, name: string) =>
+    ipcRenderer.invoke('cloud:directDropDb', { id, tenant, name }),
+  cloudDirectTenantUsersAs: (id: string, tenant: string, mode: 'MYSQL' | 'ORACLE') =>
+    ipcRenderer.invoke('cloud:directTenantUsersAs', { id, tenant, mode }),
+  cloudDirectCreateUser: (id: string, tenant: string, input: any) =>
+    ipcRenderer.invoke('cloud:directCreateUser', { id, tenant, input: plain(input) }),
+  cloudDirectDropUser: (id: string, tenant: string, input: any) =>
+    ipcRenderer.invoke('cloud:directDropUser', { id, tenant, input: plain(input) }),
+  cloudDirectGrant: (id: string, tenant: string, input: any) =>
+    ipcRenderer.invoke('cloud:directGrant', { id, tenant, input: plain(input) }),
+  cloudDirectGrants: (id: string, tenant: string, input: { name: string; host?: string }) =>
+    ipcRenderer.invoke('cloud:directGrants', { id, tenant, input }),
+  cloudDirectTenantConnections: (id: string, tenant: string, mode: 'MYSQL' | 'ORACLE') =>
+    ipcRenderer.invoke('cloud:directTenantConnections', { id, tenant, mode }),
   cloudClusters: (id: string) => ipcRenderer.invoke('cloud:clusters', { id }),
   cloudCluster: (id: string, clusterId: number) => ipcRenderer.invoke('cloud:cluster', { id, clusterId }),
   cloudTenants: (id: string) => ipcRenderer.invoke('cloud:tenants', { id }),

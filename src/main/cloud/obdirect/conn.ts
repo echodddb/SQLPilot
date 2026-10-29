@@ -138,6 +138,97 @@ export async function execWrite(
   }
 }
 
+/**
+ * 以指定租户身份执行一条语句（临时连接，用完即关）。
+ *
+ * 只用于「新建租户后设置 root 密码」这类必须落在租户内的动作：
+ * sys 租户无法代改用户密码，只能切到新租户执行 ALTER USER。
+ * 不走连接池：租户是刚建出来的，池里没有、也不该为它常驻。
+ */
+export async function execAsTenant(
+  p: ObDirectPlatform,
+  password: string,
+  tenant: string,
+  sql: string,
+  params: any[] = []
+): Promise<void> {
+  const at = p.username.indexOf('@')
+  const base = at >= 0 ? p.username.slice(0, at) : p.username
+  const conn = await mysql.createConnection({
+    host: p.host,
+    port: p.port,
+    user: `${base}@${tenant}`,
+    password,
+    connectTimeout: 8000,
+    dateStrings: true
+  })
+  try {
+    await conn.query(sql, params)
+  } finally {
+    await conn.end().catch(() => { /* 已断开 */ })
+  }
+}
+
+/**
+ * 业务租户凭据：用于「租户内部」的操作（建库、建账号、授权等）。
+ * 与平台的 sys 连接刻意分开——这些操作必须在租户内执行，密码也可能不同。
+ */
+export interface TenantLogin {
+  /** 登录名（不含 @租户 后缀） */
+  user: string
+  password: string
+  /** 租户名，拼成 user@tenant */
+  tenant: string
+}
+
+/** 以业务租户凭据开一条临时连接执行只读查询 */
+export async function qAs(
+  p: ObDirectPlatform,
+  login: TenantLogin,
+  sql: string,
+  params: any[] = []
+): Promise<any[]> {
+  const conn = await mysql.createConnection({
+    host: p.host,
+    port: p.port,
+    user: `${login.user}@${login.tenant}`,
+    password: login.password,
+    connectTimeout: 8000,
+    dateStrings: true,
+    supportBigNumbers: true
+  })
+  try {
+    const [rows] = await conn.query(sql, params)
+    return Array.isArray(rows) ? (rows as any[]) : []
+  } finally {
+    await conn.end().catch(() => { /* 已断开 */ })
+  }
+}
+
+/** 以业务租户凭据执行写语句 */
+export async function execAs(
+  p: ObDirectPlatform,
+  login: TenantLogin,
+  sql: string,
+  params: any[] = []
+): Promise<{ affectedRows: number; info: string }> {
+  const conn = await mysql.createConnection({
+    host: p.host,
+    port: p.port,
+    user: `${login.user}@${login.tenant}`,
+    password: login.password,
+    connectTimeout: 8000,
+    dateStrings: true
+  })
+  try {
+    const [res] = await conn.query(sql, params)
+    const r = res as any
+    return { affectedRows: Number(r?.affectedRows ?? 0), info: String(r?.info ?? '') }
+  } finally {
+    await conn.end().catch(() => { /* 已断开 */ })
+  }
+}
+
 /** 测试连接：成功返回版本号，失败抛错 */
 export async function ping(p: ObDirectPlatform, password: string): Promise<{ version: string; tenant: string }> {
   const conn = await acquire(p, password)

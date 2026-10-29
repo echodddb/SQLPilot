@@ -10,6 +10,9 @@ import { appendAudit } from '../audit'
 import { getPassword, setPassword, deletePassword, secretsAvailable } from '../secrets'
 import * as obd from './obdirect'
 import type { ObDirectPlatform } from './obdirect'
+import * as obin from './obdirect/tenantIn'
+import type { TenantLogin } from './obdirect/conn'
+import { appendTask, listTasks, getTask, clearTasks, taskActions, configureTaskLog } from './obdirect/tasklog'
 import {
   OcpClient,
   normalizeBase,
@@ -943,13 +946,17 @@ export const directOpenTransactions = (id: string): Promise<{ ok: boolean; data?
     return obd.openTransactions(p, pw)
   })
 
-/** 写操作统一走这里：记录审计，失败也留痕（生产环境追责用） */
+/**
+ * 写操作统一走这里：记录审计 + 落一条本地任务日志，失败也留痕。
+ * 任务日志与审计是两套：审计面向追责（精简），任务日志面向“我点了什么、执行了哪些语句”（可查详情）。
+ */
 async function runWrite(
   id: string,
   action: string,
   detail: string,
-  run: (p: ObDirectPlatform, pw: string) => Promise<{ ok: boolean; message: string }>
+  run: (p: ObDirectPlatform, pw: string) => Promise<{ ok: boolean; message: string; steps?: string[] }>
 ): Promise<{ ok: boolean; data?: { message: string }; error?: string }> {
+  const started = Date.now()
   try {
     const { p, pw } = requireDirect(id)
     const r = await run(p, pw)
@@ -957,11 +964,50 @@ async function runWrite(
       kind: 'ui.error',
       detail: `[直连写操作] ${action} ${detail} → ${r.ok ? '成功' : '失败'}：${r.message}`
     } as any)
+    appendTask({
+      id: taskId(started),
+      at: started,
+      platformId: id,
+      platformName: p.name,
+      clusterName: p.name,
+      action,
+      target: detail,
+      ok: r.ok,
+      message: r.message,
+      steps: r.steps || [],
+      durationMs: Date.now() - started
+    })
     return r.ok ? { ok: true, data: { message: r.message } } : { ok: false, error: r.message }
   } catch (e: any) {
     const msg = e?.message || String(e)
     appendAudit({ kind: 'ui.error', detail: `[直连写操作] ${action} ${detail} → 异常：${msg}` } as any)
+    appendTask({
+      id: taskId(started),
+      at: started,
+      platformId: id,
+      platformName: platformNameSafe(id),
+      clusterName: platformNameSafe(id),
+      action,
+      target: detail,
+      ok: false,
+      message: msg,
+      steps: [],
+      durationMs: Date.now() - started
+    })
     return { ok: false, error: msg }
+  }
+}
+
+/** 任务 id：时间戳 36 进制 + 随机后缀，足够避免同毫秒撞车 */
+function taskId(at: number): string {
+  return `t${at.toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
+function platformNameSafe(id: string): string {
+  try {
+    return (loadConfig().cloudPlatforms || []).find((x) => x.id === id)?.name || id
+  } catch {
+    return id
   }
 }
 
@@ -989,3 +1035,400 @@ export const directKillSession = (
   sessionId: number
 ): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
   runWrite(id, 'KILL SESSION', String(sessionId), (p, pw) => obd.killSession(p, pw, sessionId))
+
+// ---------- 直连任务日志（本地 JSONL） ----------
+// 直连没有 OCP 的任务子系统，这里用本地文本存档：能分页查、能看详情、能一键清理。
+
+export const initDirectTaskLog = (dir: string): void => configureTaskLog(dir)
+
+export const directTasks = (q: any): Promise<{ ok: boolean; data?: any; error?: string }> =>
+  wrap(async () => listTasks(q || {}))
+
+export const directTaskDetail = (id: string): Promise<{ ok: boolean; data?: any; error?: string }> =>
+  wrap(async () => getTask(String(id || '')))
+
+export const directTaskActions = (): Promise<{ ok: boolean; data?: string[]; error?: string }> =>
+  wrap(async () => taskActions())
+
+export const directClearTasks = (
+  opts: { before?: number } = {}
+): Promise<{ ok: boolean; data?: { removed: number; kept: number }; error?: string }> =>
+  wrap(async () => clearTasks(opts || {}))
+
+// ---------- 业务租户凭据 ----------
+// 用于「租户内部」操作（建库、建账号、授权）。密码走 DPAPI 加密存储，与平台密码同一套机制。
+
+const tenantCredKey = (id: string, tenant: string): string => `obtenant:${id}:${tenant}`
+
+export function tenantLoginOf(id: string, tenant: string): TenantLogin | null {
+  const raw = getPassword(tenantCredKey(id, tenant))
+  if (!raw) return null
+  try {
+    const j = JSON.parse(raw) as { user?: string; password?: string }
+    if (!j.user || j.password === undefined) return null
+    return { user: String(j.user), password: String(j.password), tenant }
+  } catch {
+    return null
+  }
+}
+
+export const saveTenantCredential = (
+  id: string,
+  tenant: string,
+  user: string,
+  password: string
+): { ok: boolean; error?: string; keptPassword?: boolean } => {
+  if (!secretsAvailable()) return { ok: false, error: '系统加密不可用（DPAPI），为避免密码明文落盘，本次保存已取消' }
+  const u = String(user || '').trim()
+  if (!u) return { ok: false, error: '请填写账号' }
+  const key = tenantCredKey(id, tenant)
+  const pw = String(password ?? '')
+  // 「密码留空」在界面上的语义是"只改账号，密码不动"。
+  // 早先直接覆盖成空串，凭据就变成空密码，之后所有租户内查询都报
+  // Access denied ... (using password: NO)，而界面上仍显示"已录入"。
+  if (!pw) {
+    const prev = tenantLoginOf(id, tenant)
+    setPassword(key, JSON.stringify({ user: u, password: prev ? prev.password : '' }))
+    return { ok: true, keptPassword: !!prev }
+  }
+  setPassword(key, JSON.stringify({ user: u, password: pw }))
+  return { ok: true }
+}
+
+export const tenantCredentialStatus = (id: string, tenant: string): { has: boolean; user?: string } => {
+  const login = tenantLoginOf(id, tenant)
+  return login ? { has: true, user: login.user } : { has: false }
+}
+
+export const clearTenantCredential = (id: string, tenant: string): { ok: boolean } => {
+  deletePassword(tenantCredKey(id, tenant))
+  return { ok: true }
+}
+
+/**
+ * 把驱动抛出的英文鉴权错误转成可操作的中文提示。
+ *
+ * 典型现场：凭据里密码存成了空串，mysql2 就不发密码包，OB 回
+ * `Access denied for user 'root'@'x.x.x.x' (using password: NO)`——
+ * 字面上看不出"密码为空"，用户只会以为账号不对。
+ */
+function friendlyTenantLoginError(tenant: string, user: string, err: any): Error {
+  const raw = String((err && err.message) || err || '')
+  if (/Access denied/i.test(raw) && /using password:\s*NO/i.test(raw)) {
+    return new Error(
+      `租户 ${tenant} 的账号 ${user} 未携带密码（using password: NO）。` +
+        '本机保存的凭据里密码为空，请到租户详情「连接」页重新填写密码并保存。'
+    )
+  }
+  if (/Access denied/i.test(raw)) {
+    return new Error(`租户 ${tenant} 的账号 ${user} 登录被拒绝：账号或密码不正确。原始错误：${raw}`)
+  }
+  if (/Unknown MySQL server host|ECONNREFUSED|ETIMEDOUT|timeout/i.test(raw)) {
+    return new Error(`连接租户 ${tenant} 失败：${raw}。请确认实例地址、端口与连接白名单。`)
+  }
+  return err instanceof Error ? err : new Error(raw)
+}
+
+/** 带凭据执行租户内部操作：没有凭据时给出统一的可操作提示 */
+async function withTenantLogin<T>(
+  id: string,
+  tenant: string,
+  fn: (p: ObDirectPlatform, login: TenantLogin) => Promise<T>
+): Promise<T> {
+  const login = tenantLoginOf(id, tenant)
+  if (!login) {
+    throw new Error(`尚未录入租户 ${tenant} 的凭据。请先在租户详情里录入业务账号，再执行租户内部操作。`)
+  }
+  const { p } = requireDirect(id)
+  try {
+    return await fn(p, login)
+  } catch (e: any) {
+    throw friendlyTenantLoginError(tenant, login.user, e)
+  }
+}
+
+/** 租户内部写操作：统一记任务日志 */
+async function runTenantWrite(
+  id: string,
+  tenant: string,
+  action: string,
+  target: string,
+  run: (p: ObDirectPlatform, login: TenantLogin) => Promise<{ ok: boolean; message: string; steps: string[] }>
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> {
+  const started = Date.now()
+  try {
+    const r = await withTenantLogin(id, tenant, run)
+    appendTask({
+      id: taskId(started),
+      at: started,
+      platformId: id,
+      platformName: platformNameSafe(id),
+      clusterName: platformNameSafe(id),
+      action,
+      target: `${tenant} / ${target}`,
+      ok: r.ok,
+      message: r.message,
+      steps: r.steps,
+      durationMs: Date.now() - started
+    })
+    return r.ok ? { ok: true, data: { message: r.message } } : { ok: false, error: r.message }
+  } catch (e: any) {
+    const msg = e?.message || String(e)
+    appendTask({
+      id: taskId(started),
+      at: started,
+      platformId: id,
+      platformName: platformNameSafe(id),
+      clusterName: platformNameSafe(id),
+      action,
+      target: `${tenant} / ${target}`,
+      ok: false,
+      message: msg,
+      steps: [],
+      durationMs: Date.now() - started
+    })
+    return { ok: false, error: msg }
+  }
+}
+
+export const directTestTenantLogin = (
+  id: string,
+  tenant: string
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  wrap(async () => {
+    const r = await withTenantLogin(id, tenant, (p, login) => obin.testTenantLogin(p, login))
+    if (!r.ok) throw new Error(r.message)
+    return { message: r.message }
+  })
+
+/** 库列表（含系统内置库）：只读，不记任务日志 */
+export const directTenantDbsAs = (id: string, tenant: string): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.databasesAs(p, login)))
+
+export const directCreateDb = (
+  id: string,
+  tenant: string,
+  input: { name: string; charset?: string }
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runTenantWrite(id, tenant, 'CREATE DATABASE', String(input?.name || ''), (p, login) =>
+    obin.createDatabaseAs(p, login, input)
+  )
+
+export const directDropDb = (
+  id: string,
+  tenant: string,
+  name: string
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runTenantWrite(id, tenant, 'DROP DATABASE', name, (p, login) => obin.dropDatabaseAs(p, login, name))
+
+export const directTenantUsersAs = (
+  id: string,
+  tenant: string,
+  mode: 'MYSQL' | 'ORACLE'
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.usersAs(p, login, mode)))
+
+export const directCreateUser = (
+  id: string,
+  tenant: string,
+  input: { name: string; host?: string; password: string; mode: 'MYSQL' | 'ORACLE' }
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runTenantWrite(id, tenant, 'CREATE USER', String(input?.name || ''), (p, login) =>
+    obin.createUserAs(p, login, input)
+  )
+
+export const directDropUser = (
+  id: string,
+  tenant: string,
+  input: { name: string; host?: string; mode: 'MYSQL' | 'ORACLE' }
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runTenantWrite(id, tenant, 'DROP USER', String(input?.name || ''), (p, login) => obin.dropUserAs(p, login, input))
+
+export const directGrant = (
+  id: string,
+  tenant: string,
+  input: { name: string; host?: string; database?: string; privileges: string; mode: 'MYSQL' | 'ORACLE' }
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runTenantWrite(id, tenant, 'GRANT', String(input?.name || ''), (p, login) => obin.grantAs(p, login, input))
+
+export const directGrants = (
+  id: string,
+  tenant: string,
+  input: { name: string; host?: string }
+): Promise<{ ok: boolean; data?: string[]; error?: string }> =>
+  wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.grantsAs(p, login, input)))
+
+// ---------- 直连模式的租户生命周期 ----------
+// 与上面的 createTenant / deleteTenant / tenantSetLocked（OCP 任务框架）**互不复用**：
+// 直连是直接在 sys 租户里跑 DDL，没有任务 ID、没有回滚，返回结构也不一样。
+// 渲染层按 access === 'direct' 显式选边，不做「一个函数两种后端」的隐式分派。
+
+/** Unit 规格清单：新建租户向导用 */
+export const directUnitConfigs = (id: string): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.unitConfigsOf(p, pw)
+  })
+
+/** 资源池清单：向导里做重名提示 */
+export const directResourcePools = (id: string): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.resourcePoolsOf(p, pw)
+  })
+
+/**
+ * 建租户。失败时也把 data.steps 带回来——直连没有回滚，
+ * 用户需要知道前面已经建了哪些对象才能手工收尾。
+ */
+export const directCreateTenant = (
+  id: string,
+  input: any,
+  onStep?: (e: any) => void
+): Promise<{ ok: boolean; data?: { message: string; steps: string[]; warning?: string; connections?: { label: string; command: string }[] }; error?: string; steps?: string[] }> => {
+  if (!isDirectPlatform(id)) return Promise.resolve({ ok: false, error: '该平台不是 OceanBase 直连模式' })
+  let p: ObDirectPlatform
+  let pw: string
+  try {
+    p = getObDirectPlatform(id)
+    pw = directPassword(id)
+  } catch (e: any) {
+    return Promise.resolve({ ok: false, error: e?.message || String(e) })
+  }
+  const started = Date.now()
+  return obd.createTenantDirect(p, pw, input, onStep).then((r) => {
+    appendAudit({
+      kind: 'ui.error',
+      detail: `[直连租户] 创建 ${input?.name ?? ''} → ${r.ok ? '成功' : '失败'}：${r.message}${r.warning ? `（${r.warning}）` : ''}`
+    } as any)
+    appendTask({
+      id: taskId(started),
+      at: started,
+      platformId: id,
+      platformName: p.name,
+      clusterName: p.name,
+      action: 'CREATE TENANT',
+      target: String(input?.name || ''),
+      ok: r.ok,
+      message: r.warning ? `${r.message}（${r.warning}）` : r.message,
+      steps: r.steps,
+      durationMs: Date.now() - started
+    })
+    return r.ok
+      ? { ok: true, data: { message: r.message, steps: r.steps, warning: r.warning, connections: r.connections } }
+      : { ok: false, error: r.message, steps: r.steps }
+  })
+}
+
+export const directDropTenant = async (
+  id: string,
+  tenantName: string
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> => {
+  const r = await runWrite(id, 'DROP TENANT', tenantName, (p, pw) => obd.dropTenantDirect(p, pw, tenantName))
+  // 凭据的键是「平台 + 租户名」，没有租户 ID 参与。删除后若再建同名租户，
+  // 旧凭据会被新租户直接继承（表现为新租户莫名其妙能登进旧账号）。
+  // 删除成功即清除，保证同名新租户从"未录入"开始。
+  if (r.ok) clearTenantCredential(id, String(tenantName || '').trim())
+  return r
+}
+
+export const directSetTenantLocked = (
+  id: string,
+  tenantName: string,
+  locked: boolean
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, locked ? 'LOCK TENANT' : 'UNLOCK TENANT', tenantName, (p, pw) =>
+    obd.setTenantLockedDirect(p, pw, tenantName, locked)
+  )
+
+/** 新建 Unit 规格（某个集群内，独立于建租户流程） */
+export const directCreateUnitConfig = (
+  id: string,
+  spec: any
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'CREATE RESOURCE UNIT', String(spec?.name || ''), (p, pw) =>
+    obd.createUnitConfigDirect(p, pw, spec)
+  )
+
+export const directDropUnitConfig = (
+  id: string,
+  name: string
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'DROP RESOURCE UNIT', name, (p, pw) => obd.dropUnitConfigDirect(p, pw, name))
+
+/** 新建资源池：池的生命周期独立于租户，建租户时只挑空闲池 */
+export const directCreateResourcePool = (
+  id: string,
+  input: any
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'CREATE RESOURCE POOL', String(input?.name || ''), (p, pw) =>
+    obd.createResourcePoolDirect(p, pw, input)
+  )
+
+// ---------- 直连：租户内部数据（只读） ----------
+// 与 OCP 的 cloudTenantDbs / cloudTenantSessions 等是两套接口：
+// 那边按 clusterId+tenantId 走 OCP REST，这边直接在 sys 租户里查系统视图。
+
+export const directTenantSessions = (
+  id: string,
+  tenantName: string,
+  limit = 200
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantSessionsOf(p, pw, tenantName, limit)
+  })
+
+export const directTenantDatabases = (
+  id: string,
+  tenantId: number
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantDatabasesOf(p, pw, Number(tenantId) || 0)
+  })
+
+export const directTenantUsers = (
+  id: string,
+  tenantId: number
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantUsersOf(p, pw, Number(tenantId) || 0)
+  })
+
+export const directTenantParams = (
+  id: string,
+  tenantId: number,
+  opts: { keyword?: string; limit?: number } = {}
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantParametersOf(p, pw, Number(tenantId) || 0, opts)
+  })
+
+/** 租户连接串（详情页「连接」tab）：按兼容模式区分 oracle / mysql / obproxy 三种形态 */
+export const directTenantConnections = (
+  id: string,
+  tenant: string,
+  mode: 'MYSQL' | 'ORACLE'
+): Promise<{ ok: boolean; data?: { label: string; command: string }[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantConnectionsOf(p, pw, String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL')
+  })
+
+export const directTenantTopSql = (  id: string,
+  tenantId: number,
+  opts: { hours?: number; limit?: number } = {}
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantTopSqlOf(p, pw, Number(tenantId) || 0, opts)
+  })
+
+/** 回收资源池：DROP TENANT 不会自动删池，残留的池需在这里清理 */export const directDropResourcePool = (
+  id: string,
+  name: string
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runWrite(id, 'DROP RESOURCE POOL', name, (p, pw) => obd.dropResourcePoolDirect(p, pw, name))

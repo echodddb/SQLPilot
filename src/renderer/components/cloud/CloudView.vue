@@ -152,6 +152,8 @@
           <MonitorPane v-else-if="cloud.view === 'monitor'" />
           <SqlDiagPane v-else-if="cloud.view === 'sqldiag'" />
           <AlarmsPane v-else-if="cloud.view === 'alarms'" />
+          <!-- 直连的「任务」是本地文本日志，与 OCP 的任务子系统不是一回事 -->
+          <DirectTasksPane v-else-if="cloud.view === 'dtasks'" />
           <TasksPane v-else-if="cloud.view === 'tasks'" />
           <PlatformPane v-else-if="cloud.view === 'platform'" />
           <DirectOpsPane v-else-if="cloud.view === 'direct'" />
@@ -204,6 +206,7 @@ import AlarmsPane from './AlarmsPane.vue'
 import TasksPane from './TasksPane.vue'
 import PlatformPane from './PlatformPane.vue'
 import DirectOpsPane from './DirectOpsPane.vue'
+import DirectTasksPane from './direct/DirectTasksPane.vue'
 import PlatformSettings from './PlatformSettings.vue'
 import CloudSearch from './CloudSearch.vue'
 import SourceTip from './SourceTip.vue'
@@ -326,7 +329,7 @@ const NAV_GROUPS = computed<{ title: string; items: ReturnType<typeof viewOf>[] 
   if (isDirect.value) {
     return [
       { title: 'OceanBase 直连', items: (['overview', 'clusters', 'tenants', 'hosts'] as CloudViewKey[]).map(viewOf) },
-      { title: '直连运维', items: (['direct'] as CloudViewKey[]).map(viewOf) },
+      { title: '直连运维', items: (['direct', 'dtasks'] as CloudViewKey[]).map(viewOf) },
       { title: '告警', items: (['alarms'] as CloudViewKey[]).map(viewOf) }
     ]
   }
@@ -343,7 +346,7 @@ const NAV_GROUPS = computed<{ title: string; items: ReturnType<typeof viewOf>[] 
 // 切到直连平台时，当前视图可能是 OCP 专有页（如 obproxy），回落到总览避免空白
 watch(isDirect, (direct) => {
   if (!direct) return
-  if (!['overview', 'clusters', 'tenants', 'hosts', 'alarms', 'direct'].includes(cloud.view)) {
+  if (!['overview', 'clusters', 'tenants', 'hosts', 'alarms', 'direct', 'dtasks'].includes(cloud.view)) {
     setView('overview')
   }
 })

@@ -21,6 +21,8 @@ export type CloudView =
   | 'sqldiag'
   | 'alarms'
   | 'tasks'
+  /** 直连模式专有：本地文本任务日志（与 OCP 的任务子系统不是同一套） */
+  | 'dtasks'
   | 'platform'
   /** 直连模式专有：参数 / TopSQL / 事件 / 写操作（OCP 平台不显示） */
   | 'direct'
@@ -37,6 +39,7 @@ export const CLOUD_VIEWS: { key: CloudView; label: string; icon: string; desc: s
   { key: 'sqldiag', label: 'SQL 诊断', icon: '⌁', desc: 'TopSQL / 慢 SQL：按 CPU、耗时、执行次数排序，定位吃资源的语句' },
   { key: 'alarms', label: '告警', icon: '⚠', desc: '当前活跃告警，按级别筛选' },
   { key: 'tasks', label: '任务', icon: '⟳', desc: 'OCP 运维任务流水与子任务进度' },
+  { key: 'dtasks', label: '任务日志', icon: '⧉', desc: '直连写操作的本地文本任务日志：可筛选、看详情、清理' },
   { key: 'platform', label: '平台管理', icon: '⚙', desc: 'OCP 用户 / 角色 / 平台参数 / 登录审计' },
   { key: 'direct', label: '直连运维', icon: '⌗', desc: '无 OCP 直连：系统参数、TopSQL、运维事件与写操作（直接执行 SQL，不可回滚）' }
 ]
