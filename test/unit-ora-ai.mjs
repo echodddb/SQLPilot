@@ -20,7 +20,9 @@ await build({
   target: 'node20',
   outfile: out,
   alias: { electron: path.join(import.meta.dirname, 'stub-electron.mjs') },
-  external: ['oracledb'],
+  // mysql2 / sql-escaper 是 CJS 且内部动态 require('buffer')，打进 ESM bundle 会在 import 时抛
+  // "Dynamic require of buffer is not supported"（云管 OB 直连把 mysql2 带进了这条依赖链）
+  external: ['oracledb', 'mysql2', 'sql-escaper'],
   logLevel: 'warning'
 })
 
