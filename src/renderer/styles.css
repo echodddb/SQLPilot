@@ -325,40 +325,8 @@ option { background: var(--bg-card); color: var(--text); }
   align-items: center;
 }
 
-.conn-list { flex: 1; overflow-y: auto; padding: 0 10px 12px; }
-
-/* 会话是最高频实体：拿走侧栏全部剩余弹性空间（连接/服务器是低频配置，各自固定上限自滚动） */
+/* 会话是侧栏最高频实体：拿走全部剩余弹性空间（库/服务器清单已各自独立成一级模块，不再挤在这里） */
 .session-list { flex: 1 1 auto; min-height: 120px; overflow-y: auto; padding: 0 10px 12px; }
-
-.conn-group-title {
-  padding: 12px 6px 5px;
-  font-size: 11px;
-  color: var(--text-faint);
-  letter-spacing: 0.8px;
-  font-weight: 600;
-}
-
-.conn-item {
-  padding: 7px 10px;
-  border-radius: 9px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text);
-  transition: background 0.14s ease;
-}
-.conn-item:hover { background: var(--bg-card-hover); }
-.conn-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.conn-item .sub {
-  font-size: 10px;
-  font-weight: 700;
-  padding: 1px 6px;
-  border-radius: 99px;
-  background: var(--accent-dim);
-  color: var(--accent);
-}
-.conn-item .sub.rw { background: var(--yellow-dim); color: var(--yellow); }
 
 .tree-schema {
   padding: 4px 8px 4px 26px;

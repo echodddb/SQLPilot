@@ -11,7 +11,7 @@
         title="当前会话还没有挂项目，点击选择一个"
         @click="openSessionModal('switch')"
       >⚠ 未选择项目</span>
-      <span style="display:flex; gap:2px">
+      <span class="proj-acts">
         <button class="icon-btn" title="新建会话（当前/最近项目；无项目时先选择）" @click="newSessionClick">＋</button>
         <button class="icon-btn" title="新建项目（选择文件夹）" @click="openProjectModal()">▣</button>
       </span>
@@ -34,7 +34,7 @@
           <span v-if="g.ids.length" class="cnt">{{ g.ids.length }}</span>
           <span v-if="curSession()?.meta.projectId === g.key" class="sub cur">当前</span>
           <button v-if="g.key !== '__none__'" class="icon-btn" title="在此项目下新建会话" @click.stop="newSessionFor(g.key)">＋</button>
-          <button v-if="g.key !== '__none__'" class="icon-btn" title="编辑项目属性（数据库/服务器）" @click.stop="openProjectEditor(projOf(g.key))">✎</button>
+          <button v-if="g.key !== '__none__'" class="icon-btn" title="编辑项目属性（数据库/服务器）" @click.stop="openProjectEditor(projOf(g.key))">✒</button>
         </div>
 
         <template v-if="!collapsed.has(g.key)">
@@ -59,33 +59,18 @@
             （暂无会话，点项目行的 ＋ 新建）
           </div>
 
-          <!-- 归档子区（ZCode 归档平铺式）：入口行 + 条目（查看/继续/删除/清空） -->
-          <div v-if="g.key !== '__none__'" class="archive-toggle" @click="toggleArchive(g.key)">
-            <span class="chev">{{ openArchives.has(g.key) ? '▾' : '▸' }}</span>
+          <!-- 归档入口（ZCode 归档平铺式改为弹窗）：点击弹出该项目全部归档，可恢复/继续/删除/清空 -->
+          <div
+            v-if="g.key !== '__none__'"
+            class="archive-toggle"
+            :title="`查看该项目归档：恢复会话 / 以总结为背景继续 / 清理（不再在侧栏里展开，避免项目树被撑长）`"
+            @click="openArchive(projOf(g.key))"
+          >
+            <span class="chev">▤</span>
             <span>归档</span>
-            <span v-if="archives[g.key]?.length" class="cnt">{{ archives[g.key].length }}</span>
             <span style="flex:1"></span>
-            <span class="arc-hint">{{ openArchives.has(g.key) ? '' : '总结/继续/清理' }}</span>
+            <span class="arc-hint">查看 / 恢复 / 清理</span>
           </div>
-          <template v-if="g.key !== '__none__' && openArchives.has(g.key)">
-            <div v-if="archiveBusy === g.key" class="archive-entry"><span class="arc-sum">读取中…</span></div>
-            <template v-else-if="archives[g.key]?.length">
-              <div v-for="(a, ai) in archives[g.key]" :key="ai" class="archive-entry" :title="a.raw">
-                <div class="arc-head">
-                  <span class="arc-ts">{{ a.ts }}</span>
-                  <span class="arc-title">{{ a.title }}</span>
-                  <span v-if="a.summarizing" class="arc-flag">总结生成中…</span>
-                  <span v-else-if="a.legacy" class="arc-flag legacy">仅总结</span>
-                  <span style="flex:1"></span>
-                  <button class="icon-btn" :title="a.sessionId ? '恢复此会话：原对话完整保留，回到活跃列表' : '旧版归档（原会话已删）：以总结为背景新建会话'" @click.stop="continueArchive(g.key, a)">↻ {{ a.sessionId ? '恢复' : '继续' }}</button>
-                  <button class="icon-btn" title="彻底删除这条归档" @click.stop="deleteArchiveEntry(g.key, ai)">✕</button>
-                </div>
-                <div class="arc-sum" :title="a.summary">{{ a.summary ? a.summary.split('\n')[0].slice(0, 120) + (a.summary.length > 120 ? '…' : '') : '（无摘要）' }}</div>
-              </div>
-              <div class="archive-clear" @click="clearArchive(g.key)">清空归档（{{ archives[g.key].length }} 条）…</div>
-            </template>
-            <div v-else class="archive-entry"><span class="arc-sum">（暂无归档。会话行 ▤ 或输入框"归档对话"后，总结会出现在这里）</span></div>
-          </template>
         </template>
       </template>
     </div>
@@ -93,63 +78,18 @@
     <!-- 项目右键菜单 -->
     <div v-if="ctxMenu.show" class="ctx-mask" @click="ctxMenu.show = false" @contextmenu.prevent="ctxMenu.show = false">
       <div class="ctx-menu" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
-        <div class="ctx-item" @click="ctxAction('edit')">✎　编辑项目属性</div>
+        <div class="ctx-item" @click="ctxAction('edit')">✒　编辑项目属性</div>
         <div class="ctx-item" @click="ctxAction('new')">＋　新建会话</div>
-        <div class="ctx-item" @click="ctxAction('archive')">展开归档区</div>
+        <div class="ctx-item" @click="ctxAction('archive')">▤　查看归档（弹窗）</div>
         <div class="ctx-item" @click="ctxAction('folder')">在资源管理器中打开</div>
         <div class="ctx-sep"></div>
         <div class="ctx-item danger" @click="ctxAction('delete')">🗑　删除项目</div>
       </div>
     </div>
 
-    <!-- 底部组：连接/服务器（默认折叠）+ 资源监控，整体贴侧栏底部；
-         中间剩余空间全部归项目树（会话列表） -->
+    <!-- 底部组：只留本机资源监控（数据库连接 / 服务器已各有独立一级模块，
+         AI 对话侧栏不再重复挂它们的入口与清单） -->
     <div class="side-bottom">
-    <div class="side-head side-fold" title="展开/收起连接列表" @click="toggleSection('conns')">
-      <span><span class="chev">{{ openSections.has('conns') ? '▾' : '▸' }}</span> 数据库连接</span>
-      <button class="icon-btn" title="新增连接" @click.stop="openConnModal()">＋</button>
-    </div>
-
-    <div v-if="openSections.has('conns')" class="conn-list" style="flex: 0 1 auto; max-height: 200px;">
-      <div v-if="!groups.length" class="side-empty">
-        还没有数据库连接。<br />点击本组标题行的 <b>＋</b> 添加：<br />
-        Oracle 11g / 19c、OceanBase（MySQL / Oracle 租户）、MySQL 均已支持。连接可按需关联到项目，不关联则全局可用。
-      </div>
-
-      <template v-for="g in groups" :key="g.type">
-        <div class="conn-group-title">{{ g.label }}</div>
-        <template v-for="c in g.items" :key="c.id">
-          <!-- 对象浏览在「数据库」模块（独立一级模块）；侧边栏只做连接管理，点行进入控制台 -->
-          <div class="conn-item" :title="`${c.user}@${c.host}:${c.port}\n点击打开数据库控制台（左侧「数据库」模块）`" @click="openDbTask(c)">
-            <span>🗄</span>
-            <span class="name">{{ c.name }}</span>
-            <span v-if="projName(c.projectId)" class="sub" style="background: var(--bg-card-hover); color: var(--text-dim)" :title="'已关联项目：' + projName(c.projectId)">{{ projName(c.projectId) }}</span>
-            <span class="sub" :class="{ rw: c.role !== 'readonly' }">{{ c.role === 'readonly' ? 'RO' : 'RW' }}</span>
-            <button class="icon-btn" title="编辑" @click.stop="openConnModal(c)">✎</button>
-            <button class="icon-btn" title="删除" @click.stop="removeConn(c)">✕</button>
-          </div>
-        </template>
-      </template>
-    </div>
-
-    <div class="side-head side-fold" style="margin-top: 4px" title="展开/收起服务器列表" @click="toggleSection('servers')">
-      <span><span class="chev">{{ openSections.has('servers') ? '▾' : '▸' }}</span> 服务器</span>
-      <button class="icon-btn" title="添加 SSH 服务器（全局注册，项目按需引用）" @click.stop="openServerModal()">＋</button>
-    </div>
-
-    <div v-if="openSections.has('servers')" class="conn-list" style="flex: 0 1 auto; max-height: 160px;">
-      <div v-if="!store.cfg.servers?.length" class="side-empty">
-        还没有服务器。<br />点击右上角 <b>＋</b> 添加（SSH 密码认证，<br />密码 DPAPI 加密存储），项目里可按需引用。
-      </div>
-      <div v-for="s in store.cfg.servers" :key="s.id" class="conn-item" :title="`${s.user}@${s.host}:${s.port}\n点击打开 SSH 终端（任务栏生成入口）`" @click="openServerTask(s)">
-        <span>🖥</span>
-        <span class="name">{{ s.name }}</span>
-        <span v-if="s.tag" class="sub" :class="{ rw: s.tag === '生产' }">{{ s.tag }}</span>
-        <button class="icon-btn" title="编辑" @click.stop="openServerModal(s)">✎</button>
-        <button class="icon-btn" title="删除（所有项目的引用一并解除）" @click.stop="removeServer(s)">✕</button>
-      </div>
-    </div>
-
     <!-- 底部：本机资源迷你监控常驻（CPU/内存 sparkline，3s 采样；− 收起为单行） -->
     <div class="res-foot">
       <template v-if="resOpen">
@@ -191,12 +131,10 @@
 
 <script setup lang="ts">
 import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
-import { store, curSession, removeSession, restoreArchivedSession, createSessionInProject, openDbTask, openServerTask, TYPE_LABELS } from '../store'
+import { store, curSession, removeSession, createSessionInProject } from '../store'
 
-const openConnModal = inject<(c?: any) => void>('openConnModal')!
 const openProjectModal = inject<() => void>('openProjectModal')!
 const openSessionModal = inject<(mode: 'new' | 'switch') => void>('openSessionModal')!
-const openServerModal = inject<(s?: any) => void>('openServerModal')!
 const openProjectEditor = inject<(p: any) => void>('openProjectEditor')!
 const openArchiveView = inject<(p: any) => void>('openArchiveView')!
 
@@ -312,27 +250,16 @@ async function ctxAction(action: string) {
   if (!p) return
   if (action === 'edit') openProjectEditor(p)
   else if (action === 'new') await newSessionFor(p.id)
-  // 展开项目树内的归档子区（替代原独立查看弹窗入口；弹窗仍保留全文查看能力）
-  else if (action === 'archive') {
-    collapsed.delete(p.id)
-    if (!openArchives.has(p.id)) void toggleArchive(p.id)
-  }
+  // 归档改成弹窗（项目树只留一个入口行，不在树里展开条目）
+  else if (action === 'archive') openArchive(p)
   else if (action === 'folder') await window.sqlpilot.openFolder(p.rootPath)
   else if (action === 'delete') await removeProject(p)
 }
 
-const groups = computed(() => {
-  const map = new Map<string, any[]>()
-  for (const c of store.cfg?.connections || []) {
-    if (!map.has(c.type)) map.set(c.type, [])
-    map.get(c.type)!.push(c)
-  }
-  return [...map.entries()].map(([type, items]) => ({ type, label: TYPE_LABELS[type] || type, items }))
-})
-
-function projName(pid?: string | null) {
-  if (!pid) return ''
-  return (store.cfg?.projects || []).find((p: any) => p.id === pid)?.name || ''
+/** 打开某项目的归档弹窗（恢复 / 以总结为背景继续 / 删除 / 清空都在弹窗里） */
+function openArchive(p: any): void {
+  if (!p) return
+  openArchiveView(p)
 }
 
 // 会话按项目分组：项目顺序在前，未绑定项目的会话归入"未分组"
@@ -371,19 +298,6 @@ function toggleGroup(key: string) {
   localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]))
 }
 
-// ---------- 低频配置区折叠（连接/服务器：默认收起贴底，点击标题展开，localStorage 记忆） ----------
-const SECTION_KEY = 'sqlpilot.sideSections.open'
-const openSections = reactive(new Set<string>())
-try {
-  const saved = JSON.parse(localStorage.getItem(SECTION_KEY) || '[]')
-  if (Array.isArray(saved)) for (const k of saved) openSections.add(String(k))
-} catch { /* 损坏时忽略：默认全收起 */ }
-function toggleSection(key: string): void {
-  if (openSections.has(key)) openSections.delete(key)
-  else openSections.add(key)
-  localStorage.setItem(SECTION_KEY, JSON.stringify([...openSections]))
-}
-
 // ---------- 会话分页（ZCode：每项目首屏 5 条，显示更多 +5，不提供"收起显示"） ----------
 const SESSION_PAGE = 5
 const visibleSessions = reactive<Record<string, number>>({})
@@ -394,69 +308,6 @@ function showMore(key: string): void {
   visibleSessions[key] = visibleOf(key) + SESSION_PAGE
 }
 
-// ---------- 归档子区（ZCode 归档平铺式：列表/继续/单条删除/清空） ----------
-interface ArchEntry { sessionId: string | null; ts: string; title: string; summary: string; summarizing?: boolean; messageCount?: number; legacy?: boolean; raw?: string }
-const openArchives = reactive(new Set<string>())
-const archives = reactive<Record<string, ArchEntry[]>>({})
-const archiveBusy = ref('')
-async function toggleArchive(key: string): Promise<void> {
-  if (openArchives.has(key)) {
-    openArchives.delete(key)
-    return
-  }
-  openArchives.add(key)
-  await loadArchive(key)
-}
-async function loadArchive(key: string): Promise<void> {
-  archiveBusy.value = key
-  try {
-    const r = await window.sqlpilot.listArchive(key)
-    archives[key] = r.ok ? r.entries || [] : []
-    if (!r.ok) window.sqlpilot.uiAlert(r.error || '读取归档失败')
-  } finally {
-    archiveBusy.value = ''
-  }
-}
-async function continueArchive(key: string, a: ArchEntry): Promise<void> {
-  if (a.sessionId) {
-    // 会话型：真恢复（ZCode resurrection）——原对话完整保留
-    await restoreArchivedSession(a.sessionId)
-    if (collapsed.has(key)) toggleGroup(key)
-    return
-  }
-  // legacy 型（旧版归档，原会话已删）：以总结为背景新建会话
-  await createSessionInProject(key)
-  await import('../store').then(m => m.sendMessage(`请基于以下历史归档继续工作（${a.ts} · ${a.title}）：\n\n${a.summary}\n\n——请先简要确认你从中掌握的背景，然后等我给出具体任务。`))
-}
-async function deleteArchiveEntry(key: string, reverseIndex: number): Promise<void> {
-  const a = archives[key]?.[reverseIndex]
-  if (!a) return
-  const what = a.sessionId ? `该归档会话（${a.messageCount || 0} 条消息）将被彻底删除` : '仅删除这条历史总结'
-  if (!(await window.sqlpilot.uiConfirm(`删除归档「${a.ts} · ${a.title}」？`, what + '，不可恢复', true))) return
-  const r = await window.sqlpilot.deleteArchiveEntry(key, { sessionId: a.sessionId, reverseIndex, rawCheck: a.raw, ts: a.ts, title: a.title })
-  if (!r.ok) {
-    window.sqlpilot.uiAlert(r.error || '删除失败')
-    return
-  }
-  await loadArchive(key)
-}
-// LLM 增强总结后台完成 → 已展开的归档区实时刷新
-// 必须保存 unsubscribe：Sidebar 随模块切换反复挂载，不注销会累积监听与已卸载组件闭包
-const offArchiveUpdated = window.sqlpilot.onArchiveUpdated(({ projectId }) => {
-  if (openArchives.has(projectId)) void loadArchive(projectId)
-})
-onUnmounted(() => { offArchiveUpdated() })
-async function clearArchive(key: string): Promise<void> {
-  const n = archives[key]?.length || 0
-  if (!n) return
-  if (!(await window.sqlpilot.uiConfirm(`清空该项目全部 ${n} 条归档？`, '删除后不可恢复；该项目后续会话将不再携带这些历史背景', true))) return
-  const r = await window.sqlpilot.clearArchive(key)
-  if (!r.ok) {
-    window.sqlpilot.uiAlert(r.error || '清空失败')
-    return
-  }
-  await loadArchive(key)
-}
 function projOf(key: string): any {
   return (store.cfg?.projects || []).find((p: any) => p.id === key)
 }
@@ -494,33 +345,16 @@ async function newSessionFor(projectId: string) {
   await createSessionInProject(projectId)
 }
 
-async function removeConn(c: any) {
-  if (!(await window.sqlpilot.uiConfirm(`删除连接「${c.name}」？`, '已保存的密码将一并删除', true))) return
-  await window.sqlpilot.deleteConn(c.id)
-  store.cfg = await window.sqlpilot.getConfig()
-}
-
 async function removeProject(p: any) {
   if (!(await window.sqlpilot.uiConfirm(`删除项目「${p.name}」？`, '只解除引用，不删除磁盘文件；关联会话需要重新选择项目（挂载的服务器为全局资产，不受影响）', true))) return
   await window.sqlpilot.deleteProject(p.id)
   store.cfg = await window.sqlpilot.getConfig()
 }
-
-// ---------- 全局服务器 ----------
-function openTerm(s: any) {
-  // 服务器已是独立一级模块：直接切过去并让 ServerView 打开该会话的终端标签
-  store.pendingTermServer = s
-  store.module = 'server'
-}
-
-async function removeServer(s: any) {
-  if (!(await window.sqlpilot.uiConfirm(`删除服务器「${s.name}」？`, `${s.user}@${s.host}:${s.port}\n所有项目对该服务器的引用将一并解除，已保存的密码一并删除`, true))) return
-  await window.sqlpilot.deleteServer(s.id)
-  store.cfg = await window.sqlpilot.getConfig()
-}
 </script>
 
 <style scoped>
+/* 项目区标题：字号与颜色提一档，和放大后的 ＋/▣ 同气 */
+.side-head { font-size: 11.5px; color: var(--text-dim); }
 /* 「未选择项目」提醒：项目区自己的事，样式压到最小，别抢项目名与 ＋/▣ 的位置。
    flex 允许收缩 + 省略号：侧栏最窄时宁可把文字截断，也不能把 ＋/▣ 顶出去。 */
 .proj-miss {
@@ -528,7 +362,7 @@ async function removeServer(s: any) {
   min-width: 0;
   margin-left: auto;
   margin-right: 6px;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0;
   text-transform: none;
@@ -542,7 +376,8 @@ async function removeServer(s: any) {
   text-overflow: ellipsis;
 }
 .proj-miss:hover { background: color-mix(in srgb, var(--yellow) 26%, transparent); }
-.session-list { padding: 0 10px 8px; max-height: 260px; overflow-y: auto; }
+/* 项目树占满项目区剩余高度：底部连接/服务器清单撤掉后，这里不再需要 260px 的上限 */
+.session-list { padding: 0 10px 8px; }
 .session-group-title {
   padding: 8px 4px 4px;
   font-size: 11px;
@@ -574,21 +409,26 @@ async function removeServer(s: any) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 7px 10px;
   border-radius: 9px;
   cursor: pointer;
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .session-item:hover { background: var(--bg-card-hover); color: var(--text); }
 .session-item.active { background: var(--accent-dim); color: var(--text); }
 .session-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mode-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--text-faint); }
-.mode-dot.plan { background: var(--purple); }
-.mode-dot.readonly { background: var(--green); }
-.mode-dot.confirm { background: var(--accent); }
-.mode-dot.session { background: var(--yellow); }
-.mode-dot.yolo { background: var(--red); }
+/* 权限模式点：放大 + 同色微光，扫一眼就能分出计划/只读/放开 */
+.mode-dot {
+  width: 9.5px; height: 9.5px; border-radius: 50%; flex-shrink: 0;
+  background: var(--text-faint);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-faint) 14%, transparent);
+}
+.mode-dot.plan { background: var(--purple); box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 22%, transparent); }
+.mode-dot.readonly { background: var(--green); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 22%, transparent); }
+.mode-dot.confirm { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+.mode-dot.session { background: var(--yellow); box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 24%, transparent); }
+.mode-dot.yolo { background: var(--red); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 24%, transparent); }
 
 /* 右键菜单 */
 .ctx-mask { position: fixed; inset: 0; z-index: 200; }
@@ -646,63 +486,80 @@ async function removeServer(s: any) {
 }
 .rf-toggle:hover { color: var(--text); border-color: var(--border-strong); }
 
-/* 折叠区标题（连接/服务器）：可点击整行切换 */
-.side-fold { cursor: pointer; user-select: none; }
-.side-fold:hover { color: var(--text); }
-.side-fold .chev { color: var(--text-faint); font-size: 10px; margin-right: 4px; }
-.side-fold span:first-child { display: flex; align-items: center; }
-
 /* ---- 项目树（ZCode workspace→task 式） ---- */
+/* 项目区的符号整体放大一号：原来 ＋/✎/▤ 只有 13px、折叠箭头 10px，在 272px 侧栏里
+   看着"没力气"。图标按钮统一成 24px 方块（hover 才亮底色），不靠 transform 放大（会发虚）。 */
+.proj-acts { display: flex; gap: 5px; }
+/* ✎ / ▤ / ＋ 这类字符本身笔画细，只放大字号仍然"发飘"：给一个常显的淡边框小方块当底座，
+   hover 再亮主色。这样图标有轮廓托着，视觉重量才立得住（不用 transform，避免发虚）。 */
+.proj-acts .icon-btn,
+.proj-row .icon-btn,
+.session-item .icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--bg-card);
+  font-size: 16px; line-height: 1; color: var(--text-dim);
+  transition: color .14s ease, background .14s ease, border-color .14s ease;
+}
+.proj-acts .icon-btn {
+  width: 27px; height: 27px; font-size: 17px;
+  color: var(--text); border-color: var(--border-strong);
+}
+.proj-acts .icon-btn:hover,
+.proj-row .icon-btn:hover,
+.session-item .icon-btn:hover {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.session-item .icon-btn {
+  border-color: transparent; background: transparent; color: var(--text-faint);
+}
+.session-item:hover .icon-btn { color: var(--text-dim); }
+.session-item .icon-btn:disabled {
+  opacity: .35; cursor: not-allowed;
+  background: transparent; border-color: var(--border); color: var(--text-faint);
+}
+
 .proj-row {
-  display: flex; align-items: center; gap: 7px;
-  padding: 7px 10px; border-radius: 9px; cursor: pointer;
-  color: var(--text); font-weight: 600; font-size: 12.5px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 9px; cursor: pointer;
+  color: var(--text); font-weight: 700; font-size: 13px;
   transition: background 0.14s ease;
 }
 .proj-row:hover { background: var(--bg-card-hover); }
 .proj-row.active { background: var(--bg-card-hover); }
-.proj-row .chev, .archive-toggle .chev { color: var(--text-faint); font-size: 10px; width: 10px; flex-shrink: 0; }
-.proj-row .cnt, .archive-toggle .cnt {
-  font-size: 10px; font-weight: 700; color: var(--text-faint);
-  background: var(--bg-card-hover); border-radius: 99px; padding: 0 6px;
+/* 折叠箭头：实心三角放大 + 提亮（原来是 10px 的 text-faint，几乎看不见） */
+.proj-row .chev {
+  color: var(--text-dim); font-size: 13px; width: 13px; flex-shrink: 0;
+  text-align: center; transition: color .14s ease;
+}
+.proj-row:hover .chev { color: var(--accent); }
+.proj-row .cnt {
+  font-size: 10.5px; font-weight: 700; color: var(--text-dim);
+  background: var(--bg-card-hover); border-radius: 99px; padding: 1px 7px;
 }
 .proj-row .sub.cur {
-  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 99px;
+  font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 99px;
   background: var(--accent-dim); color: var(--accent);
 }
-.session-item.indent { padding-left: 28px; }
+.session-item.indent { padding-left: 30px; }
 .show-more {
-  padding: 4px 10px 4px 28px; font-size: 11px; color: var(--text-faint); cursor: pointer;
+  padding: 5px 10px 5px 30px; font-size: 11.5px; color: var(--text-faint); cursor: pointer;
   border-radius: 7px;
 }
 .show-more:hover { color: var(--accent); background: var(--bg-card-hover); }
 .archive-toggle {
-  display: flex; align-items: center; gap: 7px;
-  padding: 5px 10px 5px 24px; border-radius: 7px; cursor: pointer;
-  font-size: 11.5px; color: var(--text-dim);
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px 6px 26px; border-radius: 7px; cursor: pointer;
+  font-size: 12.5px; color: var(--text-dim);
 }
 .archive-toggle:hover { color: var(--text); background: var(--bg-card-hover); }
-.archive-toggle .cnt { font-size: 10px; color: var(--text-faint); }
-.arc-hint { font-size: 10px; color: var(--text-faint); opacity: 0.8; }
-.archive-entry {
-  margin: 0 8px 2px 28px; padding: 5px 8px;
-  border: 1px solid var(--border); border-radius: 8px;
-  background: var(--bg-card); font-size: 11px;
+.archive-toggle .chev {
+  color: var(--text-dim); font-size: 14px; width: 14px; flex-shrink: 0; text-align: center;
 }
-.arc-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.arc-ts { font-family: var(--mono); font-size: 10px; color: var(--text-faint); flex-shrink: 0; }
-.arc-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.arc-flag { font-size: 10px; color: var(--accent); flex-shrink: 0; }
-.arc-flag.legacy { color: var(--text-faint); }
-.arc-sum {
-  margin-top: 3px; color: var(--text-faint); font-size: 10.5px; line-height: 1.5;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.archive-clear {
-  padding: 4px 10px 4px 28px; font-size: 11px; color: var(--text-faint); cursor: pointer;
-  border-radius: 7px;
-}
-.archive-clear:hover { color: var(--red); background: var(--bg-card-hover); }
+.archive-toggle:hover .chev { color: var(--accent); }
+.arc-hint { font-size: 10.5px; color: var(--text-faint); opacity: 0.85; }
 /* 磁盘微型条形（存量指标用条形而非趋势线） */
 .rf-drive { font-family: var(--mono); font-weight: 700; letter-spacing: 0; text-align: left; }
 .rf-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-card-hover); overflow: hidden; }
