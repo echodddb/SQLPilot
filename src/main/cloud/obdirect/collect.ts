@@ -8,9 +8,13 @@
 
 import { q, q1, type ObDirectPlatform } from './conn'
 import { capabilityOf, has, sqlAuditView, type ObCapability } from './capability'
+// 租户分类与版本号归一化是纯函数，放在 ./tenancy 以便脱离数据库单测
+import { isMetaTenant, isSysTenant, isUserTenant, obVersionOf } from './tenancy'
+export { isMetaTenant, isSysTenant, isUserTenant, obVersionOf }
 import type {
   AlarmLevelCount,
   CapacityStat,
+  CloudAlarm,
   CloudCluster,
   CloudClusterDetail,
   CloudHost,
@@ -128,7 +132,8 @@ export function clustersOf(s: ObSnapshot, alarms: { total: number; levels: Alarm
     creator: '',
     regionCount: zoneSet.size || 1,
     serverCount: s.servers.length,
-    tenantCount: s.tenants.length,
+    // 租户数只算业务租户：sys 与 META$xxx 是实例自身的，算进去会让人以为集群里凭空多了几个租户
+    tenantCount: s.tenants.filter(isUserTenant).length,
     rootServer: root ? str(root.SVR_IP) : '',
     cpu: c.cpu,
     memory: c.memory,
@@ -167,6 +172,8 @@ export function tenantsOf(s: ObSnapshot, cluster: CloudCluster | undefined): Clo
       role: str(t.TENANT_ROLE),
       clusterType: str(t.TENANT_ROLE) === 'STANDBY' ? 'STANDBY' : 'PRIMARY',
       locked: str(t.LOCKED) === 'YES',
+      isMeta: isMetaTenant(str(t.TENANT_NAME), str(t.TENANT_TYPE)),
+      isSys: isSysTenant(str(t.TENANT_NAME), str(t.TENANT_TYPE)),
       description: `${str(t.TENANT_TYPE)} · ${str(t.LOG_MODE)}`
     }
   })
@@ -193,16 +200,26 @@ export function hostsOf(s: ObSnapshot, cluster: CloudCluster | undefined): Cloud
       agentVersion: '',
       typeName: 'OBServer',
       kind: 'OBServer',
-      region: str(r.ZONE),
+      // region / idc 是 OCP 的机房概念：直连下只有 Zone，别把它塞进"区域/IDC"里误导人
+      region: '',
       idc: '',
       os: '',
       sshPort: 22,
-      createTime: str(r.CREATE_TIME),
+      createTime: '',
       services: [{ name: 'OBServer', type: 'OB_SERVER', version }],
       clusters: [clusterName],
       obproxies: [],
-      // 附加：磁盘健康度取自 GV$OB_SERVERS
-      diskHealth: g ? str(g.DATA_DISK_HEALTH_STATUS) : ''
+      // ---- 直连自有字段（HostDrawer 按这些渲染，不再复用 OCP 那套） ----
+      svrPort: num(r.SVR_PORT),
+      zone: str(r.ZONE),
+      withRootserver: str(r.WITH_ROOTSERVER) === 'YES',
+      buildVersion: str(r.BUILD_VERSION),
+      startServiceTime: str(r.START_SERVICE_TIME) || str(r.START_TIME) || str(r.CREATE_TIME),
+      diskHealth: g ? str(g.DATA_DISK_HEALTH_STATUS) : '',
+      cpu: g ? cap(num(g.CPU_ASSIGNED), num(g.CPU_CAPACITY)) : undefined,
+      memory: g ? cap(num(g.MEM_ASSIGNED), num(g.MEM_CAPACITY)) : undefined,
+      dataDisk: g ? cap(num(g.DATA_DISK_IN_USE), num(g.DATA_DISK_CAPACITY)) : undefined,
+      logDisk: g ? cap(num(g.LOG_DISK_IN_USE), num(g.LOG_DISK_CAPACITY)) : undefined
     } as CloudHost
   })
 }
@@ -212,7 +229,15 @@ export function hostsOf(s: ObSnapshot, cluster: CloudCluster | undefined): Cloud
 export async function overviewOf(
   p: ObDirectPlatform,
   password: string,
-  evaluate: (s: ObSnapshot) => Promise<{ total: number; levels: AlarmLevelCount[]; critical: number }>
+  evaluate: (s: ObSnapshot) => Promise<{
+    total: number
+    levels: AlarmLevelCount[]
+    critical: number
+    /** 活跃告警明细：总览面板要直接展示，避免为了拿列表再跑一遍全量采集 */
+    alarms?: CloudAlarm[]
+    /** 因视图缺失被跳过的规则，拼进总览的 warnings */
+    warnings?: string[]
+  }>
 ): Promise<CloudOverview> {
   const s = await snapshotOf(p, password)
   const al = await evaluate(s)
@@ -221,7 +246,9 @@ export async function overviewOf(
   const c = capacityOf(s)
   return {
     info: {
-      version: s.cap.version,
+      // 这里只放 OB 自身版本号（4.3.5.2），不加任何平台前缀：
+      // 顶部状态栏按接入方式自己决定显示「OCP x.y」还是「OB v4.3.5.2」
+      version: obVersionOf(s.cap.version),
       edition: 'OceanBase 直连模式',
       buildTime: ''
     },
@@ -230,7 +257,8 @@ export async function overviewOf(
       clustersRunning: clusters.filter((x) => x.status === 'RUNNING').length,
       hosts: hosts.length,
       hostsOnline: hosts.filter((x) => x.status === 'ONLINE').length,
-      tenants: s.tenants.length,
+      // 与集群卡片的「租户」口径保持一致：只算业务租户
+      tenants: s.tenants.filter(isUserTenant).length,
       alarms: al.total,
       alarmsCritical: al.critical,
       cpuUsed: c.cpu.used,
@@ -243,9 +271,9 @@ export async function overviewOf(
       agentAbnormal: 0
     },
     clusters,
-    alarms: [],
+    alarms: al.alarms ?? [],
     tasks: [],
-    warnings: warningsOf(s)
+    warnings: [...warningsOf(s), ...(al.warnings ?? [])]
   }
 }
 

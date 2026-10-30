@@ -7,7 +7,7 @@ import { applyTitleBar } from './window-chrome'
 import { setPassword, deletePassword, getPassword, secretsAvailable } from './secrets'
 import { readAudit, appendAudit, queryAudit } from './audit'
 import { getAdapter, dropAdapter, closeAll } from './db/manager'
-import { testServer, probeServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, forgetHostKey, sftpList, sftpDownload, sftpUpload } from './ssh'
+import { testServer, probeServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, forgetHostKey, sftpList, sftpDownload, sftpUpload, execCommand } from './ssh'
 import * as sftpOps from './sftp'
 import { readSshConfig } from './ssh-config'
 import { UNGROUPED, deleteGroup, ensureGroup, groupNames, moveServers, normalizeGroupName, renameGroup, validateGroupName } from './server-groups'
@@ -100,10 +100,15 @@ import {
   directCreateDb as cloudDirectCreateDb,
   directDropDb as cloudDirectDropDb,
   directTenantUsersAs as cloudDirectTenantUsersAs,
+  directTenantTables as cloudDirectTenantTables,
   directCreateUser as cloudDirectCreateUser,
   directDropUser as cloudDirectDropUser,
   directGrant as cloudDirectGrant,
   directGrants as cloudDirectGrants,
+  directRevoke as cloudDirectRevoke,
+  directTenantSelfCheck as cloudDirectTenantSelfCheck,
+  directAlarmRules as cloudDirectAlarmRules,
+  directSetAlarmThresholds as cloudDirectSetAlarmThresholds,
   directTenantConnections as cloudDirectTenantConnections,
   metrics as cloudMetrics,
   clusterAction as cloudClusterAction,
@@ -901,6 +906,114 @@ export function registerIpc(): void {
     }
     for (const s of cfg.servers) {
       if (s.jumpId === id) delete s.jumpId
+    }
+    saveConfig(cfg)
+    deletePassword(`server:${id}`)
+    deletePassword(`server-key:${id}`)
+    dropServer(id)
+    return { ok: true }
+  })
+
+  // ---------- 云管主机的 SSH 凭据 ----------
+  // 复用「服务器」这套存储：id 固定为 cloudssh:<平台id>:<ip>，
+  // 于是终端 / SFTP / host key 校验 / DPAPI 口令全部沿用既有实现，不另起一套 SSH 栈。
+  const CLOUD_SSH_PREFIX = 'cloudssh:'
+  const cloudSshHead = (platformId: string) => `${CLOUD_SSH_PREFIX}${platformId}:`
+
+  ipcMain.handle('cloud:hostSshStatus', (_e, { platformId }: { platformId: string }) => {
+    const head = cloudSshHead(String(platformId || ''))
+    const data: Record<string, any> = {}
+    for (const s of loadConfig().servers) {
+      if (!s.id.startsWith(head)) continue
+      data[s.host] = {
+        serverId: s.id,
+        user: s.user,
+        port: s.port,
+        auth: s.auth || 'password',
+        keyPath: s.keyPath || '',
+        // 只回布尔值：口令本身永远不出主进程
+        hasPassword: !!getPassword(`server:${s.id}`)
+      }
+    }
+    return { ok: true, data }
+  })
+
+  /**
+   * 采集主机系统信息（OS / 内核 / CPU / 内存 / 磁盘）。
+   *
+   * 直连模式读的是 OB 系统视图，里面没有任何操作系统信息——这些只能从主机本身取。
+   * 有 SSH 凭据时用一次 exec 批量取回（标记分段，避免多次往返），
+   * 没有凭据就明确告知，不拿猜的值填界面。
+   */
+  ipcMain.handle('cloud:hostSysInfo', async (_e, { platformId, ip }: { platformId: string; ip: string }) => {
+    const id = `${cloudSshHead(String(platformId || ''))}${String(ip || '')}`
+    const server = loadConfig().servers.find((s) => s.id === id)
+    if (!server) return { ok: false, error: '该主机还没有 SSH 凭据，先录入后再采集系统信息' }
+    const cmd = [
+      'export LANG=C LC_ALL=C',
+      'echo @@OS@@; cat /etc/os-release 2>/dev/null',
+      'echo @@KERNEL@@; uname -sr 2>/dev/null',
+      'echo @@HOST@@; hostname 2>/dev/null',
+      'echo @@CPU@@; grep -m1 "model name" /proc/cpuinfo 2>/dev/null',
+      'echo @@CORES@@; nproc 2>/dev/null',
+      'echo @@MEM@@; free -b 2>/dev/null | awk \'NR==2{print $2}\'',
+      'echo @@UP@@; uptime -p 2>/dev/null || uptime 2>/dev/null',
+      'echo @@DISK@@; df -B1 -x tmpfs -x devtmpfs -x overlay 2>/dev/null',
+      'echo @@END@@'
+    ].join('\n')
+    try {
+      const r = await execCommand(server, cmd, 20_000, undefined, undefined, 'utf-8')
+      const out = `${r.stdout || ''}`
+      const sect = (name: string): string => {
+        const m = new RegExp(`@@${name}@@\\s*\\n([\\s\\S]*?)(?=\\n@@|$)`).exec(out)
+        return m ? m[1].trim() : ''
+      }
+      const osRaw = sect('OS')
+      const pick = (k: string): string => {
+        const m = new RegExp(`^${k}=("?)(.*?)\\1$`, 'm').exec(osRaw)
+        return m ? m[2] : ''
+      }
+      const disks = sect('DISK')
+        .split('\n')
+        .slice(1)
+        .map((line) => line.trim().split(/\s+/))
+        .filter((c) => c.length >= 6)
+        .slice(0, 8)
+        .map((c) => ({
+          fs: c[0],
+          mount: c[5],
+          size: Number(c[1]) || 0,
+          used: Number(c[2]) || 0,
+          pct: Number(String(c[4]).replace('%', '')) || 0
+        }))
+      return {
+        ok: true,
+        data: {
+          osName: pick('NAME') || pick('ID'),
+          osVersion: pick('VERSION_ID'),
+          osPretty: pick('PRETTY_NAME') || pick('NAME'),
+          kernel: sect('KERNEL'),
+          hostname: sect('HOST'),
+          cpuModel: sect('CPU').split(':').slice(1).join(':').trim(),
+          cores: Number(sect('CORES')) || 0,
+          memBytes: Number(sect('MEM')) || 0,
+          uptime: sect('UP'),
+          disks,
+          at: Date.now()
+        }
+      }
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) }
+    }
+  })
+
+  ipcMain.handle('cloud:hostSshForget', (_e, { platformId, ip }: { platformId: string; ip: string }) => {
+    const id = `${cloudSshHead(String(platformId || ''))}${String(ip || '')}`
+    const cfg = loadConfig()
+    if (!cfg.servers.some((s) => s.id === id)) return { ok: true }
+    cfg.servers = cfg.servers.filter((s) => s.id !== id)
+    for (const p of cfg.projects) {
+      if (Array.isArray(p.serverIds)) p.serverIds = p.serverIds.filter((x) => x !== id)
     }
     saveConfig(cfg)
     deletePassword(`server:${id}`)
@@ -2909,6 +3022,8 @@ export function registerIpc(): void {
     cloudDirectDropDb(String(id || ''), String(tenant || ''), String(name || '')))
   ipcMain.handle('cloud:directTenantUsersAs', (_e, { id, tenant, mode }: any) =>
     cloudDirectTenantUsersAs(String(id || ''), String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL'))
+  ipcMain.handle('cloud:directTenantTables', (_e, { id, tenant, input }: any) =>
+    cloudDirectTenantTables(String(id || ''), String(tenant || ''), input || {}))
   ipcMain.handle('cloud:directCreateUser', (_e, { id, tenant, input }: any) =>
     cloudDirectCreateUser(String(id || ''), String(tenant || ''), input || {}))
   ipcMain.handle('cloud:directDropUser', (_e, { id, tenant, input }: any) =>
@@ -2917,6 +3032,13 @@ export function registerIpc(): void {
     cloudDirectGrant(String(id || ''), String(tenant || ''), input || {}))
   ipcMain.handle('cloud:directGrants', (_e, { id, tenant, input }: any) =>
     cloudDirectGrants(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directRevoke', (_e, { id, tenant, input }: any) =>
+    cloudDirectRevoke(String(id || ''), String(tenant || ''), input || {}))
+  ipcMain.handle('cloud:directTenantSelfCheck', (_e, { id, tenant, mode }: any) =>
+    cloudDirectTenantSelfCheck(String(id || ''), String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL'))
+  ipcMain.handle('cloud:directAlarmRules', (_e, { id }: any) => cloudDirectAlarmRules(String(id || '')))
+  ipcMain.handle('cloud:directSetAlarmThresholds', (_e, { id, patch }: any) =>
+    cloudDirectSetAlarmThresholds(String(id || ''), patch || {}))
   ipcMain.handle('cloud:directTenantConnections', (_e, { id, tenant, mode }: any) =>
     cloudDirectTenantConnections(String(id || ''), String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL'))
   // 任务日志落到 userData，便于用户直接查看/备份

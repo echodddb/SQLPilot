@@ -12,7 +12,9 @@
         <table class="tbl">
           <thead>
             <tr>
-              <th>集群</th><th>状态</th><th>版本</th><th>模式</th>
+              <th>集群</th>
+              <th v-if="showAccess">接入名称</th>
+              <th>状态</th><th>版本</th><th>模式</th>
               <th class="r">节点</th><th class="r">租户</th>
               <th>CPU 分配</th><th>内存分配</th><th>数据盘</th><th>告警</th><th>创建时间</th>
             </tr>
@@ -30,6 +32,9 @@
                 <div class="cell-main">{{ c.name }}</div>
                 <div class="cell-sub mono">{{ c.rootServer || '—' }}</div>
               </td>
+              <td v-if="showAccess">
+                <span class="access" :title="`接入配置名称：${accessNameOf(c.id) || '—'}`">{{ accessNameOf(c.id) || '—' }}</span>
+              </td>
               <td><span class="pill" :class="clusterStatus(c.status).tone">{{ clusterStatus(c.status).label }}</span></td>
               <td class="mono">{{ c.version }}</td>
               <td>{{ clusterMode(c.clusterMode) }}</td>
@@ -45,7 +50,7 @@
               <td class="dim">{{ fmtTime(c.createTime) }}</td>
             </tr>
             <tr v-if="!cloud.clusters.length">
-              <td colspan="11" class="empty">尚未发现 OB 集群</td>
+              <td :colspan="showAccess ? 12 : 11" class="empty">尚未发现 OB 集群</td>
             </tr>
           </tbody>
         </table>
@@ -184,7 +189,7 @@ import ClusterOps from './ClusterOps.vue'
 import ClusterCreate from './ClusterCreate.vue'
 import ClusterParams from './ClusterParams.vue'
 import TenantCreate from './TenantCreate.vue'
-import { cloud, openCluster, closeCluster, openTenant } from '../../cloud/state'
+import { cloud, openCluster, closeCluster, openTenant, accessNameOf } from '../../cloud/state'
 import {
   capacityTone, clusterMode, clusterStatus, fmtBytes, fmtTime, maybeTime, originLabel, tenantStatus
 } from '../../cloud/parts'
@@ -192,6 +197,9 @@ import {
 const d = computed(() => cloud.cluster as CloudClusterDetail)
 const tenantCreate = ref(false)
 const createOpen = ref(false)
+
+/** 多套直连接入才有「接入名称」这一列；单套时集群名已经能唯一标识 */
+const showAccess = computed(() => new Set(Object.values(cloud.directOf)).size > 1)
 
 function worstTone(c: CloudCluster): string {
   const levels = c.alarms.levels.filter((x) => x.count > 0).map((x) => x.level)
@@ -226,6 +234,9 @@ function worstTone(c: CloudCluster): string {
 .tbl tbody tr.clickable:hover { background: var(--bg-card-hover); }
 .cell-main { color: var(--text); font-weight: 550; }
 .cell-sub { font-size: 10.5px; color: var(--text-faint); margin-top: 1px; }
+/* 接入名称：配置里那条连接的名字，弱化处理（它标识的是"从哪接入"，不是集群本身） */
+.access { font-size: 11px; color: var(--text-dim); }
+.access::before { content: '⇢ '; color: var(--text-faint); }
 .mono { font-family: var(--mono); }
 .dim { color: var(--text-dim); }
 .ellipsis { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }

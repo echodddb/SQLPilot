@@ -16,13 +16,20 @@
     <div class="table-wrap" data-ai="hosts.list">
       <table class="tbl">
         <thead data-src="htList">
-          <tr><th>主机</th><th>IP</th><th>状态</th><th>Agent</th><th>类型</th><th>区域 / IDC</th><th>操作系统</th><th>承载服务</th><th class="r">SSH</th></tr>
+          <tr>
+            <th>主机</th><th>IP</th><th>状态</th>
+            <th v-if="!isDirect">Agent</th>
+            <th>{{ isDirect ? 'Zone' : '类型' }}</th>
+            <th v-if="!isDirect">区域 / IDC</th>
+            <th>操作系统</th><th>承载服务</th><th class="r">SSH</th>
+          </tr>
         </thead>
         <tbody>
           <tr
             v-for="h in filtered"
             :key="h.id"
             class="clickable"
+            :class="{ picked: isSessionOpen(h.ip) }"
             :data-ai="`hosts.list:${h.ip}`"
             :data-ai-name="h.ip"
             @click="openHost(h)"
@@ -33,14 +40,22 @@
             </td>
             <td class="mono">{{ h.ip }}</td>
             <td><span class="pill" :class="hostStatus(h.status).tone">{{ hostStatus(h.status).label }}</span></td>
-            <td data-src="htAgent" :data-host="h.ip">
+            <!-- Agent 是 OCP 的概念，直连没有，整列不渲染 -->
+            <td v-if="!isDirect" data-src="htAgent" :data-host="h.ip">
               <span class="agent" :class="h.agentStatus === 'AVAILABLE' ? 'ok' : 'warn'" :title="h.agentVersion || ''">
                 <i class="dot"></i>{{ agentStatus(h.agentStatus).label }}
               </span>
             </td>
-            <td class="dim">{{ h.typeName || hostKind(h.kind) }}</td>
-            <td class="dim" data-src="htHost" :data-host="h.ip">{{ h.region || '—' }}<span class="sep">/</span>{{ h.idc || '—' }}</td>
-            <td class="mono dim ellipsis os-col" :title="h.os">{{ h.os || '—' }}</td>
+            <td class="dim">
+              <template v-if="isDirect"><span class="mono">{{ h.zone || '—' }}</span></template>
+              <template v-else>{{ h.typeName || hostKind(h.kind) }}</template>
+            </td>
+            <td v-if="!isDirect" class="dim" data-src="htHost" :data-host="h.ip">{{ h.region || '—' }}<span class="sep">/</span>{{ h.idc || '—' }}</td>
+            <td class="mono dim ellipsis os-col" :title="osTitle(h)">
+              <template v-if="osOf(h)">{{ osOf(h) }}</template>
+              <button v-else-if="isDirect" class="os-miss" :disabled="!hasCred(h)" @click.stop="collectOs(h)">未采集</button>
+              <template v-else>—</template>
+            </td>
             <td class="svc-col" data-src="htService" :data-host="h.ip">
               <div class="svc-list">
                 <span v-for="s in h.services" :key="s.name" class="svc" :class="s.type === 'OB_CLUSTER' ? 'ob' : 'proxy'" :title="`${s.name} ${s.version}`">
@@ -49,9 +64,19 @@
                 <span v-if="!h.services.length" class="dim">—</span>
               </div>
             </td>
-            <td class="r mono dim">{{ h.sshPort || '—' }}</td>
+            <td class="r">
+              <div class="ssh-cell" @click.stop>
+                <span class="mono dim">{{ h.sshPort || 22 }}</span>
+                <button
+                  class="ssh-btn"
+                  :class="{ on: isSessionOpen(h.ip) }"
+                  :title="`在窗口底部打开 ${h.ip} 的 SSH 终端（可同时开多个）`"
+                  @click="openSsh(h)"
+                >终端</button>
+              </div>
+            </td>
           </tr>
-          <tr v-if="!filtered.length"><td colspan="9" class="empty">没有匹配的主机</td></tr>
+          <tr v-if="!filtered.length"><td :colspan="isDirect ? 7 : 9" class="empty">没有匹配的主机</td></tr>
         </tbody>
       </table>
     </div>
@@ -60,13 +85,71 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import HostDrawer from './HostDrawer.vue'
-import { cloud, openHost } from '../../cloud/state'
+import { activePlatform, cloud, openHost } from '../../cloud/state'
+import { platformOfCluster } from '../../cloud/directTenant'
+import { openHostSsh } from '../../cloud/hostSsh'
 import { agentStatus, hostKind, hostStatus, serviceLabel } from '../../cloud/parts'
 
 const q = ref('')
 const st = ref('')
+
+/** 直连模式：列结构不同（没有 Agent / 机型 / IDC，改看 Zone 与系统信息） */
+const isDirect = computed(() => cloud.access === 'direct' || activePlatform()?.type === 'obdirect')
+
+/** 已采集的系统信息（直连下 OS 只能从主机取，采到即有缓存） */
+function osOf(h: CloudHost): string {
+  const s = cloud.hostSys[h.ip]
+  if (s) return s.osPretty || s.osName || ''
+  return isDirect.value ? '' : h.os
+}
+function osTitle(h: CloudHost): string {
+  const s = cloud.hostSys[h.ip]
+  if (!s) return isDirect.value ? '未采集：打开主机详情或点这里，经 SSH 读取系统信息' : h.os || ''
+  return [s.osPretty, s.kernel, s.cpuModel && `${s.cpuModel}`, s.cores && `${s.cores} 核`].filter(Boolean).join(' · ')
+}
+
+const sshMap = ref<Record<string, { user: string }>>({})
+function hasCred(h: CloudHost): boolean {
+  return !!sshMap.value[h.ip]
+}
+
+async function loadSshMap(): Promise<void> {
+  const pid = activePlatform()?.type === 'obdirect' ? activePlatform()!.id : ''
+  if (!pid) return
+  const r = await window.sqlpilot.cloudHostSshStatus(pid)
+  if (r.ok && r.data) sshMap.value = r.data
+}
+
+async function collectOs(h: CloudHost): Promise<void> {
+  const pid = activePlatform()?.type === 'obdirect' ? activePlatform()!.id : ''
+  if (!pid) return
+  const r = await window.sqlpilot.cloudHostSysInfo(pid, h.ip)
+  if (r.ok && r.data) cloud.hostSys = { ...cloud.hostSys, [h.ip]: r.data }
+}
+
+onMounted(() => { void loadSshMap() })
+
+/**
+ * 打开某台主机的 SSH：加入分窗会话列表（同一 IP 只保留一个），已存在则切到它。
+ * 这里只负责定位"这台主机属于哪个直连平台"。
+ */
+function openSsh(h: CloudHost): void {
+  const pid = platformOfCluster(h.clusters.length ? clusterIdOf(h) : 0) || activePlatform()?.id || ''
+  openHostSsh(pid, h.ip, h.clusters[0] || '', h.sshPort || 22)
+}
+
+/** 该主机是否已有打开的终端会话（用于按钮/行高亮） */
+function isSessionOpen(ip: string): boolean {
+  return cloud.hostSshSessions.some((s) => s.ip === ip)
+}
+
+/** 主机上挂的集群名 → 集群 id（用于反查平台） */
+function clusterIdOf(h: CloudHost): number {
+  const name = h.clusters[0]
+  return cloud.clusters.find((c) => c.name === name)?.id || 0
+}
 
 const filtered = computed(() => {
   const k = q.value.trim().toLowerCase()
@@ -122,4 +205,21 @@ select { background: var(--bg-input); border: 1px solid var(--border); border-ra
 .svc.ob { color: var(--accent); }
 .svc.ob::before { background: var(--accent); }
 .svc em { font-style: normal; font-family: var(--mono); color: var(--text-faint); }
+
+/* SSH 操作列 */
+.ssh-cell { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.ssh-btn {
+  border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim);
+  border-radius: 6px; padding: 1px 8px; font-size: 10.5px; font-family: inherit; cursor: pointer;
+}
+.ssh-btn:hover { color: var(--accent); border-color: var(--accent); }
+.ssh-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.tbl tbody tr.picked { background: var(--accent-dim); }
+/* 未采集：可点的小按钮，没有凭据时置灰 */
+.os-miss {
+  border: 1px dashed var(--border); background: none; color: var(--text-faint);
+  border-radius: 5px; padding: 0 6px; font-size: 10px; font-family: inherit; cursor: pointer;
+}
+.os-miss:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.os-miss:disabled { cursor: not-allowed; opacity: 0.6; }
 </style>

@@ -162,6 +162,7 @@
                     <td class="mono dim">{{ d.charset || '—' }}</td>
                     <td class="mono dim">{{ d.collation || '—' }}</td>
                     <td class="r">
+                      <button class="op" :title="isOracle ? '查看该用户下的表' : '查看该库下的表'" @click="showTables(d.name)">表</button>
                       <button
                         class="op danger"
                         :disabled="d.system || dbBusy"
@@ -173,14 +174,56 @@
                   <tr v-if="!dbRows.length"><td colspan="4" class="empty">{{ loading ? '读取中…' : '没有可展示的库对象' }}</td></tr>
                 </tbody>
               </table>
+
+              <!-- 表清单：点某库/某 Schema 的「表」在这里展开，不换页 -->
+              <div v-if="tableSchema" class="tblbox">
+                <div class="bar">
+                  <b class="mono">{{ tableSchema }}</b>
+                  <span class="dim">{{ isOracle ? '下的表' : '库中的表' }} · {{ tableRows.length }} 个</span>
+                  <button class="ghost" :disabled="tableLoading" @click="loadTables">刷新</button>
+                  <span style="flex:1"></span>
+                  <button class="ghost" @click="tableSchema = ''">收起</button>
+                </div>
+                <table class="tbl compact">
+                  <thead><tr><th>表名</th><th>类型</th><th class="r">行数</th><th class="r">数据量</th><th>创建 / 分析时间</th><th>备注</th></tr></thead>
+                  <tbody>
+                    <tr v-for="t in tableRows" :key="t.name">
+                      <td class="mono">{{ t.name }}</td>
+                      <td class="dim">{{ t.type || '—' }}</td>
+                      <td class="r mono">{{ t.rows || '—' }}</td>
+                      <td class="r mono">{{ fmtSize(t.dataBytes + t.indexBytes) }}</td>
+                      <td class="dim mono">{{ t.createTime || '—' }}</td>
+                      <td class="dim ellipsis" :title="t.comment">{{ t.comment || '—' }}</td>
+                    </tr>
+                    <tr v-if="!tableRows.length">
+                      <td colspan="6" class="empty">{{ tableLoading ? '读取中…' : (tableErr || '该对象下没有表') }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-if="tableErr && tableRows.length" class="msg err">{{ tableErr }}</div>
+              </div>
             </template>
           </template>
 
           <!-- 用户 -->
           <template v-else-if="tab === 'user'">
+            <!-- 不把人赶去「连接」页：就地录凭据，省掉"去录→回来→还是不行"的来回 -->
             <div v-if="!cred.has" class="need">
-              <span>账号管理需要在租户内部执行，请先到「连接」页录入业务租户凭据。</span>
-              <button class="ghost" @click="tab = 'connect'">去录入</button>
+              <div class="need-t">账号与授权必须在租户内部执行，先录入该租户的管理员凭据</div>
+              <div class="row">
+                <label>账号</label>
+                <input v-model="credForm.user" :placeholder="isOracle ? 'sys' : 'root'" spellcheck="false" />
+                <label>密码</label>
+                <input v-model="credForm.password" type="password" placeholder="留空则沿用已保存的密码" />
+                <button class="ghost" :disabled="credBusy || !platformId" @click="saveCredQuick">
+                  {{ credBusy ? '连接中…' : '保存并读取账号' }}
+                </button>
+              </div>
+              <div class="dim">
+                必须用租户管理员（{{ isOracle ? 'sys' : 'root' }}）：业务账号没有 GRANT 权限，录了也授不了权。
+                密码经 DPAPI 加密保存在本机。
+              </div>
+              <div v-if="credMsg" class="msg" :class="credOk ? 'ok' : 'err'">{{ credMsg }}</div>
             </div>
             <template v-else>
               <div class="bar">
@@ -218,14 +261,64 @@
 
               <div v-if="grant.open" class="grant">
                 <div class="grant-head">
-                  <span>为 <b class="mono">{{ grant.name }}</b> 授权</span>
-                  <span class="dim">勾选后一次执行；GRANT 不可回滚</span>
+                  <span>为 <b class="mono">{{ grant.name }}</b> 管理权限</span>
+                  <span class="dim">{{ isOracle ? '角色 / 系统权限直接作用于账号' : '权限按库授予，可逐条回收' }}</span>
                   <span style="flex: 1"></span>
                   <button class="ghost" @click="grant.open = false">收起</button>
                 </div>
 
+                <!-- 当前权限：能回收的才给按钮，不能回收的写明原因 -->
+                <div class="grant-label">
+                  当前权限
+                  <span class="dim">{{ grantLoading ? '读取中…' : `${grantRows.length} 条` }}</span>
+                  <button class="ghost sm" :disabled="userBusy" @click="loadGrants">刷新</button>
+                  <button class="ghost sm" :disabled="userBusy" title="查看当前的连接身份与授权能力（授权失败时先看这个）" @click="runSelfCheck">连接自检</button>
+                </div>
+
+                <!-- 自检结果：把"谁在连、能不能授权"直接摊开 -->
+                <div v-if="selfCheck" class="selfchk" :class="selfCheck.ok === false ? 'bad' : selfCheck.canGrant ? 'ok' : 'warn'">
+                  <template v-if="selfCheck.ok === false">
+                    自检失败：{{ selfCheck.error }}
+                  </template>
+                  <template v-else>
+                    <div class="selfchk-row">
+                      连接身份 <b class="mono">{{ selfCheck.login }}</b>
+                      <span v-if="selfCheck.version" class="dim">· OB {{ selfCheck.version }}</span>
+                      <span class="spacer"></span>
+                      <span class="chip" :class="selfCheck.canGrant ? 'ok' : 'warn'">{{ selfCheck.canGrant ? '可授权' : '不可授权' }}</span>
+                    </div>
+                    <div class="selfchk-note">{{ selfCheck.note }}</div>
+                    <details v-if="selfCheck.grants.length" class="selfchk-grants">
+                      <summary>当前账号自身的授权（{{ selfCheck.grants.length }} 条）</summary>
+                      <code v-for="(g, i) in selfCheck.grants" :key="i" class="mono">{{ g }}</code>
+                    </details>
+                  </template>
+                </div>
+
+                <table class="tbl compact">
+                  <thead><tr><th>授权</th><th>类型</th><th class="r">操作</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(g, i) in grantRows" :key="i">
+                      <td class="mono ellipsis" :title="g.text">{{ g.text }}</td>
+                      <td class="dim">{{ g.kind }}</td>
+                      <td class="r">
+                        <button
+                          class="op danger"
+                          :disabled="userBusy || !g.revocable"
+                          :title="g.revocable ? '回收这条授权' : (g.note || '不可在界面回收')"
+                          @click="doRevoke(g)"
+                        >回收</button>
+                      </td>
+                    </tr>
+                    <tr v-if="!grantRows.length && !grantLoading">
+                      <td colspan="3" class="empty">{{ grantErr || '该账号当前没有可展示的授权' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div class="grant-label">新增授权</div>
                 <template v-if="!isOracle">
-                  <div class="grant-label">授权库<span class="dim">（不勾任何库 = 所有库 *.*）</span></div>
+                  <div class="grant-label sub-label">授权库<span class="dim">（不勾任何库 = 所有库 *.*）</span></div>
                   <div class="chk-grid">
                     <label v-for="d in grantDbs" :key="d.name" class="chk">
                       <input v-model="grant.dbs" type="checkbox" :value="d.name" />
@@ -235,7 +328,7 @@
                   </div>
                 </template>
 
-                <div class="grant-label">权限{{ isOracle ? ' / 角色' : '' }}<span class="dim">（可多选）</span></div>
+                <div class="grant-label sub-label">权限{{ isOracle ? ' / 角色' : '' }}<span class="dim">（可多选）</span></div>
                 <div class="chk-grid">
                   <label v-for="p in privOptions" :key="p" class="chk">
                     <input v-model="grant.privs" type="checkbox" :value="p" />
@@ -249,6 +342,11 @@
                   </button>
                   <span class="dim">{{ grant.privs.length ? grant.privs.join(', ') : '至少勾选一项权限' }}</span>
                 </div>
+                <!-- 执行明细：GRANT/REVOKE 不可回滚，失败时用户要能看到断在哪一条 -->
+                <details v-if="lastSteps.length" class="steps">
+                  <summary>本次执行的 SQL（{{ lastSteps.length }} 条）</summary>
+                  <code v-for="(s, i) in lastSteps" :key="i" class="mono">{{ s }}</code>
+                </details>
               </div>
             </template>
           </template>
@@ -363,15 +461,19 @@ import {
   createUserAs,
   dropUserAs,
   grantAs,
+  grantsOf,
+  revokeAs,
   platformOfCluster,
   saveTenantCred,
   tenantConnections,
   tenantCredStatus,
   tenantDbsAs,
+  tenantTables,
   tenantParams,
   tenantSessions,
   tenantTopSql,
   tenantUsersAs,
+  tenantSelfCheck,
   testTenantLogin
 } from '../../../cloud/directTenant'
 import { pushNotice } from '../../../store'
@@ -417,6 +519,19 @@ const dbForm = ref({ name: '', charset: 'utf8mb4' })
 const dbBusy = ref(false)
 const dbMsg = ref('')
 const dbOk = ref(true)
+/** 当前展开表清单的库 / Schema（空 = 收起） */
+const tableSchema = ref('')
+const tableRows = ref<CloudTenantTableRow[]>([])
+const tableLoading = ref(false)
+const tableErr = ref('')
+
+const fmtSize = (b: number): string => {
+  const n = Number(b) || 0
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${n} B`
+}
 // 用户
 const userRows = ref<Awaited<ReturnType<typeof tenantUsersAs>>['rows']>([])
 const userFormOpen = ref(false)
@@ -425,6 +540,14 @@ const userBusy = ref(false)
 const userMsg = ref('')
 const userOk = ref(true)
 const grant = ref({ open: false, name: '', host: '%', dbs: [] as string[], privs: defaultPrivs('MYSQL') })
+/** 当前账号的已授权限（界面按条展示并逐条回收） */
+const grantRows = ref<CloudDirectGrantRow[]>([])
+const grantLoading = ref(false)
+const grantErr = ref('')
+/** 上次授权/回收实际执行的 SQL（失败时用来定位断点） */
+const lastSteps = ref<string[]>([])
+/** 连接自检结果 */
+const selfCheck = ref<{ ok: boolean; login?: string; version?: string; canGrant?: boolean; note?: string; grants?: string[]; error?: string } | null>(null)
 /** 授权时可勾选的库（MySQL 模式；系统库不参与授权） */
 const grantDbs = ref<{ name: string }[]>([])
 const privOptions = computed(() => privOptionsOf(isOracle.value ? 'ORACLE' : 'MYSQL'))
@@ -729,11 +852,136 @@ async function openGrant(u: { user: string; host: string }): Promise<void> {
     dbs: [],
     privs: defaultPrivs(isOracle.value ? 'ORACLE' : 'MYSQL')
   }
+  grantRows.value = []
+  grantErr.value = ''
+  lastSteps.value = []
+  selfCheck.value = null
   // MySQL 的授权是库级的：把库列表带出来供勾选（Oracle 授的是角色/系统权限，不需要库）
   if (!isOracle.value && platformId.value) {
     const r = await tenantDbsAs(platformId.value, t.value.tenant.name)
     grantDbs.value = r.rows.filter((d) => !d.system)
     if (r.error) userMsg.value = r.error
+  }
+  await loadGrants()
+}
+
+/** 「用户」页就地保存凭据：存完立刻拉账号列表，不用切 tab */
+async function saveCredQuick(): Promise<void> {
+  if (!platformId.value) return
+  credBusy.value = true
+  credMsg.value = ''
+  try {
+    const user = (credForm.value.user || (isOracle.value ? 'sys' : 'root')).trim()
+    const r = await saveTenantCred(platformId.value, t.value.tenant.name, user, credForm.value.password)
+    credOk.value = r.ok
+    if (!r.ok) {
+      credMsg.value = r.error || '保存失败'
+      return
+    }
+    credMsg.value = r.keptPassword ? '凭据已更新（密码沿用原值）' : '凭据已保存'
+    credForm.value.password = ''
+    const s = await tenantCredStatus(platformId.value, t.value.tenant.name)
+    cred.value = s
+    if (s.has) await loadUsers()
+  } finally {
+    credBusy.value = false
+  }
+}
+
+/** 查看某个库 / Schema 下的表；再点同一个则收起 */
+async function showTables(name: string): Promise<void> {
+  if (tableSchema.value === name) {
+    tableSchema.value = ''
+    return
+  }
+  tableSchema.value = name
+  tableRows.value = []
+  await loadTables()
+}
+
+async function loadTables(): Promise<void> {
+  if (!platformId.value || !tableSchema.value) return
+  tableLoading.value = true
+  tableErr.value = ''
+  try {
+    const r = await tenantTables(platformId.value, t.value.tenant.name, {
+      schema: tableSchema.value,
+      mode: isOracle.value ? 'ORACLE' : 'MYSQL',
+      limit: 300
+    })
+    tableRows.value = r.rows
+    if (r.error) tableErr.value = r.error
+  } finally {
+    tableLoading.value = false
+  }
+}
+
+/** 读取当前账号已授权的条目（MySQL: SHOW GRANTS；Oracle: DBA_*_PRIVS） */
+async function loadGrants(): Promise<void> {
+  if (!platformId.value || !grant.value.name) return
+  grantLoading.value = true
+  grantErr.value = ''
+  try {
+    const r = await grantsOf(platformId.value, t.value.tenant.name, {
+      name: grant.value.name,
+      host: isOracle.value ? undefined : grant.value.host,
+      mode: isOracle.value ? 'ORACLE' : 'MYSQL'
+    })
+    grantRows.value = r.rows
+    if (r.error) grantErr.value = r.error
+  } finally {
+    grantLoading.value = false
+  }
+}
+
+/**
+ * 回收：按「已授权」这一行的权限原样提交。
+ * Oracle 对象权限要带 owner.table，否则 REVOKE 会作用到别的对象上。
+ */
+/**
+ * 连接自检：确认当前用的是谁的身份、是否带 GRANT OPTION。
+ * 「授权失败」最常见的两个原因（业务账号无授权能力 / 连错租户）都能在这里一眼看出来。
+ */
+async function runSelfCheck(): Promise<void> {
+  if (!platformId.value) return
+  userBusy.value = true
+  selfCheck.value = null
+  try {
+    const r = await tenantSelfCheck(platformId.value, t.value.tenant.name, isOracle.value ? 'ORACLE' : 'MYSQL')
+    selfCheck.value = r.ok
+      ? { ok: true, login: r.login, version: r.version, canGrant: r.canGrant, note: r.note, grants: r.grants }
+      : { ok: false, error: r.error }
+  } finally {
+    userBusy.value = false
+  }
+}
+
+async function doRevoke(g: CloudDirectGrantRow): Promise<void> {
+  if (!platformId.value || !g.privileges.length) return
+  const ok = await window.sqlpilot.uiConfirm(
+    `回收 ${grant.value.name} 的 ${g.privileges.join(', ')}？`,
+    isOracle.value
+      ? '收回后该账号立即失去这些角色 / 系统权限，已建立的会话不受影响。'
+      : `收回后该账号在${g.database ? `库 ${g.database}` : '所有库'}上的这些权限立即失效。`,
+    true
+  )
+  if (!ok) return
+  userBusy.value = true
+  try {
+    const r = await revokeAs(platformId.value, t.value.tenant.name, {
+      name: grant.value.name,
+      host: isOracle.value ? undefined : grant.value.host,
+      databases: !isOracle.value && g.database ? [g.database] : undefined,
+      privileges: g.privileges,
+      mode: isOracle.value ? 'ORACLE' : 'MYSQL',
+      table: isOracle.value ? g.table : undefined
+    })
+    userOk.value = r.ok
+    userMsg.value = r.ok ? r.message || '已回收' : r.error || '回收失败'
+    lastSteps.value = r.steps || []
+    await loadGrants()
+  } finally {
+    userBusy.value = false
   }
 }
 
@@ -755,8 +1003,9 @@ async function doGrant(): Promise<void> {
     })
     userOk.value = r.ok
     userMsg.value = r.ok ? r.message || '已授权' : r.error || '授权失败'
-    // 授权成功后保留面板，方便继续追加另一组权限；只有失败才留在原地看报错
-    if (r.ok) grant.value.open = false
+    lastSteps.value = r.steps || []
+    // 成功后不收起：留在面板里可以直接看到刚授上的条目，也方便接着追加另一组
+    if (r.ok) await loadGrants()
   } finally {
     userBusy.value = false
   }
@@ -892,6 +1141,8 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .ghost:hover:not(:disabled), .op:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .ghost:disabled, .op:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 面板内的小号按钮（刷新之类），避免和主操作抢视觉重量 */
+.ghost.sm { padding: 1px 7px; font-size: 10px; border-radius: 6px; }
 .op { padding: 2px 8px; font-size: 10.5px; }
 /* 授权面板：勾选式，权限与库都平铺，不占输入焦点 */
 .grant {
@@ -900,6 +1151,31 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .grant-head { display: flex; align-items: center; gap: 8px; font-size: 11.5px; flex-wrap: wrap; }
 .grant-label { font-size: 10.5px; color: var(--text-dim); display: flex; gap: 6px; align-items: baseline; }
+/* 「当前权限」与「新增授权」两级：子标签再降一级，避免两个 grant-label 视觉打平 */
+.grant-label.sub-label { margin-top: 2px; color: var(--text-faint); }
+/* 授权列表用紧凑表：条目多时也不把面板撑开 */
+.tbl.compact th, .tbl.compact td { padding: 4px 8px; }
+.tbl.compact tbody tr:last-child td { border-bottom: none; }
+/* 表清单区块：与上方库列表区分开，避免看成一整张表 */
+.tblbox { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border); }
+.tblbox .bar b { font-size: 12px; }
+/* 连接自检结果：三种语气（可授权 / 不可授权 / 自检失败） */
+.selfchk { border-radius: 8px; padding: 7px 9px; font-size: 11px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); background: var(--bg-input); }
+.selfchk.ok { border-color: color-mix(in srgb, var(--green) 40%, transparent); background: var(--green-dim); }
+.selfchk.warn { border-color: color-mix(in srgb, var(--yellow) 40%, transparent); background: var(--yellow-dim); }
+.selfchk.bad { border-color: color-mix(in srgb, var(--red) 40%, transparent); background: var(--red-dim); }
+.selfchk-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.selfchk-row .chip { font-size: 10px; padding: 0 6px; border-radius: 5px; border: 1px solid var(--border); }
+.selfchk-row .chip.ok { color: var(--green); }
+.selfchk-row .chip.warn { color: var(--yellow); }
+.selfchk-note { color: var(--text-dim); line-height: 1.55; }
+.selfchk-grants { display: flex; flex-direction: column; gap: 2px; }
+.selfchk-grants summary { cursor: pointer; color: var(--text-faint); font-size: 10.5px; }
+.selfchk-grants code { font-size: 10px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; }
+/* 执行明细 */
+.steps { display: flex; flex-direction: column; gap: 2px; }
+.steps summary { cursor: pointer; font-size: 10.5px; color: var(--text-faint); }
+.steps code { font-size: 10px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; padding-left: 8px; }
 .chk-grid { display: flex; flex-wrap: wrap; gap: 2px 8px; }
 .chk {
   display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim);
@@ -927,6 +1203,10 @@ input:focus, select:focus { border-color: var(--accent); }
 .fnote { font-size: 11px; line-height: 1.7; color: var(--text-faint); background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .fnote b { color: var(--text); font-weight: 600; }
 .need { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--text-dim); background: var(--bg-input); border: 1px dashed var(--border); border-radius: 8px; padding: 12px; }
+/* 就地录凭据的表单是纵向的：标题一行、输入一行、说明一行 */
+.need { flex-direction: column; align-items: stretch; gap: 8px; }
+.need-t { font-size: 12px; color: var(--text); }
+.need .row { flex-wrap: wrap; }
 .msg { font-size: 11.5px; border-radius: 8px; padding: 7px 10px; line-height: 1.6; }
 .msg.ok { color: var(--green); background: var(--green-dim); }
 .msg.err { color: var(--red); background: var(--red-dim); }

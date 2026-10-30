@@ -201,6 +201,11 @@ export interface AppConfig {
   masking?: MaskingConfig
   /** 云管平台清单（目前仅 OCP） */
   cloudPlatforms?: CloudPlatform[]
+  /**
+   * 直连模式的告警阈值（键为平台 id）。
+   * 只存用户改过的项——缺项回落 alarm.ts 的默认值，默认值调整后不会与历史配置打架。
+   */
+  cloudAlarmThresholds?: Record<string, Record<string, number>>
   /** 界面主题 */
   theme?: 'dark' | 'light'
   /** 空闲多久自动锁屏（分钟，0 = 关闭；默认 3）——锁屏走开机动画，需手动进入 */

@@ -7,7 +7,7 @@
       <header class="ph">
         <div>
           <h3>{{ running || logs.length ? '创建租户 · 执行日志' : '在直连集群新建租户' }}</h3>
-          <span class="sub">{{ clusterName || '未选择集群' }} · 由 sys 租户直接执行 DDL，无任务编排、无回滚</span>
+          <span class="sub">{{ selName || '未选择集群' }} · 由 sys 租户直接执行 DDL，无任务编排、无回滚</span>
         </div>
         <button class="x" title="关闭" @click="close">✕</button>
       </header>
@@ -70,6 +70,15 @@
       <!-- 表单阶段 -->
       <div v-else class="body">
         <div class="grid">
+          <label>目标集群 <i>*</i></label>
+          <div class="row">
+            <select v-if="canPick" v-model.number="selId" title="租户建在这个集群上（每套直连集群是独立连接）">
+              <option v-for="s in scopes" :key="s.id" :value="s.id">{{ s.name }}</option>
+            </select>
+            <span v-else class="dim">{{ selName || '没有可用的直连集群' }}</span>
+            <span class="dim">{{ canPick ? '切换集群会重新读取该集群的资源池' : '在「平台设置」里接入更多集群后可在此切换' }}</span>
+          </div>
+
           <label>租户名 <i>*</i></label>
           <div>
             <input v-model="form.name" placeholder="字母开头，如 app_order" spellcheck="false" />
@@ -178,7 +187,7 @@
  * 执行过程通过主进程推送的进度事件实时打日志（onDirectTenantLog），
  * 每一步带 SQL 与结果，失败时用户能直接看到断在哪一条。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { load } from '../../../cloud/state'
 import {
   closeCreate,
@@ -189,7 +198,29 @@ import {
 } from '../../../cloud/directTenant'
 import { pushNotice } from '../../../store'
 
-const props = defineProps<{ platformId: string; clusterId: number; clusterName: string }>()
+const props = defineProps<{
+  platformId: string
+  clusterId: number
+  clusterName: string
+  /** 可选的直连集群（每个集群 = 一套独立连接 + 独立的 sys 连接） */
+  scopes?: { id: number; name: string; platformId: string }[]
+}>()
+
+/** 向导内的目标集群：没显式选就落到传入的 clusterId，再不行取第一个可管理的集群 */
+const selId = ref<number>(props.clusterId || props.scopes?.[0]?.id || 0)
+/** 目标集群对应的平台 id：优先按集群反查，其次用父组件传入的值 */
+const pid = computed(() => props.scopes?.find((s) => s.id === selId.value)?.platformId || props.platformId)
+const selName = computed(() => props.scopes?.find((s) => s.id === selId.value)?.name || props.clusterName)
+const canPick = computed(() => (props.scopes || []).length > 1)
+
+/** 换集群要重读资源池：池是集群内的对象，跨集群不通用 */
+watch(selId, async () => {
+  pools.value = []
+  form.resourcePoolName = ''
+  if (!pid.value) return
+  pools.value = await resourcePoolsOf(pid.value)
+  form.resourcePoolName = freePools.value[0]?.name || ''
+})
 
 /** 与后端 tenantSql.ts 的 CHARSET_PRESETS 一致（前端只用于联动展示） */
 const CHARSETS: Record<'MYSQL' | 'ORACLE', Record<string, string[]>> = {
@@ -250,7 +281,7 @@ const alterPwdSql = computed(() =>
     : "ALTER USER root IDENTIFIED BY '****';"
 )
 
-const canSubmit = computed(() => !nameErr.value && !!form.name.trim() && !!form.resourcePoolName)
+const canSubmit = computed(() => !!pid.value && !nameErr.value && !!form.name.trim() && !!form.resourcePoolName)
 
 const running = ref(false)
 const logs = ref<{ runId: string; at: number; phase: string; status: 'start' | 'ok' | 'warn' | 'fail'; title: string; sql?: string; message?: string }[]>([])
@@ -309,7 +340,8 @@ function startLogging(): void {
 }
 
 onMounted(async () => {
-  pools.value = await resourcePoolsOf(props.platformId)
+  if (!pid.value) return
+  pools.value = await resourcePoolsOf(pid.value)
   form.resourcePoolName = freePools.value[0]?.name || ''
 })
 
@@ -333,7 +365,7 @@ async function submit(): Promise<void> {
       resourcePoolName: form.resourcePoolName
     } as CloudDirectCreateTenantInput
 
-    const r = await createDirectTenant(props.platformId, input, runId.value)
+    const r = await createDirectTenant(pid.value, input, runId.value)
     finalResult.value = r.ok
       ? { ok: true, message: r.message || '已创建', warning: r.warning, connections: r.connections }
       : { ok: false, error: r.error || '创建失败' }
@@ -355,7 +387,7 @@ async function again(): Promise<void> {
   logs.value = []
   finalResult.value = null
   form.name = ''
-  pools.value = await resourcePoolsOf(props.platformId)
+  pools.value = await resourcePoolsOf(pid.value)
   form.resourcePoolName = freePools.value[0]?.name || ''
 }
 

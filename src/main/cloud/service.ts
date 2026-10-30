@@ -200,6 +200,13 @@ function fingerprint(p: OcpPlatform, password: string): string {
   return `${p.baseUrl}|${p.username}|${p.insecure ? 1 : 0}|${pw}`
 }
 
+/**
+ * 把「按平台读告警阈值」注入 obdirect 模块。
+ * 该模块刻意不依赖 electron / config（单测要能脱离应用直接 import），
+ * 阈值来源由此处注入；未注入时用内置默认值，行为与改造前一致。
+ */
+obd.setAlarmThresholdResolver((platformId: string) => (loadConfig().cloudAlarmThresholds || {})[platformId] || {})
+
 export function listPlatforms(): CloudPlatformView[] {
   const cfg = loadConfig()
   return (cfg.cloudPlatforms || []).map((p) => ({ ...p, hasPassword: !!getPassword(secretKey(p.id)) }))
@@ -597,6 +604,43 @@ export const alarmDetail = (id: string, alarmId: number): Promise<{ ok: boolean;
 
 export const alarmRules = (id: string, opts: AlarmRuleQuery = {}): Promise<{ ok: boolean; data?: { items: AlarmRule[]; total: number; page: number; size: number }; error?: string }> =>
   wrap(() => ocpAlarmRules(clientOf(id), opts))
+
+/**
+ * 直连告警规则：内置规则清单 + 当前生效阈值。
+ *
+ * 直连没有 OCP 的规则中心（阈值存 MetaDB、由 OCP 定时评估），规则是本地内置的；
+ * 这里把「有哪些规则、阈值多少、数据来自哪张视图」如实交给界面，
+ * 阈值改动按平台落 config.json，不落数据库。
+ */
+export const directAlarmRules = (
+  id: string
+): Promise<{ ok: boolean; data?: { rules: any[]; thresholds: Record<string, number> }; error?: string }> =>
+  wrap(async () => {
+    if (!isDirectPlatform(id)) throw new Error('该平台不是 OceanBase 直连模式')
+    const saved = (loadConfig().cloudAlarmThresholds || {})[id] || {}
+    return { rules: obd.ALARM_RULE_DEFS, thresholds: obd.mergeThresholds(saved as any) }
+  })
+
+/** 保存阈值：键按白名单过滤，值按 [min,max] 夹取，越界不写盘 */
+export const directSetAlarmThresholds = (
+  id: string,
+  patch: Record<string, number>
+): Promise<{ ok: boolean; data?: { thresholds: Record<string, number> }; error?: string }> =>
+  wrap(async () => {
+    if (!isDirectPlatform(id)) throw new Error('该平台不是 OceanBase 直连模式')
+    const cfg = loadConfig()
+    if (!cfg.cloudAlarmThresholds) cfg.cloudAlarmThresholds = {}
+    const cur = { ...(cfg.cloudAlarmThresholds[id] || {}) }
+    const allowed = new Set(Object.keys(obd.ALARM_THRESHOLDS))
+    for (const [k, v] of Object.entries(patch || {})) {
+      if (!allowed.has(k)) continue
+      // 用 mergeThresholds 校验单值：它已经实现了 [min,max] 夹取，避免两处阈值规则不一致
+      cur[k] = obd.mergeThresholds({ [k]: Number(v) } as any)[k as keyof typeof obd.ALARM_THRESHOLDS]
+    }
+    cfg.cloudAlarmThresholds[id] = cur
+    saveConfig(cfg)
+    return { thresholds: obd.mergeThresholds(cur as any) }
+  })
 
 export const alarmTrend = (id: string, hours = 24): Promise<{ ok: boolean; data?: AlarmTrend; error?: string }> =>
   wrap(() => ocpAlarmTrend(clientOf(id), hours))
@@ -1129,7 +1173,9 @@ export const saveTenantCredential = (
   password: string
 ): { ok: boolean; error?: string; keptPassword?: boolean } => {
   if (!secretsAvailable()) return { ok: false, error: '系统加密不可用（DPAPI），为避免密码明文落盘，本次保存已取消' }
-  const u = String(user || '').trim()
+  // 账号形如 root@perf 时把租户后缀去掉：连接串会自己拼 @tenant，
+  // 不去掉就变成 root@perf@perf → Access denied，而界面上一切正常，极难排查。
+  const u = String(user || '').trim().replace(/@[^@]*$/, '')
   if (!u) return { ok: false, error: '请填写账号' }
   const key = tenantCredKey(id, tenant)
   const pw = String(password ?? '')
@@ -1204,7 +1250,7 @@ async function runTenantWrite(
   action: string,
   target: string,
   run: (p: ObDirectPlatform, login: TenantLogin) => Promise<{ ok: boolean; message: string; steps: string[] }>
-): Promise<{ ok: boolean; data?: { message: string }; error?: string }> {
+): Promise<{ ok: boolean; data?: { message: string; steps: string[] }; error?: string; steps?: string[] }> {
   const started = Date.now()
   try {
     const r = await withTenantLogin(id, tenant, run)
@@ -1222,7 +1268,10 @@ async function runTenantWrite(
       steps: r.steps,
       durationMs: Date.now() - started
     })
-    return r.ok ? { ok: true, data: { message: r.message } } : { ok: false, error: r.message }
+    // 失败时把已执行的语句一起回传：GRANT/REVOKE 不可回滚，用户需要知道断在哪一条
+    return r.ok
+      ? { ok: true, data: { message: r.message, steps: r.steps } }
+      : { ok: false, error: r.message, steps: r.steps }
   } catch (e: any) {
     const msg = e?.message || String(e)
     appendTask({
@@ -1282,6 +1331,14 @@ export const directTenantUsersAs = (
 ): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
   wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.usersAs(p, login, mode)))
 
+/** 库 / Schema 下的表清单（只读，需要租户凭据） */
+export const directTenantTables = (
+  id: string,
+  tenant: string,
+  input: { schema: string; mode: 'MYSQL' | 'ORACLE'; limit?: number }
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
+  wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.tablesAs(p, login, input)))
+
 export const directCreateUser = (
   id: string,
   tenant: string,
@@ -1315,9 +1372,33 @@ export const directGrant = (
 export const directGrants = (
   id: string,
   tenant: string,
-  input: { name: string; host?: string }
-): Promise<{ ok: boolean; data?: string[]; error?: string }> =>
+  input: { name: string; host?: string; mode?: 'MYSQL' | 'ORACLE' }
+): Promise<{ ok: boolean; data?: any[]; error?: string }> =>
   wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.grantsAs(p, login, input)))
+
+/** 连接自检：把「谁在连、能不能授权」摊开，用于排查授权失败 */
+export const directTenantSelfCheck = (
+  id: string,
+  tenant: string,
+  mode: 'MYSQL' | 'ORACLE' = 'MYSQL'
+): Promise<{ ok: boolean; data?: any; error?: string }> =>
+  wrap(async () => withTenantLogin(id, tenant, (p, login) => obin.selfCheckAs(p, login, mode)))
+
+/** 权限回收：与授权共用白名单，逐条提交（REVOKE 同样不可回滚） */
+export const directRevoke = (
+  id: string,
+  tenant: string,
+  input: {
+    name: string
+    host?: string
+    database?: string
+    databases?: string[]
+    privileges: string | string[]
+    mode: 'MYSQL' | 'ORACLE'
+    table?: string
+  }
+): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
+  runTenantWrite(id, tenant, 'REVOKE', `${input?.name || ''} ${(Array.isArray(input?.privileges) ? input.privileges : [input?.privileges]).join(',')}`.trim(), (p, login) => obin.revokeAs(p, login, input))
 
 // ---------- 直连模式的租户生命周期 ----------
 // 与上面的 createTenant / deleteTenant / tenantSetLocked（OCP 任务框架）**互不复用**：

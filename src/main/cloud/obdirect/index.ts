@@ -40,6 +40,14 @@ import type {
 export type { ObDirectPlatform } from './conn'
 export { dropPool, dropCapability }
 export { topSqlOf, sqlTextOf, parametersOf, eventsOf }
+export {
+  ALARM_RULE_DEFS,
+  ALARM_THRESHOLDS,
+  mergeThresholds,
+  setAlarmThresholdResolver
+} from './alarm'
+export type { AlarmRuleDef, AlarmThresholds, AlarmThresholdKey } from './alarm'
+export { obVersionOf, isMetaTenant, isSysTenant, isUserTenant } from './collect'
 export { majorFreeze, setMergeSuspended, setParameter, killSession, openTransactions } from './write'
 export type { WriteResult } from './write'
 
@@ -116,20 +124,21 @@ export function capability(p: ObDirectPlatform, password: string, force = false)
 }
 
 export async function overview(p: ObDirectPlatform, password: string): Promise<CloudOverview> {
-  const ov = await overviewOf(p, password, async (s: ObSnapshot) => {
-    const a = await alarmSummaryOf(p, password, s)
-    return { total: a.total, levels: a.levels, critical: a.critical }
+  // 一次采集 + 一次评估：告警计数与列表都来自同一份结果。
+  // 旧实现拿到总览后又重新 snapshot 一遍再评估一次（两倍查询），
+  // 第二次一旦超时就会让「活跃告警」面板变空——看着像"没有告警"。
+  return overviewOf(p, password, async (s: ObSnapshot) => {
+    const a = await evaluateAlarms(p, password, s)
+    return {
+      total: a.total,
+      levels: a.levels,
+      critical: a.critical,
+      alarms: a.alarms.slice(0, 20)
+      // 注意：这里**不**把 a.skipped 拼进 warnings。
+      // "某条规则在当前版本没有对应视图"属于覆盖度说明，不是"数据没取到"，
+      // 混进总览的红色告警条只会造成"系统有问题"的误判；告警页里仍能看到未覆盖清单。
+    }
   })
-  // 总览要带前几条活跃告警，单独补一次（overviewOf 内部为避免重复查询只给了计数）
-  try {
-    const s = await snapshotOf(p, password)
-    const a = await alarmSummaryOf(p, password, s)
-    ov.alarms = a.alarms.slice(0, 20)
-    ov.warnings = [...ov.warnings, ...a.skipped.map((x) => `告警规则跳过：${x}`)]
-  } catch {
-    // 告警拿不到不影响总览主体
-  }
-  return ov
 }
 
 export async function clusters(p: ObDirectPlatform, password: string): Promise<CloudCluster[]> {

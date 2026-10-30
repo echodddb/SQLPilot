@@ -306,14 +306,28 @@ const api = {
     ipcRenderer.invoke('cloud:directDropDb', { id, tenant, name }),
   cloudDirectTenantUsersAs: (id: string, tenant: string, mode: 'MYSQL' | 'ORACLE') =>
     ipcRenderer.invoke('cloud:directTenantUsersAs', { id, tenant, mode }),
+  cloudDirectTenantTables: (id: string, tenant: string, input: { schema: string; mode: 'MYSQL' | 'ORACLE'; limit?: number }) =>
+    ipcRenderer.invoke('cloud:directTenantTables', { id, tenant, input }),
   cloudDirectCreateUser: (id: string, tenant: string, input: any) =>
     ipcRenderer.invoke('cloud:directCreateUser', { id, tenant, input: plain(input) }),
   cloudDirectDropUser: (id: string, tenant: string, input: any) =>
     ipcRenderer.invoke('cloud:directDropUser', { id, tenant, input: plain(input) }),
   cloudDirectGrant: (id: string, tenant: string, input: any) =>
     ipcRenderer.invoke('cloud:directGrant', { id, tenant, input: plain(input) }),
-  cloudDirectGrants: (id: string, tenant: string, input: { name: string; host?: string }) =>
+  cloudDirectGrants: (id: string, tenant: string, input: { name: string; host?: string; mode?: 'MYSQL' | 'ORACLE' }) =>
     ipcRenderer.invoke('cloud:directGrants', { id, tenant, input }),
+  cloudDirectRevoke: (id: string, tenant: string, input: any) =>
+    ipcRenderer.invoke('cloud:directRevoke', { id, tenant, input: plain(input) }),
+  cloudDirectTenantSelfCheck: (id: string, tenant: string, mode: 'MYSQL' | 'ORACLE') =>
+    ipcRenderer.invoke('cloud:directTenantSelfCheck', { id, tenant, mode }),
+  // 云管主机的 SSH 凭据（复用服务器存储，id = cloudssh:<平台id>:<ip>）
+  cloudHostSshStatus: (platformId: string) => ipcRenderer.invoke('cloud:hostSshStatus', { platformId }),
+  cloudHostSshForget: (platformId: string, ip: string) => ipcRenderer.invoke('cloud:hostSshForget', { platformId, ip }),
+  /** 通过 SSH 采集主机系统信息（OS / 内核 / CPU / 内存 / 磁盘），没有凭据时返回错误 */
+  cloudHostSysInfo: (platformId: string, ip: string) => ipcRenderer.invoke('cloud:hostSysInfo', { platformId, ip }),
+  cloudDirectAlarmRules: (id: string) => ipcRenderer.invoke('cloud:directAlarmRules', { id }),
+  cloudDirectSetAlarmThresholds: (id: string, patch: Record<string, number>) =>
+    ipcRenderer.invoke('cloud:directSetAlarmThresholds', { id, patch }),
   cloudDirectTenantConnections: (id: string, tenant: string, mode: 'MYSQL' | 'ORACLE') =>
     ipcRenderer.invoke('cloud:directTenantConnections', { id, tenant, mode }),
   cloudClusters: (id: string) => ipcRenderer.invoke('cloud:clusters', { id }),

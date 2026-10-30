@@ -49,6 +49,29 @@ declare type CloudHost = import('../main/cloud/ocp').CloudHost
 
 declare type CloudTenant = import('../main/cloud/ocp').CloudTenant
 
+/** 直连租户的已授权条目（MySQL 解析 SHOW GRANTS，Oracle 读 DBA_*_PRIVS） */
+declare type CloudDirectGrantRow = import('../main/cloud/obdirect/tenantIn').GrantRow
+/** 直连内置告警规则定义（含可调阈值的键与范围） */
+declare type CloudDirectAlarmRule = import('../main/cloud/obdirect/alarm').AlarmRuleDef
+
+/** 直连租户：库 / Schema 下的表 */
+declare type CloudTenantTableRow = import('../main/cloud/obdirect/tenantIn').TenantTableRow
+
+/** 主机系统信息（经 SSH 采集；无凭据时为空） */
+declare interface CloudHostSysInfo {
+  osName: string
+  osVersion: string
+  osPretty: string
+  kernel: string
+  hostname: string
+  cpuModel: string
+  cores: number
+  memBytes: number
+  uptime: string
+  disks: { fs: string; mount: string; size: number; used: number; pct: number }[]
+  at: number
+}
+
 declare type CloudAlarm = import('../main/cloud/ocp').CloudAlarm
 declare type CloudAlarmListResult = import('../main/cloud/ocp').AlarmListResult
 declare type CloudAlarmRule = import('../main/cloud/ocp').AlarmRule
@@ -459,7 +482,17 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       cloudDirectCreateUser(id: string, tenant: string, input: { name: string; host?: string; password: string; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
       cloudDirectDropUser(id: string, tenant: string, input: { name: string; host?: string; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
       cloudDirectGrant(id: string, tenant: string, input: { name: string; host?: string; database?: string; databases?: string[]; privileges: string | string[]; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
-      cloudDirectGrants(id: string, tenant: string, input: { name: string; host?: string }): Promise<CloudApi<string[]>>
+      cloudDirectGrants(id: string, tenant: string, input: { name: string; host?: string; mode?: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<CloudDirectGrantRow[]>>
+      cloudDirectRevoke(id: string, tenant: string, input: { name: string; host?: string; database?: string; databases?: string[]; privileges: string | string[]; mode: 'MYSQL' | 'ORACLE'; table?: string }): Promise<CloudApi<{ message: string }>>
+      cloudDirectTenantSelfCheck(id: string, tenant: string, mode: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ user: string; login: string; version: string; grants: string[]; canGrant: boolean; note: string }>>
+      /** 云管主机的 SSH 凭据状态（ip → 账号信息，不含口令） */
+      cloudHostSshStatus(platformId: string): Promise<CloudApi<Record<string, { serverId: string; user: string; port: number; auth: 'password' | 'key'; keyPath: string; hasPassword: boolean }>>>
+      cloudHostSshForget(platformId: string, ip: string): Promise<CloudApi<Record<string, never>>>
+      cloudDirectTenantTables(id: string, tenant: string, input: { schema: string; mode: 'MYSQL' | 'ORACLE'; limit?: number }): Promise<CloudApi<CloudTenantTableRow[]>>
+      /** 通过 SSH 采集的主机系统信息 */
+      cloudHostSysInfo(platformId: string, ip: string): Promise<CloudApi<CloudHostSysInfo>>
+      cloudDirectAlarmRules(id: string): Promise<CloudApi<{ rules: CloudDirectAlarmRule[]; thresholds: Record<string, number> }>>
+      cloudDirectSetAlarmThresholds(id: string, patch: Record<string, number>): Promise<CloudApi<{ thresholds: Record<string, number> }>>
       cloudDirectTenantConnections(id: string, tenant: string, mode: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ label: string; command: string }[]>>
       cloudClusters(id: string): Promise<CloudApi<CloudCluster[]>>
       cloudCluster(id: string, clusterId: number): Promise<CloudApi<CloudClusterDetail>>

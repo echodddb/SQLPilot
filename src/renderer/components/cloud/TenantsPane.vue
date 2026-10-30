@@ -12,7 +12,7 @@
       <div class="tp-head">
         <h2>租户 <span class="count">{{ filtered.length }}</span></h2>
         <div class="filters">
-          <input v-model="q" class="search" placeholder="搜索租户 / 集群 / 主 Zone" spellcheck="false" />
+          <input v-model="q" class="search" placeholder="搜索租户 / 集群 / 接入名称 / 主 Zone" spellcheck="false" />
           <!-- 直连：按集群（= 一个直连平台）收敛范围，租户的写操作只在这个集群内发起 -->
           <select v-if="isDirect" v-model.number="directTenant.scopeClusterId" title="选择要管理的集群">
             <option :value="0">全部集群</option>
@@ -32,7 +32,16 @@
             <option value="PRIMARY">主租户</option>
             <option value="STANDBY">备租户</option>
           </select>
-          <button class="create" :title="createHint" :disabled="isDirect && !canCreate" @click="openCreate">
+          <button
+            v-if="isDirect && metaCount"
+            class="toggle"
+            :class="{ on: showMeta }"
+            :title="showMeta ? '隐藏 META$ 内部租户' : `当前隐藏了 ${metaCount} 个 META$ 内部租户，点此显示`"
+            @click="showMeta = !showMeta"
+          >
+            {{ showMeta ? '隐藏 meta' : `显示 meta（${metaCount}）` }}
+          </button>
+          <button class="create" :title="createHint" :disabled="isDirect && !directScopes.length" @click="openCreate">
             ＋ 新建租户
           </button>
         </div>
@@ -42,7 +51,9 @@
         <table class="tbl">
           <thead data-src="tnList">
             <tr>
-              <th>租户名</th><th>所属集群</th><th>模式</th><th>状态</th><th>角色</th>
+              <th>租户名</th>
+              <th v-if="showAccess">接入名称</th>
+              <th>所属集群</th><th>模式</th><th>状态</th><th>角色</th>
               <th>Zone 优先级</th><th>Locality</th><th class="r">Unit</th><th class="r">租户 ID</th><th>创建时间</th>
               <th v-if="isDirect" class="r">操作</th>
             </tr>
@@ -58,7 +69,9 @@
             >
               <td class="cell-main" data-src="tnList" :data-tenant="t.name">
                 {{ t.name }}<span v-if="t.locked" class="mini">锁定</span><span v-if="t.readonly" class="mini">只读</span>
+                <span v-if="t.isMeta" class="mini meta">META</span>
               </td>
+              <td v-if="showAccess" class="dim">{{ accessNameOf(t.clusterId) || '—' }}</td>
               <td>{{ t.clusterName }}</td>
               <td><span class="pill" :class="t.mode === 'ORACLE' ? 'info' : 'gray'">{{ t.mode }}</span></td>
               <td><span class="pill" :class="tenantStatus(t.status).tone">{{ tenantStatus(t.status).label }}</span></td>
@@ -91,7 +104,7 @@
                 </div>
               </td>
             </tr>
-            <tr v-if="!filtered.length"><td :colspan="isDirect ? 11 : 10" class="empty">没有匹配的租户</td></tr>
+            <tr v-if="!filtered.length"><td :colspan="colCount" class="empty">{{ isDirect && metaCount && !showMeta ? '没有匹配的租户（meta 租户已隐藏）' : '没有匹配的租户' }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -117,10 +130,11 @@
   <TenantDrawer v-else-if="cloud.tenant" />
   <TenantCreate v-if="tenantCreate && !isDirect" @close="tenantCreate = false" />
   <DirectTenantCreate
-    v-if="directTenant.createOpen && directTenant.createPlatformId && createTarget"
+    v-if="directTenant.createOpen"
     :platform-id="directTenant.createPlatformId"
-    :cluster-id="createTarget.id"
-    :cluster-name="createTarget.name"
+    :scopes="createScopes"
+    :cluster-id="createTarget?.id || 0"
+    :cluster-name="createTarget?.name || ''"
   />
   <!-- 锁定 / 删除的执行进度弹窗（不再只弹 toast） -->
   <DirectOpModal
@@ -143,8 +157,8 @@ import DirectTenantCreate from './direct/DirectTenantCreate.vue'
 import DirectUnitManager from './direct/DirectUnitManager.vue'
 import DirectPoolManager from './direct/DirectPoolManager.vue'
 import DirectOpModal from './direct/DirectOpModal.vue'
-import { cloud, load, openTenant } from '../../cloud/state'
-import { canManage, directTenant, openCreate as openDirectCreate, platformOfCluster } from '../../cloud/directTenant'
+import { cloud, load, openTenant, accessNameOf } from '../../cloud/state'
+import { directTenant, platformOfCluster } from '../../cloud/directTenant'
 import { fmtTime, tenantStatus } from '../../cloud/parts'
 
 const q = ref('')
@@ -154,6 +168,8 @@ const role = ref('')
 const tenantCreate = ref(false)
 /** 页内 tab：租户列表 / Unit 规格（OCP）/ Unit 配置、资源池（直连） */
 const sub = ref<'list' | 'spec' | 'unit' | 'pool'>('list')
+/** 是否显示 META$ 内部租户：默认隐藏，元数据租户对日常运维没有意义却会淹没真实租户 */
+const showMeta = ref(false)
 
 /** 直连模式：租户的读写都落在某一个直连平台上，界面按集群收敛 */
 const isDirect = computed(() => cloud.vendor === 'ocp' && cloud.access === 'direct')
@@ -167,6 +183,19 @@ const directScopes = computed(() => {
   return [...map].map(([id, name]) => ({ id, name }))
 })
 
+/** 新建租户弹窗的候选集群（带上归属平台，弹窗内选择后才知道往哪套环境建） */
+const createScopes = computed(() =>
+  directScopes.value.map((c) => ({ ...c, platformId: platformOfCluster(c.id) }))
+)
+
+/** 多套直连接入才有「接入名称」列 */
+const showAccess = computed(() => new Set(Object.values(cloud.directOf)).size > 1)
+
+/** META$ 租户数量：用于「显示 meta」按钮的角标与空态文案 */
+const metaCount = computed(() => cloud.tenants.filter((t) => t.isMeta).length)
+
+const colCount = computed(() => 10 + (isDirect.value ? 1 : 0) + (showAccess.value ? 1 : 0))
+
 /** 新建租户的目标集群：显式选了就用它，只有一个集群时默认它 */
 const createTarget = computed(() => {
   const id = directTenant.scopeClusterId || (directScopes.value.length === 1 ? directScopes.value[0].id : 0)
@@ -175,27 +204,25 @@ const createTarget = computed(() => {
   return hit ? { id: hit.id, name: hit.name } : null
 })
 
-const canCreate = computed(() => !!createTarget.value && canManage(createTarget.value.id))
 const createHint = computed(() => {
   if (!isDirect.value) return '在指定集群新建租户'
-  if (!createTarget.value) return '先在上方选择一个集群，再新建租户'
-  if (!canManage(createTarget.value.id)) return '该集群未关联直连平台，无法新建租户'
-  return `在集群 ${createTarget.value.name} 新建租户（sys 租户直连执行）`
+  return '直连模式：打开向导后再选择目标集群（每个集群是一套独立连接）'
 })
 
+/**
+ * 新建租户：直连模式**不再要求先选集群**——按钮永远可点，集群在向导里选。
+ * 之前的实现要求先在上方下拉里收敛到某个集群，否则弹窗根本打不开，
+ * 用户看到的就是「点了没反应」。
+ */
 function openCreate(): void {
   if (!isDirect.value) {
     tenantCreate.value = true
     return
   }
   const target = createTarget.value
-  if (!target) {
-    void window.sqlpilot.uiAlert('请先选择集群', '直连模式下每个集群是一套独立连接，请先在上方选定要在哪个集群建租户。')
-    return
-  }
-  if (!openDirectCreate(target.id)) {
-    void window.sqlpilot.uiAlert('无法定位直连平台', '该集群没有关联的直连平台，请到云管平台设置里检查。')
-  }
+  directTenant.scopeClusterId = target?.id || directTenant.scopeClusterId
+  directTenant.createPlatformId = target ? platformOfCluster(target.id) : ''
+  directTenant.createOpen = true
 }
 
 const clusterNames = computed(() => [...new Set(cloud.tenants.map((t) => t.clusterName).filter(Boolean))])
@@ -231,12 +258,14 @@ const filtered = computed(() => {
   const k = q.value.trim().toLowerCase()
   const scope = isDirect.value ? directTenant.scopeClusterId : 0
   return cloud.tenants.filter((t) => {
+    // meta 租户默认不进列表：它们是 OB 给每个租户配的内部元数据租户，不参与运维
+    if (t.isMeta && !showMeta.value) return false
     if (scope && t.clusterId !== scope) return false
     if (!isDirect.value && cluster.value && t.clusterName !== cluster.value) return false
     if (mode.value && t.mode !== mode.value) return false
     if (role.value && (t.role || 'PRIMARY') !== role.value) return false
     if (!k) return true
-    return `${t.name} ${t.clusterName} ${t.locality} ${t.primaryZone}`.toLowerCase().includes(k)
+    return `${t.name} ${t.clusterName} ${accessNameOf(t.clusterId)} ${t.locality} ${t.primaryZone}`.toLowerCase().includes(k)
   })
 })
 
@@ -284,6 +313,13 @@ select {
   border-radius: 7px; padding: 4px 11px; font-size: 11.5px; font-family: inherit; cursor: pointer; white-space: nowrap;
 }
 .create:hover { background: var(--accent); color: #fff; }
+/* meta 显示开关：中性样式，不抢「新建租户」的主按钮位置 */
+.toggle {
+  border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim);
+  border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-family: inherit; cursor: pointer; white-space: nowrap;
+}
+.toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.toggle.on { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); background: var(--yellow-dim); }
 .spec {
   border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim);
   border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-family: inherit; cursor: pointer; white-space: nowrap;
@@ -303,6 +339,8 @@ select {
 .dim { color: var(--text-dim); }
 .empty { text-align: center; color: var(--text-faint); padding: 20px !important; }
 .mini { font-size: 9.5px; color: var(--yellow); border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent); border-radius: 4px; padding: 0 4px; margin-left: 5px; }
+/* META 标记：灰色，提示这是内部租户而不是业务租户 */
+.mini.meta { color: var(--text-faint); border-color: var(--border); }
 .foot { font-size: 10.5px; color: var(--text-faint); }
 .pill { font-size: 10.5px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim); }
 .pill.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: var(--green-dim); }

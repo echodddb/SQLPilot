@@ -14,20 +14,17 @@ import { capabilityOf, has } from './capability'
 import { hashId, type ObSnapshot } from './collect'
 import type { AlarmLevelCount, CloudAlarm } from '../ocp'
 
-/** 阈值集中在这里，后续要改成用户可配也只动这一处 */
-export const ALARM_THRESHOLDS = {
-  /** 数据盘使用率：≥ warn 警告，≥ crit 严重（百分比） */
-  dataDiskWarn: 85,
-  dataDiskCrit: 90,
-  logDiskWarn: 85,
-  logDiskCrit: 90,
-  /** 租户内存使用率（占其 Unit 规格） */
-  tenantMemWarn: 90,
-  /** 长事务：事务状态非空且持续超过该秒数 */
-  longTxnSec: 300,
-  /** 合并卡住：START_TIME 距今超过该小时且状态仍是 MERGING */
-  compactionStalledHours: 6
-}
+// 规则定义与阈值计算是纯函数，放在 ./alarmRules（可脱离数据库单测）；
+// 本文件只负责「按快照查视图 -> 判定 -> 产出告警对象」。
+import { mergeThresholds, thresholdOverridesOf } from './alarmRules'
+export {
+  ALARM_RULE_DEFS,
+  ALARM_THRESHOLDS,
+  ALARM_THRESHOLD_BOUNDS,
+  mergeThresholds,
+  setAlarmThresholdResolver
+} from './alarmRules'
+export type { AlarmRuleDef, AlarmThresholds, AlarmThresholdKey } from './alarmRules'
 
 const str = (v: any): string => (v === undefined || v === null ? '' : String(v))
 const num = (v: any): number => {
@@ -110,7 +107,8 @@ export async function evaluateAlarms(
   const alarms: CloudAlarm[] = []
   const skipped: string[] = []
   const clusterName = s.cap.clusterName
-  const T = ALARM_THRESHOLDS
+  // 阈值优先取用户在「告警规则」里保存的值，未配置时用默认值
+  const T = mergeThresholds(thresholdOverridesOf(p.id))
 
   // --- 1. OBServer 非 ACTIVE
   for (const r of s.servers) {
@@ -129,7 +127,7 @@ export async function evaluateAlarms(
     }
   }
 
-  // --- 2/3. 数据盘 / 日志盘使用率
+  // --- 2/3. 数据盘 / 日志盘使用率 + 主机 CPU / 内存分配率 + 磁盘健康
   for (const g of s.gvServers) {
     const ip = str(g.SVR_IP)
     const checks: { label: string; used: number; total: number; warn: number; crit: number; rule: string; name: string }[] = [
@@ -155,6 +153,48 @@ export async function evaluateAlarms(
         scope: 'Host',
         clusterName,
         labels: { 使用率: `${pct}%`, 已用GB: (c.used / 1024 ** 3).toFixed(2), 总量GB: (c.total / 1024 ** 3).toFixed(2) }
+      }))
+    }
+
+    // 主机维度：CPU / 内存分配率（分配出去就收不回，比"使用率"更值得盯）
+    const alloc: { label: string; used: number; total: number; warn: number; rule: string; name: string }[] = [
+      {
+        label: 'CPU', used: num(g.CPU_ASSIGNED), total: num(g.CPU_CAPACITY),
+        warn: T.cpuAllocWarn, rule: 'OB_CPU_ALLOC_HIGH', name: '主机 CPU 分配率偏高'
+      },
+      {
+        label: '内存', used: num(g.MEM_ASSIGNED), total: num(g.MEM_CAPACITY),
+        warn: T.memAllocWarn, rule: 'OB_MEM_ALLOC_HIGH', name: '主机内存分配率偏高'
+      }
+    ]
+    for (const a of alloc) {
+      if (a.total <= 0) continue
+      const pct = Math.round((a.used / a.total) * 1000) / 10
+      if (pct < a.warn) continue
+      alarms.push(alarmOf({
+        rule: a.rule,
+        level: pct >= 95 ? 3 : 2,
+        name: a.name,
+        summary: `${ip} ${a.label}已分配 ${a.used} / ${a.total}（${pct}%，阈值 ${a.warn}%）`,
+        target: ip,
+        scope: 'Host',
+        clusterName,
+        labels: { 分配率: `${pct}%`, 已分配: String(a.used), 总量: String(a.total) }
+      }))
+    }
+
+    // 主机维度：磁盘健康状态（非 NORMAL 一律按严重处理）
+    const health = str(g.DATA_DISK_HEALTH_STATUS).toUpperCase()
+    if (health && health !== 'NORMAL') {
+      alarms.push(alarmOf({
+        rule: 'OB_DISK_HEALTH_BAD',
+        level: 1,
+        name: '主机磁盘健康状态异常',
+        summary: `${ip} 数据盘健康状态为 ${health}，存在坏盘风险，请尽快检查并更换`,
+        target: ip,
+        scope: 'Host',
+        clusterName,
+        labels: { 健康状态: health }
       }))
     }
   }
@@ -271,6 +311,48 @@ export async function evaluateAlarms(
     }
   } catch {
     skipped.push('合并状态（DBA_OB_MAJOR_COMPACTION 不可用）')
+  }
+
+  // --- 7. 日志流状态异常（副本不可用 / 切换中的直接信号）
+  // 视图可用性因版本而异：sys 租户下 DBA_OB_LS 一般存在，普通租户可能只有 CDB_OB_LS，
+  // 逐个试，全都没有才算"未覆盖"——否则总览会一直挂一条"规则跳过"的噪音。
+  try {
+    let rows: any[] = []
+    for (const view of ['DBA_OB_LS', 'CDB_OB_LS', 'GV$OB_LS']) {
+      try {
+        rows = await q<any>(p, password, `SELECT TENANT_ID, LS_ID, STATUS FROM oceanbase.${view}`)
+        break
+      } catch {
+        rows = []
+      }
+    }
+    if (!rows.length) {
+      // 查不到就静默跳过：这是"规则未覆盖"，不是"数据取回失败"
+      skipped.push('日志流状态（当前版本无 DBA_OB_LS / CDB_OB_LS）')
+    } else {
+      const normal = new Set(['NORMAL', 'LEADER', 'FOLLOWER', 'CREATING', 'CREATED', 'STARTING', 'TAKEOVER'])
+      const tenantName = new Map<number, string>()
+      for (const t of s.tenants) tenantName.set(num(t.TENANT_ID), str(t.TENANT_NAME))
+      for (const r of rows) {
+        const status = str(r.STATUS).toUpperCase()
+        if (!status || normal.has(status)) continue
+        const tid = num(r.TENANT_ID)
+        const tname = tenantName.get(tid) || `tenant_${tid}`
+        alarms.push(alarmOf({
+          rule: 'OB_LS_NOT_NORMAL',
+          level: 3,
+          name: '日志流状态异常',
+          summary: `租户 ${tname} 的日志流 ${num(r.LS_ID)} 状态为 ${status}`,
+          target: `${tname} / LS ${num(r.LS_ID)}`,
+          scope: 'Tenant',
+          clusterName,
+          tenantName: tname,
+          labels: { LS_ID: String(num(r.LS_ID)), 状态: status, 租户ID: String(tid) }
+        }))
+      }
+    }
+  } catch {
+    skipped.push('日志流状态（视图不可读）')
   }
 
   const levels = countLevels(alarms)

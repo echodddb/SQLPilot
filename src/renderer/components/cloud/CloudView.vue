@@ -69,7 +69,7 @@
       <button class="tbi icon" :title="cloud.platforms.length ? '管理云平台接入' : '接入平台（OCP / Oracle）'" @click="cloud.settingsOpen = true">
         <span class="tbi-ico">⚙</span>
       </button>
-      <span class="ctop-status" :class="statusTone"><i class="dot"></i>{{ statusText }}</span>
+      <span class="ctop-status" :class="statusTone" :title="statusTitle"><i class="dot"></i>{{ statusText }}</span>
     </header>
 
     <OracleConsole v-if="isOracle" />
@@ -106,10 +106,11 @@
           </div>
           <div class="ph-actions">
             <span v-if="cloud.updatedAt" class="updated">{{ updatedText }}</span>
-            <button class="tb" :disabled="cloud.loading || !platform" title="重新读取 OCP 数据" @click="load">
+            <button class="tb" :disabled="cloud.loading || !platform" :title="isDirect ? '重新读取直连集群数据' : '重新读取 OCP 数据'" @click="load">
               <span class="spin-ico" :class="{ spin: cloud.loading }">⟳</span> 刷新
             </button>
-            <button class="tb" :disabled="!platform" title="在系统浏览器中打开 OCP 原生控制台" @click="openNative">↗ 打开 OCP</button>
+            <!-- 直连模式没有 OCP 控制台可跳，别留一个点了没反应的按钮 -->
+            <button v-if="!isDirect" class="tb" :disabled="!platform" title="在系统浏览器中打开 OCP 原生控制台" @click="openNative">↗ 打开 OCP</button>
           </div>
         </div>
 
@@ -165,6 +166,10 @@
           <DirectOpsPane v-else-if="cloud.view === 'direct'" />
         </template>
         </div>
+
+        <!-- 主机 SSH 分窗：作为主区的最后一个 flex 子节点贴在窗口底部，
+             上边界可拖动；支持多会话，最小化后成任务栏（组件不卸载，内容保留） -->
+        <HostSshDock v-if="cloud.hostSshSessions.length" />
       </section>
     </div>
 
@@ -213,6 +218,7 @@ import TasksPane from './TasksPane.vue'
 import PlatformPane from './PlatformPane.vue'
 import DirectOpsPane from './DirectOpsPane.vue'
 import DirectTasksPane from './direct/DirectTasksPane.vue'
+import HostSshDock from './host/HostSshDock.vue'
 import PlatformSettings from './PlatformSettings.vue'
 import CloudSearch from './CloudSearch.vue'
 import SourceTip from './SourceTip.vue'
@@ -338,7 +344,8 @@ const NAV_GROUPS = computed<{ title: string; items: ReturnType<typeof viewOf>[] 
   if (isDirect.value) {
     return [
       { title: 'OceanBase 直连', items: (['overview', 'clusters', 'tenants', 'hosts'] as CloudViewKey[]).map(viewOf) },
-      { title: '直连运维', items: (['direct', 'dtasks'] as CloudViewKey[]).map(viewOf) },
+      // 分组叫「运维」而不是「直连运维」：否则分组名与条目名重复，看不出这一组是干什么的
+      { title: '运维', items: (['direct', 'dtasks'] as CloudViewKey[]).map(viewOf) },
       { title: '告警', items: (['alarms'] as CloudViewKey[]).map(viewOf) }
     ]
   }
@@ -380,6 +387,13 @@ const statusTone = computed(() => {
   }
   return !cloud.platforms.length ? 'idle' : !cloud.status ? 'wait' : cloud.status.ok ? 'ok' : 'bad'
 })
+/** 当前接入的所有集群版本（去重）：直连多套环境时版本可能不同，必须如数展示 */
+const obVersions = computed(() => {
+  const set = new Set(cloud.clusters.map((c) => c.version).filter(Boolean))
+  if (!set.size && cloud.overview?.info?.version) set.add(cloud.overview.info.version)
+  return [...set]
+})
+
 const statusText = computed(() => {
   if (isOracle.value) {
     if (!oracleEnvCount.value) return '未接入环境'
@@ -390,7 +404,26 @@ const statusText = computed(() => {
   if (!cloud.platforms.length) return '未配置'
   if (!cloud.status) return '连接中…'
   if (!cloud.status.ok) return '连接异常'
+  // 直连模式直连的是 OB 集群本身，没有 OCP——这里显示的必须是 OB 服务端版本，
+  // 之前统一写成「OCP 5.7.25-OceanBase-v4.3.5.2」，既挂了 OCP 的名字，串里还带着 MySQL 兼容前缀
+  if (isDirect.value) {
+    const vs = obVersions.value
+    if (!vs.length) return '直连 · 已连接'
+    return vs.length === 1 ? `OB v${vs[0]}` : `OB ${vs.length} 个版本`
+  }
   return `OCP ${cloud.status.info?.version || ''}`.trim()
+})
+
+const statusTitle = computed(() => {
+  if (isOracle.value) return 'Oracle 直连：可用环境数 / 已接入环境数'
+  if (isDirect.value) {
+    const vs = obVersions.value
+    if (!vs.length) return '直连 OBServer SQL 端口，未读取到版本'
+    return `OceanBase 集群版本（取自 DBA_OB_SERVERS.BUILD_VERSION）：${vs.map((v) => `v${v}`).join(' / ')}`
+      + '\n直连模式不经过 OCP，因此这里不显示 OCP 版本。'
+  }
+  const v = cloud.status?.info?.version
+  return v ? `OCP 平台版本：${v}（来自 OCP 的 /api/v2/... 系统信息接口）` : 'OCP 平台连接状态'
 })
 const updatedText = computed(() => (cloud.updatedAt ? `更新于 ${relTime(new Date(cloud.updatedAt).toISOString())}` : ''))
 

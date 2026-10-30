@@ -39,13 +39,23 @@ export const CLOUD_VIEWS: { key: CloudView; label: string; icon: string; desc: s
   { key: 'sqldiag', label: 'SQL 诊断', icon: '⌁', desc: 'TopSQL / 慢 SQL：按 CPU、耗时、执行次数排序，定位吃资源的语句' },
   { key: 'alarms', label: '告警', icon: '⚠', desc: '当前活跃告警，按级别筛选' },
   { key: 'tasks', label: '任务', icon: '⟳', desc: 'OCP 运维任务流水与子任务进度' },
-  { key: 'dtasks', label: '任务日志', icon: '⧉', desc: '直连写操作的本地文本任务日志：可筛选、看详情、清理' },
+  { key: 'dtasks', label: '操作日志', icon: '⧉', desc: '直连写操作的本地任务日志：建/删租户、改参数、Kill 会话等，可筛选、看详情、清理' },
   { key: 'platform', label: '平台管理', icon: '⚙', desc: 'OCP 用户 / 角色 / 平台参数 / 登录审计' },
-  { key: 'direct', label: '直连运维', icon: '⌗', desc: '无 OCP 直连：系统参数、TopSQL、运维事件与写操作（直接执行 SQL，不可回滚）' }
+  { key: 'direct', label: '实例运维', icon: '⌗', desc: '不经 OCP，直接在 OBServer 上做只读诊断（参数 / TopSQL / 运维事件）与写操作（合并、Kill 会话）' }
 ]
 
 /** 云管平台的两类厂商入口：OceanBase（调 OCP 接口）/ Oracle（直连查库） */
 export type CloudVendor = 'ocp' | 'oracle'
+
+/** 一个主机 SSH 会话（一条直连集群 + 一个 IP）；同一 IP 只保留一个会话 */
+export interface HostSshSession {
+  /** 唯一 id：platformId + ip */
+  id: string
+  platformId: string
+  ip: string
+  clusterName: string
+  port: number
+}
 
 export const cloud = reactive({
   /** 平台清单（config.json） */
@@ -143,6 +153,25 @@ export const cloud = reactive({
   tenant: null as CloudTenantDetail | null,
   /** 下钻：主机详情（抽屉，数据取自 hosts 列表，不额外请求） */
   host: null as CloudHost | null,
+
+  /**
+   * 主机 SSH 会话（可同时开多个）。
+   * 分窗停靠在云管主区底部，最小化只是把面板收成任务栏——组件不卸载，
+   * 所以 xterm 的缓冲区与远端 shell 都还在，重新展开能接着上次的输出继续看。
+   */
+  hostSshSessions: [] as HostSshSession[],
+  /** 当前显示的会话 id */
+  hostSshActive: '',
+  /** 分窗高度（px），拖动上边界调整 */
+  hostSshH: 320,
+  /** 分窗是否收起为底部任务栏 */
+  hostSshMin: false,
+  /**
+   * 主机系统信息缓存（ip → 采集结果）。
+   * 直连读的是 OB 视图，没有 OS 信息；只有配了 SSH 凭据的主机才能采到，
+   * 采到后缓存起来供列表的「操作系统」列直接显示。
+   */
+  hostSys: {} as Record<string, CloudHostSysInfo>,
 
   /** 资源监控 */
   monitor: {
@@ -546,9 +575,23 @@ export async function exportCsv(fileName: string, columns: string[], rows: (stri
   return r
 }
 
-/** 多集群合并时给集群名加平台前缀，避免两套环境里同名的 perf 分不清 */
-const tagCluster = <T extends { name: string; id: number }>(c: T, platform: CloudPlatformView, multi: boolean): T =>
-  multi ? { ...c, name: `${platform.name} · ${c.name}` } : c
+/**
+ * 多套直连环境合并展示时，**不再把接入名称拼进集群名**。
+ *
+ * 旧做法是 `${平台名} · ${集群名}`，接入平台和集群同名时界面就出现「perf · perf」，
+ * 既分不清哪个是配置里的名字、也没法按集群名搜索。
+ * 现在集群/租户保持原名，接入名称由 cloud.directOf 反查后单独成列（见 accessNameOf）。
+ */
+
+/**
+ * 某个集群归属的「接入名称」——即平台设置里填的那条配置的名称（如 perf/生产集群）。
+ * 单套直连环境时返回空串，界面据此把「接入名称」列隐藏，避免只有一列重复信息。
+ */
+export function accessNameOf(clusterId: number): string {
+  const pid = cloud.directOf[clusterId]
+  if (!pid) return ''
+  return cloud.platforms.find((p) => p.id === pid)?.name || ''
+}
 
 function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOverview }[], multi: boolean): CloudOverview {
   const sum = items.reduce(
@@ -575,7 +618,7 @@ function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOvervie
     },
     kpis: sum,
     hosts: { total: totalHosts, online, offline: totalHosts - online, agentAbnormal: 0 },
-    clusters: items.flatMap((it) => it.data.clusters.map((c) => tagCluster(c, it.platform, multi))),
+    clusters: items.flatMap((it) => it.data.clusters),
     alarms: items.flatMap((it) => it.data.alarms).slice(0, 50),
     tasks: [],
     warnings: [...new Set(items.flatMap((it) => it.data.warnings))]
@@ -637,7 +680,7 @@ async function loadDirect(my: number): Promise<void> {
       if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
       for (const c of it.r.data) {
         map[c.id] = it.platform.id
-        all.push(tagCluster(c, it.platform, multi))
+        all.push(c)
       }
     }
     cloud.directOf = map
@@ -657,7 +700,7 @@ async function loadDirect(my: number): Promise<void> {
       if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
       for (const t of it.r.data) {
         map[t.clusterId] = it.platform.id
-        all.push(multi ? { ...t, clusterName: `${it.platform.name} · ${t.clusterName}` } : t)
+        all.push(t)
       }
     }
     cloud.directOf = map

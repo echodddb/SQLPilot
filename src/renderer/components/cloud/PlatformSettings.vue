@@ -56,8 +56,12 @@
           </div>
 
           <div class="frow">
-            <label>名称</label>
-            <input v-model="form.name" :placeholder="form.type === 'oracle' ? '例如：核心业务库' : '例如：生产 OCP / 测试 OCP'" spellcheck="false" />
+            <label>接入名称</label>
+            <input v-model="form.name" :placeholder="form.type === 'oracle' ? '例如：核心业务库' : '例如：perf / 生产集群 A'" spellcheck="false" />
+            <span class="fhint">
+              这条接入配置的别名，会作为「接入名称」单独成列显示在集群 / 租户列表里
+              ——它标识的是「从哪套连接读到的」，与集群自身的名字（DBA_OB_SERVERS 里那个）是两回事。
+            </span>
           </div>
 
           <template v-if="form.type === 'ocp'">
@@ -213,10 +217,12 @@ const msg = ref('')
 const msgKind = ref<'ok' | 'err' | 'warn'>('ok')
 
 onMounted(() => {
-  // 打开面板先带出当前平台：多数时候用户是来改这条连接的（尤其刚配完连不上时）
+  // 默认直接进「新增」：这个面板最常见的用途是再接一套集群 / 环境。
+  // 之前默认预填当前平台（编辑态），改完地址保存就把已有配置覆盖了——
+  // 列表里的「编辑」按钮才是进编辑态的入口，语义也更清楚。
   const active = cloud.platforms.find((p) => p.id === cloud.activeId) || cloud.platforms[0]
-  if (active) edit(active)
-  else reset()
+  const type = active?.type === 'ocp' ? 'ocp' : active?.type === 'oracle' ? 'oracle' : 'obdirect'
+  startNew(type)
 })
 
 /** 编辑起始的连接目标：保存前用它判断"是不是把地址改掉了" */

@@ -234,6 +234,16 @@ export async function tenantDbsAs(platformId: string, tenant: string): Promise<{
   return r.ok ? { rows: (r.data || []) as TenantDbRow[] } : { rows: [], error: r.error }
 }
 
+/** 库 / Schema 下的表清单（MySQL 走 information_schema，Oracle 走 DBA_/ALL_TABLES） */
+export async function tenantTables(
+  platformId: string,
+  tenant: string,
+  input: { schema: string; mode: 'MYSQL' | 'ORACLE'; limit?: number }
+): Promise<{ rows: CloudTenantTableRow[]; error?: string }> {
+  const r = await window.sqlpilot.cloudDirectTenantTables(platformId, tenant, input)
+  return r.ok ? { rows: r.data || [] } : { rows: [], error: r.error }
+}
+
 export async function createDbAs(platformId: string, tenant: string, input: { name: string; charset?: string }) {
   const r = await window.sqlpilot.cloudDirectCreateDb(platformId, tenant, input)
   return r.ok ? { ok: true, message: r.data?.message } : { ok: false, error: r.error || '创建失败' }
@@ -291,7 +301,56 @@ export async function grantAs(
   }
 ) {
   const r = await window.sqlpilot.cloudDirectGrant(platformId, tenant, input)
-  return r.ok ? { ok: true, message: r.data?.message } : { ok: false, error: r.error || '授权失败' }
+  return r.ok
+    ? { ok: true, message: r.data?.message, steps: (r.data as any)?.steps as string[] | undefined }
+    : { ok: false, error: r.error || '授权失败', steps: (r as any).steps as string[] | undefined }
+}
+
+/** 权限回收：与授权一一对应，MySQL 走 ON <db>.*，Oracle 走 FROM "user" */
+export async function revokeAs(
+  platformId: string,
+  tenant: string,
+  input: {
+    name: string
+    host?: string
+    databases?: string[]
+    privileges: string[]
+    mode: 'MYSQL' | 'ORACLE'
+    /** Oracle 对象权限：owner.table */
+    table?: string
+  }
+) {
+  const r = await window.sqlpilot.cloudDirectRevoke(platformId, tenant, input)
+  return r.ok
+    ? { ok: true, message: r.data?.message, steps: (r.data as any)?.steps as string[] | undefined }
+    : { ok: false, error: r.error || '回收失败', steps: (r as any).steps as string[] | undefined }
+}
+
+/** 连接自检：谁在连、有没有 GRANT OPTION —— 授权失败时先看这个 */
+export async function tenantSelfCheck(platformId: string, tenant: string, mode: 'MYSQL' | 'ORACLE') {
+  const r = await window.sqlpilot.cloudDirectTenantSelfCheck(platformId, tenant, mode)
+  return r.ok && r.data ? { ok: true as const, ...r.data } : { ok: false as const, error: r.error || '自检失败' }
+}
+
+/** 已授权限：MySQL 解析 SHOW GRANTS，Oracle 读 DBA_ROLE_PRIVS / DBA_SYS_PRIVS / DBA_TAB_PRIVS */
+export async function grantsOf(
+  platformId: string,
+  tenant: string,
+  input: { name: string; host?: string; mode: 'MYSQL' | 'ORACLE' }
+): Promise<{ rows: CloudDirectGrantRow[]; error?: string }> {
+  const r = await window.sqlpilot.cloudDirectGrants(platformId, tenant, input)
+  return r.ok ? { rows: r.data || [] } : { rows: [], error: r.error }
+}
+
+/** 直连内置告警规则与当前阈值 */
+export async function directAlarmRules(platformId: string) {
+  const r = await window.sqlpilot.cloudDirectAlarmRules(platformId)
+  return r.ok && r.data ? r.data : { rules: [] as CloudDirectAlarmRule[], thresholds: {} as Record<string, number> }
+}
+
+export async function saveDirectAlarmThresholds(platformId: string, patch: Record<string, number>) {
+  const r = await window.sqlpilot.cloudDirectSetAlarmThresholds(platformId, patch)
+  return r.ok ? { ok: true, thresholds: r.data?.thresholds || {} } : { ok: false, error: r.error || '保存失败' }
 }
 
 // ---------------- 任务日志（本地 JSONL） ----------------

@@ -92,7 +92,9 @@
           <h3>活跃告警</h3>
           <button class="link" @click="goAlarms">全部 →</button>
         </div>
-        <div v-if="!ov.alarms.length" class="panel-empty">当前没有活跃告警</div>
+        <div v-if="!ov.alarms.length" class="panel-empty">
+          {{ isDirect ? '当前没有活跃告警（直连模式按内置规则实时评估，条件恢复即消失）' : '当前没有活跃告警' }}
+        </div>
         <ul class="alarm-list">
           <li v-for="a in ov.alarms" :key="a.id">
             <span class="lv" :class="alarmLevel(a.level).tone">{{ alarmLevel(a.level).label }}</span>
@@ -107,20 +109,36 @@
 
       <div class="panel" data-ai="overview.tasks">
         <div class="panel-head" data-src="taskList">
-          <h3>最近任务</h3>
-          <button class="link" @click="goTasks">全部 →</button>
+          <h3>{{ isDirect ? '最近操作' : '最近任务' }}</h3>
+          <button class="link" @click="goTasks">{{ isDirect ? '操作日志 →' : '全部 →' }}</button>
         </div>
-        <div v-if="!ov.tasks.length" class="panel-empty">暂无任务记录</div>
-        <ul class="task-list">
-          <li v-for="t in ov.tasks" :key="t.id">
-            <span class="dot" :class="taskStatus(t.status).tone"></span>
-            <div class="task-body">
-              <div class="task-name">{{ t.name }}</div>
-              <div class="task-sub">{{ t.clusterName || '—' }} · {{ t.creator || '—' }}</div>
-            </div>
-            <span class="task-time">{{ relTime(t.startTime) }}</span>
-          </li>
-        </ul>
+        <!-- 直连没有 OCP 的任务子系统，任务面板改读本地写操作日志，否则永远是"暂无任务记录" -->
+        <template v-if="isDirect">
+          <div v-if="!localOps.length" class="panel-empty">还没有直连写操作记录（建/删租户、改参数、授权都会记在这里）</div>
+          <ul class="task-list">
+            <li v-for="t in localOps" :key="t.id">
+              <span class="dot" :class="t.ok ? 'ok' : 'bad'"></span>
+              <div class="task-body">
+                <div class="task-name">{{ t.action }}<span v-if="t.target" class="task-target"> · {{ t.target }}</span></div>
+                <div class="task-sub">{{ t.message || t.clusterName || '—' }}</div>
+              </div>
+              <span class="task-time">{{ relTime(new Date(t.at).toISOString()) }}</span>
+            </li>
+          </ul>
+        </template>
+        <template v-else>
+          <div v-if="!ov.tasks.length" class="panel-empty">暂无任务记录</div>
+          <ul class="task-list">
+            <li v-for="t in ov.tasks" :key="t.id">
+              <span class="dot" :class="taskStatus(t.status).tone"></span>
+              <div class="task-body">
+                <div class="task-name">{{ t.name }}</div>
+                <div class="task-sub">{{ t.clusterName || '—' }} · {{ t.creator || '—' }}</div>
+              </div>
+              <span class="task-time">{{ relTime(t.startTime) }}</span>
+            </li>
+          </ul>
+        </template>
       </div>
     </div>
   </div>
@@ -129,13 +147,34 @@
 
 <script setup lang="ts">
 /** 云管平台 · 总览：把 OCP 的集群/主机/告警/任务收敛成一屏可判断的看板；悬浮卡片展示每块数据的采集链路 */
-import { computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import CapacityBar from './CapacityBar.vue'
-import { cloud, openCluster, setView } from '../../cloud/state'
+import { activePlatform, cloud, openCluster, setView } from '../../cloud/state'
+import { directTasks } from '../../cloud/directTenant'
 import * as F from '../../cloud/parts'
 
 const ov = computed(() => cloud.overview)
 const editionLabel = computed(() => (ov.value?.info.edition === 'ENTERPRISE' ? '企业版' : ov.value?.info.edition || '—'))
+
+/** 直连模式：任务面板改读本地操作日志 */
+const isDirect = computed(() => cloud.access === 'direct' || activePlatform()?.type === 'obdirect')
+const localOps = ref<{ id: string; at: number; action: string; target: string; message: string; ok: boolean; clusterName: string }[]>([])
+
+async function loadLocalOps(): Promise<void> {
+  if (!isDirect.value) return
+  const r = await directTasks({ page: 1, size: 6 })
+  localOps.value = r.items.map((x) => ({
+    id: x.id,
+    at: x.at,
+    action: x.action,
+    target: x.target,
+    message: x.message,
+    ok: x.ok,
+    clusterName: x.clusterName
+  }))
+}
+onMounted(() => void loadLocalOps())
+watch(() => cloud.updatedAt, () => void loadLocalOps())
 
 const clusterStatus = F.clusterStatus
 const clusterMode = F.clusterMode
@@ -159,11 +198,12 @@ function drill(id: number): void {
   void openCluster(id)
 }
 function goAlarms(): void { void setView('alarms') }
-function goTasks(): void { void setView('tasks') }
+function goTasks(): void { void setView(isDirect.value ? 'dtasks' : 'tasks') }
 </script>
 
 <style scoped>
 .ov { display: flex; flex-direction: column; gap: 14px; }
+.task-target { color: var(--text-faint); font-weight: 400; }
 .ov-warn {
   display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: 9px;
   background: var(--yellow-dim); border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent);

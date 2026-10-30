@@ -90,6 +90,21 @@ export interface CloudHost {
   services: CloudHostService[]
   clusters: string[]
   obproxies: string[]
+  /**
+   * 直连模式补充字段（OCP 主机没有这些）。
+   * 直连的"主机"就是 OBServer 进程所在的机器，能拿到的只有 OB 视图里的信息，
+   * 不能套用 OCP 的 Agent / 系统 / IDC 那套字段——那样界面上会出现一堆空值或错位。
+   */
+  svrPort?: number
+  zone?: string
+  withRootserver?: boolean
+  buildVersion?: string
+  startServiceTime?: string
+  diskHealth?: string
+  cpu?: CapacityStat
+  memory?: CapacityStat
+  dataDisk?: CapacityStat
+  logDisk?: CapacityStat
 }
 
 export interface CloudTenant {
@@ -114,6 +129,10 @@ export interface CloudTenant {
   clusterType?: string
   locked?: boolean
   readonly?: boolean
+  /** 直连模式标记：META$xxx 内部租户（默认在列表里隐藏） */
+  isMeta?: boolean
+  /** 直连模式标记：sys 系统租户 */
+  isSys?: boolean
   description?: string
 }
 

@@ -12,7 +12,9 @@
       <button class="tp-btn" :disabled="cloud.loading" @click="refresh">{{ cloud.loading ? '读取中…' : '刷新' }}</button>
     </div>
 
-    <AlarmRules v-if="cloud.alarmSubTab === 'rule'" data-ai="alarms.rules" />
+    <!-- 直连的规则是 SQLPilot 内置 + 本地阈值，与 OCP 的规则中心不是一回事，各用一套面板 -->
+    <DirectAlarmRules v-if="cloud.alarmSubTab === 'rule' && isDirect" data-ai="alarms.rules" />
+    <AlarmRules v-else-if="cloud.alarmSubTab === 'rule'" data-ai="alarms.rules" />
 
     <template v-else>
       <!-- 分级统计 + 近 24h 趋势 -->
@@ -183,12 +185,17 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   cloud, load, ensureRefData, setAlarmTab, setAlarmLevel, setAlarmScope, setAlarmKeyword, setAlarmPage,
-  setAlarmHours, setAlarmAppType, setAlarmType, resetAlarmFilters, setAlarmSubTab, openAlarm, exportCsv
+  setAlarmHours, setAlarmAppType, setAlarmType, resetAlarmFilters, setAlarmSubTab, openAlarm, exportCsv,
+  activePlatform
 } from '../../cloud/state'
 import { alarmLevel, alarmScope, duration, fmtTime, relTime } from '../../cloud/parts'
 import { pushNotice } from '../../store'
 import AlarmDetail from './alarm/AlarmDetail.vue'
 import AlarmRules from './alarm/AlarmRules.vue'
+import DirectAlarmRules from './alarm/DirectAlarmRules.vue'
+
+/** 直连模式：规则由 SQLPilot 本地评估，用可配阈值的面板；OCP 仍走只读规则中心 */
+const isDirect = computed(() => cloud.vendor === 'ocp' && (cloud.access === 'direct' || activePlatform()?.type === 'obdirect'))
 
 const LEVEL_TABS = [
   { level: 0, label: '全部', tone: 'idle' },
