@@ -297,7 +297,7 @@ const api = {
   cloudTenantCredSave: (id: string, tenant: string, user: string, password: string) =>
     ipcRenderer.invoke('cloud:tenantCredSave', { id, tenant, user, password }),
   cloudTenantCredClear: (id: string, tenant: string) => ipcRenderer.invoke('cloud:tenantCredClear', { id, tenant }),
-  cloudDirectTestTenantLogin: (id: string, tenant: string) => ipcRenderer.invoke('cloud:directTestTenantLogin', { id, tenant }),
+  cloudDirectTestTenantLogin: (id: string, tenant: string, mode?: 'MYSQL' | 'ORACLE') => ipcRenderer.invoke('cloud:directTestTenantLogin', { id, tenant, mode }),
   // 租户内部对象（基于凭据）
   cloudDirectTenantDbsAs: (id: string, tenant: string) => ipcRenderer.invoke('cloud:directTenantDbsAs', { id, tenant }),
   cloudDirectCreateDb: (id: string, tenant: string, input: { name: string; charset?: string }) =>

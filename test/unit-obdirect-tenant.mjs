@@ -17,6 +17,10 @@ import {
   collationsOf,
   formatBytes,
   localityOf,
+  maskPasswordInSql,
+  normalizePrivileges,
+  ORACLE_PRIVILEGES,
+  privilegesOf,
   normalizeCharset,
   normalizePrimaryZone,
   parseSize,
@@ -295,5 +299,106 @@ ok(
   '直连串优先用 OBServer IP'
 )
 eq(buildConnectionStrings({ host: '', cluster: 'c', tenant: 't', mode: 'MYSQL' }), [], '缺少主机时不出连接串')
+
+
+// ---------- 管理员密码：Oracle 用双引号 + sys，MySQL 用单引号 + root ----------
+{
+  eq(
+    buildSetRootPasswordSql('1qaz@WSX3edc', 'ORACLE'),
+    'ALTER USER sys IDENTIFIED BY "1qaz@WSX3edc"',
+    'Oracle 模式：管理员是 sys，密码用双引号（标识符）'
+  )
+  eq(
+    buildSetRootPasswordSql('1qaz@WSX3edc', 'MYSQL'),
+    "ALTER USER root IDENTIFIED BY '1qaz@WSX3edc'",
+    'MySQL 模式：管理员是 root，密码用单引号（字符串字面量）'
+  )
+  ok(
+    buildSetRootPasswordSql('a"b', 'ORACLE').includes('"a""b"'),
+    'Oracle 密码里的双引号成对转义'
+  )
+  throws(() => buildSetRootPasswordSql(''), /密码不能为空/, '空密码被拒')
+  eq(
+    maskPasswordInSql('ALTER USER sys IDENTIFIED BY "secret"'),
+    'ALTER USER sys IDENTIFIED BY ***',
+    '任务日志/界面里 Oracle 密码被掩码'
+  )
+  eq(
+    maskPasswordInSql("ALTER USER root IDENTIFIED BY 'secret'"),
+    'ALTER USER root IDENTIFIED BY ***',
+    '任务日志/界面里 MySQL 密码被掩码'
+  )
+  eq(maskPasswordInSql('ALTER TENANT t LOCK'), 'ALTER TENANT t LOCK', '非改密语句原样返回')
+}
+
+// ---------- 勾选式授权：白名单归一化 ----------
+{
+  eq(normalizePrivileges(['select', 'INSERT', ' select '], 'MYSQL'), ['SELECT', 'INSERT'], '大写 + 去重 + 去空白')
+  eq(normalizePrivileges('select,update', 'MYSQL'), ['SELECT', 'UPDATE'], '兼容旧的逗号串入参')
+  eq(normalizePrivileges(['connect', 'resource'], 'ORACLE'), ['CONNECT', 'RESOURCE'], 'Oracle 角色')
+  throws(() => normalizePrivileges(['SELECT; DROP TABLE x'], 'MYSQL'), /不支持的权限/, '权限串不能夹带 SQL')
+  throws(() => normalizePrivileges(['CONNECT'], 'MYSQL'), /不支持的权限/, 'MySQL 不接受 Oracle 角色')
+
+  // 渲染层的勾选清单必须与主进程白名单一致，否则会出现"界面能勾、执行被拒"
+  const front = await import('../src/renderer/cloud/directPrivs.ts')
+  eq([...front.MYSQL_PRIVS], privilegesOf('MYSQL'), '渲染层 MySQL 权限清单与主进程一致')
+  eq([...front.ORACLE_PRIVS], privilegesOf('ORACLE'), '渲染层 Oracle 权限清单与主进程一致')
+  ok(front.defaultPrivs('ORACLE').every((p) => ORACLE_PRIVILEGES.includes(p)), '默认勾选在 Oracle 白名单内')
+}
+
+// ---------- 任务日志：running → 终态、按 id 合并、旧记录兼容 ----------
+{
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const tl = await import('../src/main/cloud/obdirect/tasklog.ts')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obtask-'))
+  tl.configureTaskLog(dir)
+
+  const base = {
+    id: 't1',
+    at: 1_000,
+    platformId: 'p1',
+    platformName: '集群A',
+    clusterName: '集群A',
+    action: 'DROP TENANT',
+    target: 'app1',
+    status: 'running',
+    ok: false,
+    message: '已提交，正在执行…',
+    steps: [],
+    durationMs: 0
+  }
+  tl.appendTask(base)
+  eq(tl.getTask('t1').status, 'running', '提交后是执行中')
+  eq(tl.taskStats(), { total: 1, running: 1, ok: 0, fail: 0 }, '执行中计入 stats')
+
+  tl.finishTask('t1', { status: 'ok', message: '已删除租户 app1', steps: ['DROP TENANT app1'], finishedAt: 3_000 })
+  const done = tl.getTask('t1')
+  eq(done.status, 'ok', '完成后状态为成功')
+  eq(done.steps, ['DROP TENANT app1'], '完成记录带回执行语句')
+  eq(done.durationMs, 2_000, '耗时 = 结束 - 提交')
+  eq(tl.listTasks({}).items.length, 1, '同一任务只出现一次（读时按 id 合并）')
+  eq(tl.taskStats(), { total: 1, running: 0, ok: 1, fail: 0 }, 'stats 跟着终态走')
+
+  // 旧版本记录只有 ok 字段：要能读出来，不能整条丢掉
+  fs.appendFileSync(
+    tl.taskLogPath(),
+    `${JSON.stringify({ id: 'old1', at: 500, action: 'CREATE TENANT', target: 'x', ok: false, message: 'boom', steps: [], durationMs: 12 })}\n`
+  )
+  eq(tl.getTask('old1').status, 'fail', '旧记录按 ok=false 推断为失败')
+  eq(tl.taskStats().total, 2, '旧记录计入总数')
+
+  const listed = tl.listTasks({ status: 'ok' })
+  eq(listed.total, 1, '按状态筛选')
+  eq(listed.items[0].id, 't1', '筛出成功那条')
+  eq(listed.clusters.includes('集群A'), true, '集群清单去重后返回')
+
+  const cleared = tl.clearTasks({ before: 800 })
+  eq(cleared.removed, 1, '按时间清理只删早期记录')
+  eq(tl.taskStats().total, 1, '较新的记录保留')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+}
 
 console.log(`\x1b[32m✓ unit-obdirect-tenant: ${passed} 个断言通过\x1b[0m`)

@@ -445,8 +445,70 @@ export function buildConnectionStrings(info: ConnectInfo): ConnCommand[] {
   return out
 }
 
-/** 改 root 密码：必须在租户内执行，调用方需连到该租户 */export function buildSetRootPasswordSql(password: string): string {
+/** 各兼容模式的管理员账号：Oracle 租户的管理员是 sys，不是 root */
+export const ORACLE_ADMIN_USER = 'sys'
+export const adminUserOf = (mode: 'MYSQL' | 'ORACLE'): string => (mode === 'ORACLE' ? ORACLE_ADMIN_USER : 'root')
+
+/**
+ * 改管理员密码：必须在租户内执行，调用方需连到该租户。
+ *
+ * 两种兼容模式的管理员账号与语法都不同：
+ *   MySQL  —— ALTER USER root IDENTIFIED BY 'pw'（字符串字面量，单引号）
+ *   Oracle —— ALTER USER sys IDENTIFIED BY "pw"（Oracle 的密码是标识符，必须双引号；
+ *             写成单引号会被当成字符串常量语法直接报错，密码含 @/特殊字符时更是如此）
+ */
+export function buildSetRootPasswordSql(password: string, mode: 'MYSQL' | 'ORACLE' = 'MYSQL'): string {
   const pw = String(password ?? '')
   if (!pw) throw new Error('密码不能为空')
+  if (mode === 'ORACLE') {
+    // 双引号标识符里再出现双引号要成对转义
+    return `ALTER USER ${ORACLE_ADMIN_USER} IDENTIFIED BY "${pw.replace(/"/g, '""')}"`
+  }
   return `ALTER USER root IDENTIFIED BY ${sqlString(pw)}`
+}
+
+// ---------------------------------------------------------------- 授权与密码
+
+/**
+ * 可授权的权限 / 角色白名单。
+ *
+ * 勾选式授权的入参最终会被拼进 GRANT 语句，不校验就等于把 SQL 交给界面自由书写；
+ * 因此主进程只放行这两张表里的项。渲染层 `renderer/cloud/directPrivs.ts` 有同一份清单
+ * （那边不能 import 本模块，避免 mysql2 进渲染层 bundle），单测会校验两边一致。
+ */
+export const MYSQL_PRIVILEGES = [
+  'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'INDEX',
+  'EXECUTE', 'CREATE VIEW', 'SHOW VIEW', 'TRIGGER', 'REFERENCES', 'ALL PRIVILEGES'
+]
+
+export const ORACLE_PRIVILEGES = [
+  'CONNECT', 'RESOURCE', 'DBA', 'CREATE SESSION', 'CREATE TABLE', 'CREATE VIEW',
+  'CREATE PROCEDURE', 'CREATE SEQUENCE', 'SELECT ANY TABLE', 'INSERT ANY TABLE',
+  'UPDATE ANY TABLE', 'DELETE ANY TABLE', 'UNLIMITED TABLESPACE'
+]
+
+export function privilegesOf(mode: 'MYSQL' | 'ORACLE'): string[] {
+  return mode === 'ORACLE' ? [...ORACLE_PRIVILEGES] : [...MYSQL_PRIVILEGES]
+}
+
+/**
+ * 归一化勾选结果：去重、转大写、校验白名单。
+ * 非法项直接报错而不是静默丢弃——静默丢掉会让用户以为授上了。
+ */
+export function normalizePrivileges(raw: string | string[] | undefined, mode: 'MYSQL' | 'ORACLE'): string[] {
+  const allow = privilegesOf(mode)
+  const list = (Array.isArray(raw) ? raw : String(raw ?? '').split(','))
+    .map((x) => String(x ?? '').trim().replace(/\s+/g, ' ').toUpperCase())
+    .filter(Boolean)
+  const out: string[] = []
+  for (const item of list) {
+    if (!allow.includes(item)) throw new Error(`不支持的权限：${item}（可选：${allow.join(' / ')}）`)
+    if (!out.includes(item)) out.push(item)
+  }
+  return out
+}
+
+/** 把 ALTER USER … IDENTIFIED BY 'xxx' / "xxx" 里的密码换成 ***，用于界面与任务日志 */
+export function maskPasswordInSql(sql: string): string {
+  return String(sql || '').replace(/(IDENTIFIED\s+BY\s+)('[^']*'|"[^"]*")/i, '$1***')
 }

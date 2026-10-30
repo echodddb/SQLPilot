@@ -35,6 +35,8 @@ declare type SftpProgress = {
 }
 
 // ---------------- 云管平台（OceanBase OCP） ----------------
+// 直连任务日志行（本地 JSONL；status=running 表示已提交、尚未结束）
+declare type CloudDirectTaskRow = import('../main/cloud/obdirect/tasklog').TaskRecord
 declare type CloudPlatformView = import('../main/cloud/service').CloudPlatformView
 
 declare type CloudOcpInfo = import('../main/cloud/ocp').OcpInfo
@@ -416,8 +418,8 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       cloudDirectResourcePools(id: string): Promise<CloudApi<{ id: number; name: string; tenantId: number; unitCount: number; unitConfigId: number; zoneList: string }[]>>
       cloudDirectCreateTenant(id: string, input: CloudDirectCreateTenantInput, runId?: string): Promise<CloudApi<{ message: string; steps: string[]; warning?: string; connections?: { label: string; command: string }[] }>>
       onDirectTenantLog(cb: (e: { runId: string; at: number; phase: string; status: 'start' | 'ok' | 'warn' | 'fail'; title: string; sql?: string; message?: string }) => void): () => void
-      cloudDirectDropTenant(id: string, tenantName: string): Promise<CloudApi<{ message: string }>>
-      cloudDirectSetTenantLocked(id: string, tenantName: string, locked: boolean): Promise<CloudApi<{ message: string }>>
+      cloudDirectDropTenant(id: string, tenantName: string): Promise<CloudApi<{ message: string; taskId?: string }>>
+      cloudDirectSetTenantLocked(id: string, tenantName: string, locked: boolean): Promise<CloudApi<{ message: string; taskId?: string }>>
       cloudDirectCreateUnitConfig(id: string, spec: { name: string; maxCpu: number; minMemory: number; maxMemory: number; logDiskSize: number }): Promise<CloudApi<{ message: string; steps: string[] }>>
       cloudDirectDropUnitConfig(id: string, name: string): Promise<CloudApi<{ message: string; steps: string[] }>>
       cloudDirectDropResourcePool(id: string, name: string): Promise<CloudApi<{ message: string }>>
@@ -435,18 +437,20 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
         sqlId: string; sqlText: string; executions: number; avgElapsedMs: number; maxElapsedMs: number; rowsOut: number; retCode: number; lastUs: number
       }[]>>
       /** 直连任务日志（本地文本） */
-      cloudDirectTasks(q?: { page?: number; size?: number; keyword?: string; action?: string; status?: string }): Promise<CloudApi<{
-        items: { id: string; at: number; platformId: string; platformName: string; clusterName: string; action: string; target: string; ok: boolean; message: string; steps: string[]; durationMs: number }[]
+      cloudDirectTasks(q?: { page?: number; size?: number; keyword?: string; action?: string; status?: string; cluster?: string; since?: number }): Promise<CloudApi<{
+        items: CloudDirectTaskRow[]
         total: number; page: number; size: number
+        stats: { total: number; running: number; ok: number; fail: number }
+        clusters: string[]
       }>>
-      cloudDirectTaskDetail(id: string): Promise<CloudApi<{ id: string; at: number; action: string; target: string; ok: boolean; message: string; steps: string[]; durationMs: number; platformName: string; clusterName: string } | null>>
+      cloudDirectTaskDetail(id: string): Promise<CloudApi<CloudDirectTaskRow | null>>
       cloudDirectTaskActions(): Promise<CloudApi<string[]>>
       cloudDirectClearTasks(opts?: { before?: number }): Promise<CloudApi<{ removed: number; kept: number }>>
       /** 业务租户凭据 */
       cloudTenantCredStatus(id: string, tenant: string): Promise<CloudApi<{ has: boolean; user?: string }>>
       cloudTenantCredSave(id: string, tenant: string, user: string, password: string): Promise<CloudApi<{ keptPassword: boolean }>>
       cloudTenantCredClear(id: string, tenant: string): Promise<CloudApi<{ ok: boolean }>>
-      cloudDirectTestTenantLogin(id: string, tenant: string): Promise<CloudApi<{ message: string }>>
+      cloudDirectTestTenantLogin(id: string, tenant: string, mode?: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ message: string }>>
       /** 租户内部对象（需要凭据） */
       cloudDirectTenantDbsAs(id: string, tenant: string): Promise<CloudApi<{ name: string; charset: string; collation: string; system: boolean }[]>>
       cloudDirectCreateDb(id: string, tenant: string, input: { name: string; charset?: string }): Promise<CloudApi<{ message: string }>>
@@ -454,7 +458,7 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       cloudDirectTenantUsersAs(id: string, tenant: string, mode: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ user: string; host: string; status: string }[]>>
       cloudDirectCreateUser(id: string, tenant: string, input: { name: string; host?: string; password: string; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
       cloudDirectDropUser(id: string, tenant: string, input: { name: string; host?: string; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
-      cloudDirectGrant(id: string, tenant: string, input: { name: string; host?: string; database?: string; privileges: string; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
+      cloudDirectGrant(id: string, tenant: string, input: { name: string; host?: string; database?: string; databases?: string[]; privileges: string | string[]; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
       cloudDirectGrants(id: string, tenant: string, input: { name: string; host?: string }): Promise<CloudApi<string[]>>
       cloudDirectTenantConnections(id: string, tenant: string, mode: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ label: string; command: string }[]>>
       cloudClusters(id: string): Promise<CloudApi<CloudCluster[]>>

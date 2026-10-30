@@ -141,19 +141,24 @@ export async function execWrite(
 /**
  * 以指定租户身份执行一条语句（临时连接，用完即关）。
  *
- * 只用于「新建租户后设置 root 密码」这类必须落在租户内的动作：
+ * 只用于「新建租户后设置管理员密码」这类必须落在租户内的动作：
  * sys 租户无法代改用户密码，只能切到新租户执行 ALTER USER。
  * 不走连接池：租户是刚建出来的，池里没有、也不该为它常驻。
+ *
+ * user 用于改登录账号：Oracle 兼容模式的管理员是 sys（不是 root），
+ * 沿用平台用户名（root@sys → root）会得到一个不存在的账号。
+ * password 传新租户「当前」的密码——刚建出来时是空串，设完密码后才是新密码。
  */
 export async function execAsTenant(
   p: ObDirectPlatform,
   password: string,
   tenant: string,
   sql: string,
-  params: any[] = []
+  params: any[] = [],
+  user?: string
 ): Promise<void> {
   const at = p.username.indexOf('@')
-  const base = at >= 0 ? p.username.slice(0, at) : p.username
+  const base = user || (at >= 0 ? p.username.slice(0, at) : p.username)
   const conn = await mysql.createConnection({
     host: p.host,
     port: p.port,

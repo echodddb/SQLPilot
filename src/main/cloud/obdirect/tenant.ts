@@ -20,7 +20,9 @@ import {
   buildDropTenantSql,
   buildDropResourcePoolSql,
   buildLockTenantSql,
+  adminUserOf,
   buildSetRootPasswordSql,
+  maskPasswordInSql,
   buildWhitelistSql,
   buildConnectionStrings,
   formatBytes,
@@ -31,6 +33,7 @@ import {
 } from './tenantSql'
 
 const str = (v: any): string => (v === undefined || v === null ? '' : String(v))
+
 const num = (v: any): number => {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
@@ -397,25 +400,34 @@ export async function createTenant(
       }
     }
 
-    // 3) root 密码：必须连到新租户执行，租户可能尚未就绪，失败只提示
+    // 3) 管理员密码：必须连到新租户执行，租户可能尚未就绪，失败只提示。
+    //    Oracle 租户的管理员是 sys、密码要用双引号；MySQL 才是 root + 单引号。
     const rootPassword = String(input.rootPassword || '')
     if (rootPassword) {
+      const adminUser = adminUserOf(input.mode)
+      const pwdSql = buildSetRootPasswordSql(rootPassword, input.mode)
+      const shown = maskPasswordInSql(pwdSql)
       emit({
         at: now(),
         phase: 'password',
         status: 'start',
-        title: '设置 root 密码',
-        sql: `ALTER USER root IDENTIFIED BY '***'（在租户 ${name} 内执行）`
+        title: `设置 ${adminUser} 密码`,
+        sql: `${shown}（在租户 ${name} 内执行）`
       })
       try {
-        await execAsTenant(p, rootPassword, name, buildSetRootPasswordSql(rootPassword))
-        steps.push(`ALTER USER root IDENTIFIED BY '***'（在租户 ${name} 内执行）`)
-        emit({ at: now(), phase: 'password', status: 'ok', title: '设置 root 密码' })
+        // 新租户管理员初始密码为空：必须用空密码连进去再改。
+        // 早先这里传的是"新密码"，连接阶段就被拒（Access denied），
+        // 于是每次建租户都会带一条"密码未能自动设置"的警告。
+        await execAsTenant(p, '', name, pwdSql, [], adminUser)
+        steps.push(`${shown}（在租户 ${name} 内执行）`)
+        emit({ at: now(), phase: 'password', status: 'ok', title: `设置 ${adminUser} 密码` })
       } catch (e: any) {
-        const msg = `租户已创建，但 root 密码未能自动设置（${e?.message ?? e}）。` +
-          `请用空密码登录 ${name} 后执行 ALTER USER root IDENTIFIED BY '<新密码>'。`
+        const hint = input.mode === 'ORACLE'
+          ? `请用空密码以 sys@${name} 登录后执行 ALTER USER sys IDENTIFIED BY "<新密码>"。`
+          : `请用空密码登录 ${name} 后执行 ALTER USER root IDENTIFIED BY '<新密码>'。`
+        const msg = `租户已创建，但 ${adminUser} 密码未能自动设置（${e?.message ?? e}）。` + hint
         warnings.push(msg)
-        emit({ at: now(), phase: 'password', status: 'warn', title: '设置 root 密码', message: msg })
+        emit({ at: now(), phase: 'password', status: 'warn', title: `设置 ${adminUser} 密码`, message: msg })
       }
     }
 

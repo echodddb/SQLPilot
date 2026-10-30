@@ -2899,8 +2899,8 @@ export function registerIpc(): void {
     { const r = cloudSaveTenantCred(String(id || ''), String(tenant || ''), String(user || ''), String(password ?? '')); return r.ok ? { ok: true, data: { keptPassword: !!r.keptPassword } } : { ok: false, error: r.error } })
   ipcMain.handle('cloud:tenantCredClear', (_e, { id, tenant }: { id: string; tenant: string }) =>
     ({ ok: true, data: cloudClearTenantCred(String(id || ''), String(tenant || '')) }))
-  ipcMain.handle('cloud:directTestTenantLogin', (_e, { id, tenant }: { id: string; tenant: string }) =>
-    cloudDirectTestTenantLogin(String(id || ''), String(tenant || '')))
+  ipcMain.handle('cloud:directTestTenantLogin', (_e, { id, tenant, mode }: { id: string; tenant: string; mode?: string }) =>
+    cloudDirectTestTenantLogin(String(id || ''), String(tenant || ''), mode === 'ORACLE' ? 'ORACLE' : 'MYSQL'))
   ipcMain.handle('cloud:directTenantDbsAs', (_e, { id, tenant }: { id: string; tenant: string }) =>
     cloudDirectTenantDbsAs(String(id || ''), String(tenant || '')))
   ipcMain.handle('cloud:directCreateDb', (_e, { id, tenant, input }: any) =>

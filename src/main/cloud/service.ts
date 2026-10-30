@@ -12,7 +12,7 @@ import * as obd from './obdirect'
 import type { ObDirectPlatform } from './obdirect'
 import * as obin from './obdirect/tenantIn'
 import type { TenantLogin } from './obdirect/conn'
-import { appendTask, listTasks, getTask, clearTasks, taskActions, configureTaskLog } from './obdirect/tasklog'
+import { appendTask, finishTask, listTasks, getTask, clearTasks, taskActions, configureTaskLog } from './obdirect/tasklog'
 import {
   OcpClient,
   normalizeBase,
@@ -972,6 +972,7 @@ async function runWrite(
       clusterName: p.name,
       action,
       target: detail,
+      status: r.ok ? 'ok' : 'fail',
       ok: r.ok,
       message: r.message,
       steps: r.steps || [],
@@ -989,6 +990,7 @@ async function runWrite(
       clusterName: platformNameSafe(id),
       action,
       target: detail,
+      status: 'fail',
       ok: false,
       message: msg,
       steps: [],
@@ -1001,6 +1003,54 @@ async function runWrite(
 /** 任务 id：时间戳 36 进制 + 随机后缀，足够避免同毫秒撞车 */
 function taskId(at: number): string {
   return `t${at.toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
+/**
+ * 后台任务：提交时落一条 running 记录并立即返回 taskId，执行完再追加终态记录。
+ *
+ * 为什么需要：删除租户是 DROP TENANT，实例忙时要跑几十秒；早先界面同步等它，
+ * 弹窗整个执行期间既不能关也没有进度，观感就是"卡死、关不掉"。
+ * 现在提交即返回，用户可以直接关掉页面，回「任务日志」看结果。
+ */
+function startBackgroundTask(
+  id: string,
+  action: string,
+  target: string,
+  run: (p: ObDirectPlatform, pw: string) => Promise<{ ok: boolean; message: string; steps?: string[] }>
+): { taskId: string; platformName: string } {
+  // 平台不存在/没密码这类错误要在提交阶段就报出来，而不是写一条注定失败的任务
+  const { p, pw } = requireDirect(id)
+  const started = Date.now()
+  const tid = taskId(started)
+  appendTask({
+    id: tid,
+    at: started,
+    platformId: id,
+    platformName: p.name,
+    clusterName: p.name,
+    action,
+    target,
+    status: 'running',
+    ok: false,
+    message: '已提交，正在执行…',
+    steps: [],
+    durationMs: 0
+  })
+  void (async () => {
+    try {
+      const r = await run(p, pw)
+      appendAudit({
+        kind: 'ui.error',
+        detail: `[直连写操作] ${action} ${target} → ${r.ok ? '成功' : '失败'}：${r.message}`
+      } as any)
+      finishTask(tid, { status: r.ok ? 'ok' : 'fail', message: r.message, steps: r.steps })
+    } catch (e: any) {
+      const msg = e?.message || String(e)
+      appendAudit({ kind: 'ui.error', detail: `[直连写操作] ${action} ${target} → 异常：${msg}` } as any)
+      finishTask(tid, { status: 'fail', message: msg })
+    }
+  })()
+  return { taskId: tid, platformName: p.name }
 }
 
 function platformNameSafe(id: string): string {
@@ -1166,6 +1216,7 @@ async function runTenantWrite(
       clusterName: platformNameSafe(id),
       action,
       target: `${tenant} / ${target}`,
+      status: r.ok ? 'ok' : 'fail',
       ok: r.ok,
       message: r.message,
       steps: r.steps,
@@ -1182,6 +1233,7 @@ async function runTenantWrite(
       clusterName: platformNameSafe(id),
       action,
       target: `${tenant} / ${target}`,
+      status: 'fail',
       ok: false,
       message: msg,
       steps: [],
@@ -1193,10 +1245,12 @@ async function runTenantWrite(
 
 export const directTestTenantLogin = (
   id: string,
-  tenant: string
+  tenant: string,
+  mode: 'MYSQL' | 'ORACLE' = 'MYSQL'
 ): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
   wrap(async () => {
-    const r = await withTenantLogin(id, tenant, (p, login) => obin.testTenantLogin(p, login))
+    // Oracle 模式的探测语句与 MySQL 不同，必须把模式透传下去
+    const r = await withTenantLogin(id, tenant, (p, login) => obin.testTenantLogin(p, login, mode))
     if (!r.ok) throw new Error(r.message)
     return { message: r.message }
   })
@@ -1247,7 +1301,14 @@ export const directDropUser = (
 export const directGrant = (
   id: string,
   tenant: string,
-  input: { name: string; host?: string; database?: string; privileges: string; mode: 'MYSQL' | 'ORACLE' }
+  input: {
+    name: string
+    host?: string
+    database?: string
+    databases?: string[]
+    privileges: string | string[]
+    mode: 'MYSQL' | 'ORACLE'
+  }
 ): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
   runTenantWrite(id, tenant, 'GRANT', String(input?.name || ''), (p, login) => obin.grantAs(p, login, input))
 
@@ -1309,6 +1370,7 @@ export const directCreateTenant = (
       clusterName: p.name,
       action: 'CREATE TENANT',
       target: String(input?.name || ''),
+      status: r.ok ? 'ok' : 'fail',
       ok: r.ok,
       message: r.warning ? `${r.message}（${r.warning}）` : r.message,
       steps: r.steps,
@@ -1320,26 +1382,44 @@ export const directCreateTenant = (
   })
 }
 
+/** 删除租户：提交到后台执行，立即返回 taskId（结果在「任务日志」里看） */
 export const directDropTenant = async (
   id: string,
   tenantName: string
-): Promise<{ ok: boolean; data?: { message: string }; error?: string }> => {
-  const r = await runWrite(id, 'DROP TENANT', tenantName, (p, pw) => obd.dropTenantDirect(p, pw, tenantName))
-  // 凭据的键是「平台 + 租户名」，没有租户 ID 参与。删除后若再建同名租户，
-  // 旧凭据会被新租户直接继承（表现为新租户莫名其妙能登进旧账号）。
-  // 删除成功即清除，保证同名新租户从"未录入"开始。
-  if (r.ok) clearTenantCredential(id, String(tenantName || '').trim())
-  return r
+): Promise<{ ok: boolean; data?: { message: string; taskId?: string }; error?: string }> => {
+  try {
+    const name = String(tenantName || '').trim()
+    const { taskId: tid } = startBackgroundTask(id, 'DROP TENANT', name, async (p, pw) => {
+      const r = await obd.dropTenantDirect(p, pw, name)
+      // 凭据的键是「平台 + 租户名」，没有租户 ID 参与。删除后若再建同名租户，
+      // 旧凭据会被新租户直接继承（表现为新租户莫名其妙能登进旧账号）。
+      // 删除成功即清除，保证同名新租户从"未录入"开始。
+      if (r.ok) clearTenantCredential(id, name)
+      return r
+    })
+    return { ok: true, data: { taskId: tid, message: `已提交删除租户 ${name}，可在「任务日志」查看结果` } }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) }
+  }
 }
 
-export const directSetTenantLocked = (
+/** 锁定 / 解锁：同样后台执行，避免实例慢时把弹窗卡住 */
+export const directSetTenantLocked = async (
   id: string,
   tenantName: string,
   locked: boolean
-): Promise<{ ok: boolean; data?: { message: string }; error?: string }> =>
-  runWrite(id, locked ? 'LOCK TENANT' : 'UNLOCK TENANT', tenantName, (p, pw) =>
-    obd.setTenantLockedDirect(p, pw, tenantName, locked)
-  )
+): Promise<{ ok: boolean; data?: { message: string; taskId?: string }; error?: string }> => {
+  try {
+    const name = String(tenantName || '').trim()
+    const action = locked ? 'LOCK TENANT' : 'UNLOCK TENANT'
+    const { taskId: tid } = startBackgroundTask(id, action, name, (p, pw) =>
+      obd.setTenantLockedDirect(p, pw, name, locked)
+    )
+    return { ok: true, data: { taskId: tid, message: `${locked ? '锁定' : '解锁'}请求已提交，可在「任务日志」查看结果` } }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) }
+  }
+}
 
 /** 新建 Unit 规格（某个集群内，独立于建租户流程） */
 export const directCreateUnitConfig = (

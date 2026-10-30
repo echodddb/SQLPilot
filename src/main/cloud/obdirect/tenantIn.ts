@@ -8,12 +8,11 @@
  */
 
 import { qAs, execAs, type ObDirectPlatform, type TenantLogin } from './conn'
+import { normalizePrivileges } from './tenantSql'
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 const HOST_RE = /^[%A-Za-z0-9_.:\-]+$/
 const CHARSET_RE = /^[A-Za-z0-9_]+$/
-/** 权限串：只允许字母、逗号、空格（GRANT SELECT, INSERT ON ...） */
-const PRIV_RE = /^[A-Za-z_,\s]+$/
 
 /** 不允许删除的系统库（MySQL 模式） */
 export const SYSTEM_DATABASES = ['information_schema', 'mysql', 'oceanbase', 'sys', '__recyclebin']
@@ -40,10 +39,21 @@ export interface OpResult {
   steps: string[]
 }
 
-/** 用凭据试连一次，确认账号可用 */
-export async function testTenantLogin(p: ObDirectPlatform, login: TenantLogin): Promise<{ ok: boolean; message: string }> {
+/**
+ * 用凭据试连一次，确认账号可用。
+ *
+ * Oracle 兼容模式不认「SELECT 1」（没有 FROM）：拿 MySQL 的探测语句去试会报语法错，
+ * 于是凭据其实可用、界面却提示"连接测试未通过"，用户重进详情又发现能查到用户列表。
+ * 这里按模式选探测语句。
+ */
+export async function testTenantLogin(
+  p: ObDirectPlatform,
+  login: TenantLogin,
+  mode: 'MYSQL' | 'ORACLE' = 'MYSQL'
+): Promise<{ ok: boolean; message: string }> {
+  const probe = mode === 'ORACLE' ? 'SELECT 1 AS "OK" FROM DUAL' : 'SELECT 1 AS ok'
   try {
-    const rows = await qAs(p, login, 'SELECT 1 AS ok')
+    const rows = await qAs(p, login, probe)
     return { ok: rows.length > 0, message: rows.length ? '连接成功' : '连接成功（无返回）' }
   } catch (e: any) {
     return { ok: false, message: e?.message ?? String(e) }
@@ -182,32 +192,66 @@ export async function dropUserAs(
   }
 }
 
-/** 授权：MySQL 授到库级；Oracle 授角色 */
+/**
+ * 授权（勾选式）。
+ *
+ * MySQL：勾多个库就逐库执行一条 GRANT；不勾库 = *.*（所有库）。
+ * Oracle：角色/系统权限直接 GRANT ... TO "user"。
+ * 权限来自界面勾选，统一走白名单归一化；中途失败会把已执行的语句一并带回，
+ * 让用户知道断在哪一条（GRANT 不可回滚）。
+ */
 export async function grantAs(
   p: ObDirectPlatform,
   login: TenantLogin,
-  input: { name: string; host?: string; database?: string; privileges: string; mode: 'MYSQL' | 'ORACLE' }
+  input: {
+    name: string
+    host?: string
+    /** MySQL：多库；空数组 = 所有库 */
+    databases?: string[]
+    /** 兼容旧的单库入参 */
+    database?: string
+    privileges: string | string[]
+    mode: 'MYSQL' | 'ORACLE'
+  }
 ): Promise<OpResult> {
+  const steps: string[] = []
   try {
     const name = assertIdent(input.name, '账号名')
-    const priv = String(input.privileges || '').trim()
-    if (!priv) return { ok: false, message: '请填写权限', steps: [] }
-    if (!PRIV_RE.test(priv)) return { ok: false, message: `权限串非法：${priv}`, steps: [] }
+    const priv = normalizePrivileges(input.privileges, input.mode)
+    if (!priv.length) return { ok: false, message: '请至少勾选一项权限', steps: [] }
 
     if (input.mode === 'ORACLE') {
-      const sql = `GRANT ${priv.toUpperCase()} TO "${name}"`
+      const sql = `GRANT ${priv.join(', ')} TO "${name}"`
       await execAs(p, login, sql)
-      return { ok: true, message: `已授予 ${name}：${priv}`, steps: [sql] }
+      steps.push(sql)
+      return { ok: true, message: `已授予 ${name}：${priv.join(', ')}`, steps }
     }
+
     const host = String(input.host || '%').trim() || '%'
     if (!HOST_RE.test(host)) return { ok: false, message: `Host 非法：${host}`, steps: [] }
-    const db = String(input.database || '').trim()
-    const on = db ? `${q(db)}.*` : '*.*'
-    const sql = `GRANT ${priv.toUpperCase()} ON ${on} TO ${lit(name)}@${lit(host)}`
-    await execAs(p, login, sql)
-    return { ok: true, message: `已授予 ${name}@${host} 在 ${db || '所有库'} 上的 ${priv}`, steps: [sql] }
+    const rawDbs = Array.isArray(input.databases)
+      ? input.databases
+      : String(input.database || '').trim()
+        ? [String(input.database)]
+        : []
+    const dbs = rawDbs.map((d) => assertIdent(String(d).trim(), '库名'))
+    const targets = dbs.length ? dbs : ['']
+
+    for (const db of targets) {
+      const on = db ? `${q(db)}.*` : '*.*'
+      const sql = `GRANT ${priv.join(', ')} ON ${on} TO ${lit(name)}@${lit(host)}`
+      await execAs(p, login, sql)
+      steps.push(sql)
+    }
+    const where = dbs.length ? dbs.join('、') : '所有库'
+    return { ok: true, message: `已授予 ${name}@${host} 在 ${where} 上的 ${priv.join(', ')}`, steps }
   } catch (e: any) {
-    return { ok: false, message: e?.message ?? String(e), steps: [] }
+    const msg = e?.message ?? String(e)
+    return {
+      ok: false,
+      message: steps.length ? `${msg}（已执行 ${steps.length} 条授权，未回滚）` : msg,
+      steps
+    }
   }
 }
 

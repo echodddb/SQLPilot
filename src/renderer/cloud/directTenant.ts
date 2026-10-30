@@ -4,7 +4,8 @@
  * 刻意与 `cloud/state.ts` 里的 OCP 租户动作分开：
  *   - OCP：cloudCreateTenant / cloudDeleteTenant / cloudTenantSetLocked，走 REST + 任务框架，返回 taskId；
  *   - 直连：cloudDirectCreateTenant / cloudDirectDropTenant / cloudDirectSetTenantLocked，
- *           在 sys 租户里直接执行 DDL，**没有 taskId、没有回滚**。
+ *           在 sys 租户里直接执行 DDL，**没有回滚**；删除/锁定已改为后台任务（返回 taskId，
+ *           结果落本地任务日志），建租户仍是同步逐条执行 + 进度事件。
  * 两者返回结构不同，混在一个函数里做隐式分派只会让调用方猜。这里显式分开。
  */
 
@@ -16,6 +17,8 @@ export const directTenant = reactive({
   createOpen: false,
   /** 新建租户的目标平台（直连平台 = 一个集群） */
   createPlatformId: '',
+  /** 从详情页「查看任务」跳过来时要展开的任务 id（任务日志页消费后清空） */
+  focusTaskId: '' as string,
   /** 租户页的集群范围：0 表示「全部集群」合并展示 */
   scopeClusterId: 0,
   /**
@@ -87,18 +90,30 @@ export function onDirectTenantLog(
   return window.sqlpilot.onDirectTenantLog(cb)
 }
 
-export async function dropDirectTenant(platformId: string, tenantName: string): Promise<{ ok: boolean; error?: string }> {
+/**
+ * 删除租户：主进程只做「提交」，真正的 DROP TENANT 在后台跑，
+ * 立即返回 taskId。界面据此关闭弹窗，去「任务日志」看执行结果。
+ */
+export async function dropDirectTenant(
+  platformId: string,
+  tenantName: string
+): Promise<{ ok: boolean; message?: string; taskId?: string; error?: string }> {
   const r = await window.sqlpilot.cloudDirectDropTenant(platformId, tenantName)
-  return r.ok ? { ok: true } : { ok: false, error: r.error || '删除失败' }
+  return r.ok
+    ? { ok: true, message: r.data?.message, taskId: r.data?.taskId }
+    : { ok: false, error: r.error || '删除失败' }
 }
 
+/** 锁定 / 解锁：同样后台执行，返回 taskId */
 export async function lockDirectTenant(
   platformId: string,
   tenantName: string,
   locked: boolean
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; message?: string; taskId?: string; error?: string }> {
   const r = await window.sqlpilot.cloudDirectSetTenantLocked(platformId, tenantName, locked)
-  return r.ok ? { ok: true } : { ok: false, error: r.error || (locked ? '锁定失败' : '解锁失败') }
+  return r.ok
+    ? { ok: true, message: r.data?.message, taskId: r.data?.taskId }
+    : { ok: false, error: r.error || (locked ? '锁定失败' : '解锁失败') }
 }
 
 export async function unitConfigsOf(platformId: string): Promise<CloudDirectUnitConfig[]> {
@@ -195,8 +210,13 @@ export async function clearTenantCred(platformId: string, tenant: string) {
   return r.ok ? { ok: true } : { ok: false, error: r.error || '清除失败' }
 }
 
-export async function testTenantLogin(platformId: string, tenant: string) {
-  const r = await window.sqlpilot.cloudDirectTestTenantLogin(platformId, tenant)
+/**
+ * 试连业务租户。
+ * mode 必须传：Oracle 模式的探测语句与 MySQL 不同（SELECT 1 没有 FROM 会报语法错，
+ * 之前就因此把「凭据其实可用」误判成连接失败）。
+ */
+export async function testTenantLogin(platformId: string, tenant: string, mode: 'MYSQL' | 'ORACLE' = 'MYSQL') {
+  const r = await window.sqlpilot.cloudDirectTestTenantLogin(platformId, tenant, mode)
   return r.ok ? { ok: true, message: r.data?.message || '连接成功' } : { ok: false, message: r.error || '连接失败' }
 }
 
@@ -260,10 +280,45 @@ export async function dropUserAs(
 export async function grantAs(
   platformId: string,
   tenant: string,
-  input: { name: string; host?: string; database?: string; privileges: string; mode: 'MYSQL' | 'ORACLE' }
+  input: {
+    name: string
+    host?: string
+    /** MySQL：勾选的库；空数组 = 所有库（*.*） */
+    databases?: string[]
+    /** 勾选的权限 / 角色（主进程按模式白名单校验） */
+    privileges: string[]
+    mode: 'MYSQL' | 'ORACLE'
+  }
 ) {
   const r = await window.sqlpilot.cloudDirectGrant(platformId, tenant, input)
   return r.ok ? { ok: true, message: r.data?.message } : { ok: false, error: r.error || '授权失败' }
+}
+
+// ---------------- 任务日志（本地 JSONL） ----------------
+
+export async function directTasks(q: {
+  page?: number
+  size?: number
+  keyword?: string
+  action?: string
+  status?: string
+  cluster?: string
+  since?: number
+}) {
+  const r = await window.sqlpilot.cloudDirectTasks(q)
+  return r.ok && r.data
+    ? r.data
+    : { items: [], total: 0, page: 1, size: q.size || 20, stats: { total: 0, running: 0, ok: 0, fail: 0 }, clusters: [] }
+}
+
+export async function directTaskDetail(id: string): Promise<CloudDirectTaskRow | null> {
+  const r = await window.sqlpilot.cloudDirectTaskDetail(id)
+  return r.ok ? (r.data as CloudDirectTaskRow | null) : null
+}
+
+export async function directTaskActions(): Promise<string[]> {
+  const r = await window.sqlpilot.cloudDirectTaskActions()
+  return r.ok ? r.data || [] : []
 }
 
 /** 新建资源池：池独立于租户存在，建租户时只挑空闲池 */export async function createResourcePool(
