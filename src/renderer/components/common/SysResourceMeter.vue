@@ -72,8 +72,12 @@
       <div class="pop-foot">
         <span>SQLPilot 占用 {{ info ? fmtGB(info.rssBytes) + ' GB' : '—' }}</span>
         <span v-if="info && info.platform" class="dim">{{ info.platform }}</span>
-        <!-- 单独一行：跟上面挤一行时会在换行处留下一个孤零零的「·」 -->
-        <span v-if="info" class="dim full">已运行 {{ uptimeText }}</span>
+        <!-- 单独一行：跟上面挤一行时会在换行处留下一个孤零零的「·」。
+             「本机已开机」是整台机器（os.uptime），「本次运行」才是 SQLPilot 进程，
+             两者分开写，免得被读成"程序跑了这么多天"。 -->
+        <span v-if="info" class="dim full" :title="uptimeTitle">
+          本机已开机 {{ uptimeText }} · SQLPilot 本次运行 {{ appUptimeText }}
+        </span>
       </div>
     </div>
   </div>
@@ -81,7 +85,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { diskTitle, fmtGB, spark, lvl, useSysResources } from '../../sysres'
+import { appStartedAt, diskTitle, fmtGB, spark, lvl, useSysResources } from '../../sysres'
 
 const { cpuHist, memHist, lastCpu, memPct, cpuTitle, memTitle, disks, info, histLen } = useSysResources()
 
@@ -96,13 +100,29 @@ const sysDisk = computed(() => disks.value[0] || null)
 const totalFree = computed(() => fmtGB(disks.value.reduce((a, d) => a + d.freeBytes, 0)))
 const totalAll = computed(() => fmtGB(disks.value.reduce((a, d) => a + d.totalBytes, 0)))
 
-const uptimeText = computed(() => {
-  const s = info.value?.uptimeSec || 0
+/** 毫秒 → 「x 天 x 小时 / x 小时 x 分 / x 分」 */
+function humanSpan(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
   const m = Math.floor((s % 3600) / 60)
-  return d > 0 ? `${d} 天 ${h} 小时` : h > 0 ? `${h} 小时 ${m} 分` : `${m} 分`
-})
+  if (d > 0) return `${d} 天 ${h} 小时`
+  if (h > 0) return `${h} 小时 ${m} 分`
+  // 刚启动时显示「0 分」很怪，直接说不足 1 分钟
+  return m > 0 ? `${m} 分` : '不足 1 分钟'
+}
+
+/** 整台机器的开机时长（主进程 os.uptime） */
+const uptimeText = computed(() => humanSpan((info.value?.uptimeSec || 0) * 1000))
+
+/** SQLPilot 本次运行的时长：渲染层启动到最近一次采样的间隔 */
+const appUptimeText = computed(() => humanSpan((info.value?.at || Date.now()) - appStartedAt))
+
+const uptimeTitle = computed(() =>
+  `本机已开机：整台电脑自上次开机至今（操作系统运行时间）\n` +
+  `SQLPilot 本次运行：本次启动程序至今\n` +
+  `两者不同，别把本机开机时长当成程序运行时长`
+)
 
 const summaryTitle = computed(() => {
   const parts = [

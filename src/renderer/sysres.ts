@@ -20,6 +20,13 @@ export interface DiskRow {
 
 /** 历史长度：3s 一个点 → 40 点 ≈ 2 分钟趋势 */
 const HIST = 40
+
+/**
+ * 渲染层启动时刻（≈ 本次 SQLPilot 启动）。
+ * 和 os.uptime()（整台机器开机至今）是两码事，界面上必须分开写清楚，
+ * 否则「已运行 4 天」会被当成程序自己跑了 4 天。
+ */
+export const appStartedAt = Date.now()
 const INTERVAL = 3_000
 
 const cpuHist = ref<number[]>([])
