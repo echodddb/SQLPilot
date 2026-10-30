@@ -87,50 +87,11 @@
       </div>
     </div>
 
-    <!-- 底部组：只留本机资源监控（数据库连接 / 服务器已各有独立一级模块，
-         AI 对话侧栏不再重复挂它们的入口与清单） -->
-    <div class="side-bottom">
-    <!-- 底部：本机资源迷你监控常驻（CPU/内存 sparkline，3s 采样；− 收起为单行） -->
-    <div class="res-foot">
-      <template v-if="resOpen">
-        <div class="rf-row" :title="cpuTitle">
-          <span class="rf-label">CPU</span>
-          <svg class="rf-spark" viewBox="0 0 100 22" preserveAspectRatio="none">
-            <polyline :points="spark(cpuHist)" />
-          </svg>
-          <span class="rf-val" :class="lvl(lastCpu)">{{ lastCpu == null ? '—' : lastCpu + '%' }}</span>
-        </div>
-        <div class="rf-row" :title="memTitle">
-          <span class="rf-label">内存</span>
-          <svg class="rf-spark" viewBox="0 0 100 22" preserveAspectRatio="none">
-            <polyline class="mem" :points="spark(memHist)" />
-          </svg>
-          <span class="rf-val" :class="lvl(memPct)">{{ memPct == null ? '—' : memPct + '%' }}</span>
-        </div>
-        <div v-for="d in disks" :key="d.drive" class="rf-row" :title="diskTitle(d)">
-          <span class="rf-label rf-drive">{{ d.drive }}</span>
-          <div class="rf-bar"><div class="rf-fill" :class="lvl(d.usedPct)" :style="{ width: Math.min(100, d.usedPct) + '%' }"></div></div>
-          <span class="rf-val" :class="lvl(d.usedPct)">{{ d.usedPct }}%</span>
-        </div>
-      </template>
-      <div class="rf-meta" :title="collapsedTitle">
-        <span class="rf-brand"><span class="dot"></span>SQLPilot v0.1</span>
-        <span v-if="!resOpen" class="rf-mini" title="CPU / 内存占用（点 ▤ 展开趋势图）">
-          <span class="rf-val" :class="lvl(lastCpu)">{{ lastCpu == null ? '—' : lastCpu + '%' }}</span>
-          <span class="rf-sep">/</span>
-          <span class="rf-val mem" :class="lvl(memPct)">{{ memPct == null ? '—' : memPct + '%' }}</span>
-        </span>
-        <span class="rf-flex"></span>
-        <span class="rf-dpapi">{{ store.secretsAvailable ? 'DPAPI ✓' : 'DPAPI ✗' }}</span>
-        <button class="rf-toggle" :title="resOpen ? '收起资源监控' : '展开资源监控'" @click="resOpen = !resOpen">{{ resOpen ? '−' : '▤' }}</button>
-      </div>
-    </div>
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, inject, reactive, ref, watch } from 'vue'
 import { store, curSession, removeSession, createSessionInProject } from '../store'
 
 const openProjectModal = inject<() => void>('openProjectModal')!
@@ -158,62 +119,6 @@ const showProjMiss = computed(
     !boundProjectName.value &&
     (store.cfg?.projects?.length || 0) > 0
 )
-
-// ---------- 本机资源迷你监控（默认展开；收起即停表） ----------
-const resOpen = ref(true)
-const cpuHist = ref<number[]>([])
-const memHist = ref<number[]>([])
-const lastCpu = ref<number | null>(null)
-const memPct = ref<number | null>(null)
-const cpuTitle = ref('CPU 占用率（3 秒采样窗口）')
-const memTitle = ref('内存占用')
-const disks = ref<{ drive: string; totalBytes: number; freeBytes: number; usedPct: number }[]>([])
-let resTimer: ReturnType<typeof setInterval> | null = null
-const HIST = 40
-
-/** 历史序列 → sparkline points（0..100 × 0..22 视区） */
-function spark(hist: number[]): string {
-  if (hist.length < 2) return ''
-  return hist.map((v, i) => `${((i / (hist.length - 1)) * 100).toFixed(1)},${(21 - (Math.min(100, v) / 100) * 19).toFixed(1)}`).join(' ')
-}
-function lvl(v: number | null): string {
-  return v == null ? '' : v > 90 ? 'danger' : v > 70 ? 'warn' : 'ok'
-}
-function fmtGB(bytes: number): string {
-  return (bytes / 1024 ** 3).toFixed(bytes > 100 * 1024 ** 3 ? 0 : 1)
-}
-async function pollRes(): Promise<void> {
-  try {
-    const r = await window.sqlpilot.sysResources()
-    memPct.value = r.mem.usedPct
-    memHist.value = [...memHist.value, r.mem.usedPct].slice(-HIST)
-    if (r.cpu.usagePct != null) {
-      lastCpu.value = r.cpu.usagePct
-      cpuHist.value = [...cpuHist.value, r.cpu.usagePct].slice(-HIST)
-    }
-    cpuTitle.value = `CPU ${r.cpu.model} · ${r.cpu.cores} 线程 · 近 ${HIST} 个采样点`
-    disks.value = (r.disks || []).slice(0, 5)
-    memTitle.value = `内存已用 ${fmtGB(r.mem.totalBytes - r.mem.freeBytes)} / ${fmtGB(r.mem.totalBytes)} GB`
-  } catch { /* 主进程忙时跳过本轮 */ }
-}
-function diskTitle(d: { drive: string; totalBytes: number; freeBytes: number; usedPct: number }): string {
-  return `${d.drive} 共 ${fmtGB(d.totalBytes)} GB · 剩余 ${fmtGB(d.freeBytes)} GB · 已用 ${d.usedPct}%`
-}
-const collapsedTitle = computed(() =>
-  `SQLPilot v0.1 · CPU ${lastCpu.value == null ? '—' : lastCpu.value + '%'} · 内存 ${memPct.value == null ? '—' : memPct.value + '%'} · ${store.secretsAvailable ? '密钥 DPAPI 加密' : 'DPAPI 不可用'} · 点 ▤ 展开资源监控`
-)
-
-function syncResTimer(): void {
-  if (resOpen.value && !resTimer) {
-    pollRes()
-    resTimer = setInterval(pollRes, 3_000)
-  } else if (!resOpen.value && resTimer) {
-    clearInterval(resTimer)
-    resTimer = null
-  }
-}
-watch(resOpen, syncResTimer, { immediate: true })
-onUnmounted(() => { if (resTimer) clearInterval(resTimer) })
 
 // 项目右键菜单
 const ctxMenu = reactive({ show: false, x: 0, y: 0, project: null as any })
@@ -451,41 +356,6 @@ async function removeProject(p: any) {
 .ctx-item:hover { background: var(--bg-card-hover); }
 .ctx-item.danger { color: var(--red); }
 .ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
-/* 底栏资源按钮：与版本号同排的小号轻量按钮 */
-.foot-btn {
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-  color: var(--text-faint);
-  border-radius: 7px;
-  font-size: 11px;
-  padding: 2px 9px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.foot-btn:hover { color: var(--accent); border-color: var(--accent); }
-.foot-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
-
-/* ---- 底部资源迷你监控 ---- */
-.side-bottom { margin-top: auto; display: flex; flex-direction: column; flex-shrink: 0; }
-.res-foot { border-top: 1px solid var(--border); padding: 8px 12px 6px; font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
-.rf-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-.rf-label { width: 26px; font-size: 10.5px; letter-spacing: 1px; color: var(--text-faint); flex-shrink: 0; }
-.rf-spark { flex: 1; height: 20px; min-width: 0; }
-.rf-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.4; vector-effect: non-scaling-stroke; opacity: 0.85; }
-.rf-spark polyline.mem { stroke: var(--green); }
-.rf-val { width: 34px; text-align: right; font-family: var(--mono); font-size: 10.5px; flex-shrink: 0; }
-.rf-val.ok { color: var(--green); }
-.rf-val.warn { color: var(--yellow); }
-.rf-val.danger { color: var(--red); font-weight: 700; }
-.rf-meta { display: flex; align-items: center; gap: 8px; margin-top: 1px; }
-.rf-brand { display: flex; align-items: center; }
-.rf-dpapi { flex: 1; }
-.rf-toggle {
-  border: 1px solid var(--border); background: none; color: var(--text-faint);
-  border-radius: 6px; width: 22px; height: 20px; cursor: pointer; font-size: 12px; line-height: 1;
-}
-.rf-toggle:hover { color: var(--text); border-color: var(--border-strong); }
-
 /* ---- 项目树（ZCode workspace→task 式） ---- */
 /* 项目区的符号整体放大一号：原来 ＋/✎/▤ 只有 13px、折叠箭头 10px，在 272px 侧栏里
    看着"没力气"。图标按钮统一成 24px 方块（hover 才亮底色），不靠 transform 放大（会发虚）。 */
@@ -561,22 +431,4 @@ async function removeProject(p: any) {
 .archive-toggle:hover .chev { color: var(--accent); }
 .arc-hint { font-size: 10.5px; color: var(--text-faint); opacity: 0.85; }
 /* 磁盘微型条形（存量指标用条形而非趋势线） */
-.rf-drive { font-family: var(--mono); font-weight: 700; letter-spacing: 0; text-align: left; }
-.rf-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-card-hover); overflow: hidden; }
-.rf-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
-.rf-fill.ok { background: var(--accent); opacity: 0.7; }
-.rf-fill.warn { background: var(--yellow); }
-.rf-fill.danger { background: var(--red); }
-/* 收起态：整个区域压到最底、高度最小化（一行 10.5px 字 + 24px 总高） */
-.res-foot:not(:has(.rf-row)) { padding: 3px 12px; }
-/* 收起态仅由 .res-foot 的垂直 padding 压高度；两端位置由 flex spacer 锚定，
-   收起态单独收窄 gap 防止单行内容（品牌+CPU/内存+DPAPI+按钮）在 272px 侧栏内溢出换行 */
-.res-foot:not(:has(.rf-row)) .rf-meta { gap: 4px; }
-.rf-flex { flex: 1; }
-.rf-mini { display: flex; align-items: center; gap: 2px; font-family: var(--mono); }
-.rf-mini .rf-val { width: auto; }
-.rf-mini .rf-sep { color: var(--text-faint); font-size: 10px; }
-.rf-mini .rf-val.mem { color: var(--green); }
-
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 5px; }
 </style>
