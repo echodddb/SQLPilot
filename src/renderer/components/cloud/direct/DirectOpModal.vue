@@ -1,38 +1,37 @@
 <template>
   <Teleport to="body">
-    <div class="mask" @click.self="maybeClose">
+    <div class="mask" @click.self="close">
       <section class="panel" @click.stop>
         <header class="ph">
           <div>
             <h3>{{ title }}</h3>
             <span class="sub">{{ tenant.clusterName }} · 租户 {{ tenant.name }}</span>
           </div>
-          <button v-if="!running" class="x" title="关闭" @click="close">✕</button>
+          <button class="x" title="关闭（Esc）" @click="close">✕</button>
         </header>
 
         <div class="body">
-          <div class="steps">
-            <div v-for="(s, i) in steps" :key="i" class="step" :class="s.status">
-              <span class="dot" />
-              <div class="text">
-                <div class="line1">
-                  <b>{{ s.title }}</b>
-                  <span class="tag">{{ tagOf(s.status) }}</span>
-                </div>
-                <div v-if="s.detail" class="line2">{{ s.detail }}</div>
-                <code v-if="s.sql" class="sql">{{ s.sql }}</code>
-              </div>
-            </div>
-            <div v-if="running" class="step pending">
-              <span class="dot" /><div class="text"><div class="line1"><b>等待实例返回…</b></div></div>
-            </div>
+          <div class="sqlbox">
+            <span class="lbl">执行语句</span>
+            <code class="sql">{{ sql }}</code>
           </div>
 
-          <div v-if="!running && message" class="result" :class="ok ? 'ok' : 'err'">{{ message }}</div>
+          <div v-if="submitting" class="state"><span class="spinner"></span>正在提交…</div>
+          <div v-else-if="error" class="result err">{{ error }}</div>
+          <template v-else>
+            <div class="result ok">{{ message }}</div>
+            <div class="taskline">
+              <span class="lbl">任务</span>
+              <code class="mono">{{ taskId || '—' }}</code>
+              <span class="dim">已转入后台，关掉本窗口不影响执行</span>
+            </div>
+          </template>
         </div>
 
         <footer class="ft">
-          <button class="btn" :disabled="running" @click="close">{{ running ? '执行中…' : '关闭' }}</button>
+          <button v-if="taskId" class="btn" @click="openTasks">查看任务日志</button>
+          <span style="flex: 1"></span>
+          <button class="btn primary" @click="close">{{ submitting ? '提交中…' : '关闭' }}</button>
         </footer>
       </section>
     </div>
@@ -41,11 +40,11 @@
 
 <script setup lang="ts">
 /**
- * 租户锁定 / 删除的进度弹窗。
+ * 租户锁定 / 删除的提交弹窗。
  *
- * 存在意义：直连的这些操作是「一条 DDL + 无回滚」，
- * 之前只弹一个 toast，用户既看不到进度也不知道到底执行了什么。
- * 这里把「准备 → 执行 DDL → 结果」逐条显示，失败时把错误原文留在界面上。
+ * 这两个动作现在是**后台任务**：主进程立刻返回 taskId，SQL 在后台跑。
+ * 早先是同步等待，实例一忙弹窗就长时间停在「执行中」——按钮禁用、连 ✕ 都没有，
+ * 观感就是"卡死了、关不掉"。现在提交完就能关，结果去「任务日志」看。
  */
 import { computed, onMounted, ref } from 'vue'
 import { dropDirectTenant, lockDirectTenant } from '../../../cloud/directTenant'
@@ -56,96 +55,75 @@ const props = defineProps<{
   action: 'lock' | 'unlock' | 'delete'
   tenant: { name: string; clusterName: string; locked?: boolean }
 }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'done'): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'done'): void
+  (e: 'openTask', taskId: string): void
+}>()
 
-interface Step {
-  title: string
-  detail?: string
-  sql?: string
-  status: 'start' | 'ok' | 'fail'
-}
-
-const steps = ref<Step[]>([])
-const running = ref(true)
-const ok = ref(false)
+const submitting = ref(true)
+const error = ref('')
 const message = ref('')
-/** 执行结论：'' 未结束 / 'ok' 成功 / 'fail' 失败；关闭时据此决定是否通知父级刷新 */
+const taskId = ref('')
+/** '' 未结束 / ok 已提交 / fail 提交失败 */
 const finished = ref<'' | 'ok' | 'fail'>('')
 
 const title = computed(() =>
   props.action === 'delete' ? '删除租户' : props.action === 'lock' ? '锁定租户' : '解锁租户'
 )
+const sql = computed(() =>
+  props.action === 'delete'
+    ? `DROP TENANT ${props.tenant.name}`
+    : `ALTER TENANT ${props.tenant.name} ${props.action === 'lock' ? 'LOCK' : 'UNLOCK'}`
+)
 
-function tagOf(s: Step['status']): string {
-  return s.status === 'ok' ? '成功' : s.status === 'fail' ? '失败' : '执行中…'
-}
-
-async function run(): Promise<void> {
+async function submit(): Promise<void> {
   const name = props.tenant.name
-  const isDelete = props.action === 'delete'
-
   try {
-    steps.value.push({ title: '校验参数', status: 'start' })
     if (!props.platformId) {
-      steps.value[0].status = 'fail'
-      message.value = '没有定位到该集群的直连平台，请检查云管平台配置。'
+      error.value = '没有定位到该集群的直连平台，请检查云管平台配置。'
       finished.value = 'fail'
       return
     }
-    if (isDelete && name.toLowerCase() === 'sys') {
-      steps.value[0].status = 'fail'
-      message.value = '不能删除 sys 租户。'
+    if (props.action === 'delete' && name.toLowerCase() === 'sys') {
+      error.value = '不能删除 sys 租户。'
       finished.value = 'fail'
       return
     }
-    steps.value[0].status = 'ok'
-
-    const sql = isDelete ? `DROP TENANT ${name}` : `ALTER TENANT ${name} ${props.action === 'lock' ? 'LOCK' : 'UNLOCK'}`
-    const step: Step = { title: isDelete ? '执行 DROP TENANT' : `执行 ${props.action === 'lock' ? 'LOCK' : 'UNLOCK'}`, sql, status: 'start' }
-    steps.value.push(step)
-
-    const r = isDelete
-      ? await dropDirectTenant(props.platformId, name)
-      : await lockDirectTenant(props.platformId, name, props.action === 'lock')
-
+    const r =
+      props.action === 'delete'
+        ? await dropDirectTenant(props.platformId, name)
+        : await lockDirectTenant(props.platformId, name, props.action === 'lock')
     if (!r.ok) {
-      step.status = 'fail'
-      ok.value = false
-      message.value = r.error || '执行失败'
+      error.value = r.error || '提交失败'
       finished.value = 'fail'
       return
     }
-    step.status = 'ok'
-    ok.value = true
-    message.value = isDelete
-      ? `租户 ${name} 已删除。资源池不会被自动回收，可到「资源池」页清理。`
-      : props.action === 'lock'
-        ? `租户 ${name} 已锁定，当前不可写入。`
-        : `租户 ${name} 已解锁。`
+    taskId.value = r.taskId || ''
+    message.value = r.message || '已提交后台执行'
     finished.value = 'ok'
-    pushNotice(isDelete ? `已删除租户 ${name}` : props.action === 'lock' ? '租户已锁定' : '租户已解锁')
+    pushNotice(message.value)
+  } catch (e: any) {
+    error.value = e?.message || String(e)
+    finished.value = 'fail'
   } finally {
-    running.value = false
+    submitting.value = false
   }
 }
 
-function maybeClose(): void {
-  if (!running.value) close()
-}
-
-/**
- * 关闭：成功的结果要先让用户看清。
- * 早先这里在执行成功后直接 emit('done')，父组件立刻卸载弹窗，
- * 观感就是"点一下一闪而过"，根本读不到锁定/解锁到底成没成。
- * 现在改成执行完停在结果页，用户确认后再关闭，关闭时才通知父级刷新。
- */
+/** 关闭：提交成功要通知父级刷新列表；提交失败只是关窗 */
 function close(): void {
-  if (running.value) return
   if (finished.value === 'ok') emit('done')
   else emit('close')
 }
 
-onMounted(run)
+/** 跳到任务日志并展开这条任务 */
+function openTasks(): void {
+  if (taskId.value) emit('openTask', taskId.value)
+  emit('close')
+}
+
+onMounted(submit)
 </script>
 
 <style scoped>
@@ -155,7 +133,7 @@ onMounted(run)
   padding-top: var(--titlebar-h); backdrop-filter: blur(2px);
 }
 .panel {
-  width: 640px; max-width: 100%; max-height: 84vh; display: flex; flex-direction: column;
+  width: 620px; max-width: 100%; max-height: 84vh; display: flex; flex-direction: column;
   background: var(--bg-side); border: 1px solid var(--border-strong); border-radius: 14px;
   box-shadow: var(--shadow-lg);
 }
@@ -168,33 +146,33 @@ onMounted(run)
 }
 .x:hover { color: var(--red); border-color: var(--red); }
 .body { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
-.steps { display: flex; flex-direction: column; gap: 9px; }
-.step { display: flex; gap: 8px; align-items: flex-start; }
-.step .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; background: var(--text-faint); }
-.step.start .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
-.step.ok .dot { background: var(--green); }
-.step.fail .dot { background: var(--red); }
-@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
-.text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
-.line1 { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text); }
-.line1 b { font-weight: 500; }
-.tag { font-size: 10px; color: var(--text-faint); }
-.step.ok .tag { color: var(--green); }
-.step.fail .tag { color: var(--red); }
-.line2 { font-size: 11px; color: var(--text-dim); line-height: 1.6; }
+
+.sqlbox { display: flex; flex-direction: column; gap: 5px; }
+.lbl { font-size: 10.5px; color: var(--text-faint); letter-spacing: 0.4px; }
 .sql {
-  display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+  display: block; font-family: var(--mono); font-size: 11px; color: var(--text);
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 7px; white-space: pre-wrap; word-break: break-all;
+  padding: 6px 8px; white-space: pre-wrap; word-break: break-all;
 }
+
+.state { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.spinner {
+  width: 12px; height: 12px; border: 2px solid var(--accent-dim); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 .result { font-size: 12px; line-height: 1.7; border-radius: 8px; padding: 9px 11px; }
 .result.ok { color: var(--green); background: var(--green-dim); border: 1px solid color-mix(in srgb, var(--green) 35%, transparent); }
 .result.err { color: var(--red); background: var(--red-dim); border: 1px solid color-mix(in srgb, var(--red) 35%, transparent); }
-.ft { display: flex; justify-content: flex-end; padding: 11px 16px; border-top: 1px solid var(--border); }
+.taskline { display: flex; align-items: center; gap: 8px; font-size: 11px; flex-wrap: wrap; }
+.taskline .mono { font-size: 11px; color: var(--text); }
+.taskline .dim { color: var(--text-faint); }
+.ft { display: flex; align-items: center; gap: 8px; padding: 11px 16px; border-top: 1px solid var(--border); }
 .btn {
   border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim);
   border-radius: 8px; padding: 6px 16px; font-size: 12px; font-family: inherit; cursor: pointer;
 }
 .btn:hover:not(:disabled) { color: var(--text); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 </style>

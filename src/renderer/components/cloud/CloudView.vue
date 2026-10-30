@@ -125,10 +125,11 @@
           <button class="btn primary" @click="cloud.settingsOpen = true">＋ 接入平台</button>
         </div>
 
-        <!-- 连接异常 -->
-        <div v-else-if="cloud.status && !cloud.status.ok" class="state err">
+        <!-- 连接异常：本地视图（任务日志）不依赖连接，不能被整页错误顶掉——
+             排查故障时恰恰最需要看它 -->
+        <div v-else-if="cloud.status && !cloud.status.ok && !isLocalView" class="state err">
           <div class="state-ico bad">!</div>
-          <b>无法访问 OCP</b>
+          <b>{{ isDirect ? '无法连接直连集群' : '无法访问 OCP' }}</b>
           <p class="mono">{{ cloud.status.error }}</p>
           <div class="state-actions">
             <button class="btn primary" @click="retry">重试</button>
@@ -137,6 +138,11 @@
         </div>
 
         <template v-else>
+          <div v-if="cloud.status && !cloud.status.ok" class="errbar">
+            <span class="errbar-ico">!</span>
+            <span>{{ cloud.status.error }}</span>
+            <button class="link" @click="cloud.settingsOpen = true">检查配置</button>
+          </div>
           <div v-if="cloud.error" class="errbar">
             <span class="errbar-ico">!</span>
             <span>{{ cloud.error }}</span>
@@ -312,6 +318,9 @@ const viewDesc = computed(() => CLOUD_VIEWS.find((v) => v.key === cloud.view)?.d
 const viewOf = (k: CloudViewKey) => CLOUD_VIEWS.find((v) => v.key === k)!
 
 /** 直连模式（无 OCP）没有代理 / 备份任务 / 平台用户体系，导航只留能取到数的页 */
+/** 纯本地视图：数据来自本机文件/配置，不需要连上集群（任务日志） */
+const isLocalView = computed(() => cloud.view === 'dtasks')
+
 const isDirect = computed(() =>
   cloud.vendor === 'ocp' && (cloud.access === 'direct' || activePlatform()?.type === 'obdirect')
 )

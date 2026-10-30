@@ -45,7 +45,9 @@
           <div v-for="(c, i) in finalResult.connections" :key="i" class="conn">
             <div class="conn-head">
               <span class="conn-label">{{ c.label }}</span>
-              <button class="copy" @click="copy(c.command)">复制</button>
+              <button class="copy" :class="{ done: copiedKey === 'conn' + i }" @click="copy(c.command, 'conn' + i)">
+                {{ copiedKey === 'conn' + i ? '已复制 ✓' : '复制' }}
+              </button>
             </div>
             <code class="conn-cmd">{{ c.command }}</code>
           </div>
@@ -59,7 +61,9 @@
             请立即登录租户执行：
           </div>
           <code class="conn-cmd">{{ alterPwdSql }}</code>
-          <button class="copy" @click="copy(alterPwdSql)">复制语句</button>
+          <button class="copy" :class="{ done: copiedKey === 'pwd' }" @click="copy(alterPwdSql, 'pwd')">
+            {{ copiedKey === 'pwd' ? '已复制 ✓' : '复制语句' }}
+          </button>
         </div>
       </div>
 
@@ -124,9 +128,9 @@
           <label>连接白名单</label>
           <div><input v-model="form.whitelist" placeholder="%" spellcheck="false" /></div>
 
-          <label>root 密码</label>
+          <label>{{ isOracle ? 'sys 密码' : 'root 密码' }}</label>
           <div class="row">
-            <input v-model="form.rootPassword" placeholder="留空则保持空密码" spellcheck="false" />
+            <input v-model="form.rootPassword" :placeholder="isOracle ? '留空则保持空密码（Oracle 密码用双引号设置）' : '留空则保持空密码'" spellcheck="false" />
             <button class="gen" @click="genPassword">生成</button>
           </div>
         </div>
@@ -236,10 +240,13 @@ const nameErr = computed(() => {
   return /^[A-Za-z][A-Za-z0-9_]{1,63}$/.test(v) ? '' : '字母开头，仅含字母/数字/下划线，2~64 位'
 })
 
-/** 未设密码时给出的改密语句：两种模式的语法不同 */
+/**
+ * 未设密码时给出的改密语句：两种模式的管理员与语法都不同。
+ * Oracle 的密码是标识符，必须用双引号（单引号会被当字符串常量报错）。
+ */
 const alterPwdSql = computed(() =>
   isOracle.value
-    ? "ALTER USER sys IDENTIFIED BY '****';"
+    ? 'ALTER USER sys IDENTIFIED BY "****";'
     : "ALTER USER root IDENTIFIED BY '****';"
 )
 
@@ -352,11 +359,21 @@ async function again(): Promise<void> {
   form.resourcePoolName = freePools.value[0]?.name || ''
 }
 
-/** 复制连接串 */
-async function copy(text: string): Promise<void> {
+const copiedKey = ref('')
+
+/**
+ * 复制连接串 / 改密语句。
+ * 走主进程剪贴板：navigator.clipboard 在部分环境没有权限，静默失败时用户只看到"点了没反应"；
+ * 同时把按钮切成「已复制 ✓」，比右下角 toast 更直观。
+ */
+async function copy(text: string, key = ''): Promise<void> {
   try {
-    await navigator.clipboard.writeText(text)
-    pushNotice('连接串已复制')
+    await window.sqlpilot.writeClipboard(text)
+    if (key) {
+      copiedKey.value = key
+      setTimeout(() => { if (copiedKey.value === key) copiedKey.value = '' }, 1600)
+    }
+    pushNotice('已复制到剪贴板')
   } catch {
     void window.sqlpilot.uiAlert('复制失败', '当前环境不允许访问剪贴板，请手动选中命令复制。')
   }
@@ -480,6 +497,7 @@ input::placeholder { color: var(--text-faint); }
   border-radius: 6px; padding: 2px 8px; font-size: 10.5px; font-family: inherit; cursor: pointer;
 }
 .copy:hover { color: var(--accent); border-color: var(--accent); }
+.copy.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
 .conn-cmd {
   display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text);
   white-space: pre-wrap; word-break: break-all; line-height: 1.7;
@@ -497,6 +515,7 @@ input::placeholder { color: var(--text-faint); }
   border-radius: 6px; padding: 3px 10px; font-size: 10.5px; font-family: inherit; cursor: pointer;
 }
 .pwdhint .copy:hover { color: var(--accent); border-color: var(--accent); }
+.copy.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
 .ft { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 16px; border-top: 1px solid var(--border); }
 .btn {
   border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim);

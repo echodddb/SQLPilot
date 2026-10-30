@@ -75,7 +75,9 @@
             <div v-for="(c, i) in conns" :key="i" class="conn">
               <div class="conn-head">
                 <span class="conn-label">{{ c.label }}</span>
-                <button class="copy" @click="copy(c.command)">复制</button>
+                <button class="copy" :class="{ done: copiedKey === 'conn' + i }" @click="copy(c.command, 'conn' + i)">
+                  {{ copiedKey === 'conn' + i ? '已复制 ✓' : '复制' }}
+                </button>
               </div>
               <code class="conn-cmd">{{ c.command }}</code>
             </div>
@@ -214,12 +216,39 @@
                 </tbody>
               </table>
 
-              <div v-if="grant.open" class="row form">
-                <label>为 {{ grant.name }} 授权</label>
-                <input v-if="!isOracle" v-model="grant.db" placeholder="库名，留空=所有库" spellcheck="false" />
-                <input v-model="grant.priv" placeholder="SELECT,INSERT,UPDATE 或 ALL PRIVILEGES" spellcheck="false" />
-                <button class="ghost" :disabled="userBusy" @click="doGrant">执行授权</button>
-                <button class="ghost" @click="grant.open = false">取消</button>
+              <div v-if="grant.open" class="grant">
+                <div class="grant-head">
+                  <span>为 <b class="mono">{{ grant.name }}</b> 授权</span>
+                  <span class="dim">勾选后一次执行；GRANT 不可回滚</span>
+                  <span style="flex: 1"></span>
+                  <button class="ghost" @click="grant.open = false">收起</button>
+                </div>
+
+                <template v-if="!isOracle">
+                  <div class="grant-label">授权库<span class="dim">（不勾任何库 = 所有库 *.*）</span></div>
+                  <div class="chk-grid">
+                    <label v-for="d in grantDbs" :key="d.name" class="chk">
+                      <input v-model="grant.dbs" type="checkbox" :value="d.name" />
+                      <span class="mono">{{ d.name }}</span>
+                    </label>
+                    <span v-if="!grantDbs.length" class="dim">没有读到库列表，可先到「数据库」页刷新</span>
+                  </div>
+                </template>
+
+                <div class="grant-label">权限{{ isOracle ? ' / 角色' : '' }}<span class="dim">（可多选）</span></div>
+                <div class="chk-grid">
+                  <label v-for="p in privOptions" :key="p" class="chk">
+                    <input v-model="grant.privs" type="checkbox" :value="p" />
+                    <span class="mono">{{ p }}</span>
+                  </label>
+                </div>
+
+                <div class="row">
+                  <button class="ghost" :disabled="userBusy || !grant.privs.length" @click="doGrant">
+                    执行授权{{ !isOracle ? `（${grant.dbs.length ? grant.dbs.length + ' 个库' : '所有库'}）` : '' }}
+                  </button>
+                  <span class="dim">{{ grant.privs.length ? grant.privs.join(', ') : '至少勾选一项权限' }}</span>
+                </div>
               </div>
             </template>
           </template>
@@ -309,6 +338,7 @@
         :tenant="{ name: t.tenant.name, clusterName: t.tenant.clusterName, locked: t.tenant.locked }"
         @close="opAction = null"
         @done="onOpDone"
+        @open-task="onOpenTask"
       />
     </div>
   </Teleport>
@@ -323,7 +353,9 @@
  * 参数与 TopSQL 都是「一次性取回 + 前端分页」，避免几百行把页面撑开。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { cloud, closeTenant, load, openTenant } from '../../../cloud/state'
+import { cloud, closeTenant, load, openTenant, setView } from '../../../cloud/state'
+import { defaultPrivs, privOptionsOf } from '../../../cloud/directPrivs'
+import { directTenant } from '../../../cloud/directTenant'
 import {
   clearTenantCred,
   dropDbAs,
@@ -392,7 +424,10 @@ const userForm = ref({ name: '', host: '%', password: '' })
 const userBusy = ref(false)
 const userMsg = ref('')
 const userOk = ref(true)
-const grant = ref({ open: false, name: '', host: '%', db: '', priv: 'SELECT' })
+const grant = ref({ open: false, name: '', host: '%', dbs: [] as string[], privs: defaultPrivs('MYSQL') })
+/** 授权时可勾选的库（MySQL 模式；系统库不参与授权） */
+const grantDbs = ref<{ name: string }[]>([])
+const privOptions = computed(() => privOptionsOf(isOracle.value ? 'ORACLE' : 'MYSQL'))
 // 参数 / TopSQL
 const params = ref<Awaited<ReturnType<typeof tenantParams>>>([])
 const paramKw = ref('')
@@ -413,10 +448,21 @@ function fmtMem(bytes: number): string {
   return gb >= 1 ? `${Math.round(gb * 10) / 10}G` : `${Math.round(b / 1024 ** 2)}M`
 }
 
-async function copy(text: string): Promise<void> {
+const copiedKey = ref('')
+
+/**
+ * 复制连接串 / 命令。
+ * 用主进程剪贴板（navigator.clipboard 在部分环境拿不到权限，静默失败后用户只看到"没反应"），
+ * 同时把按钮本身切成「已复制 ✓」——toast 在本弹窗里不够显眼。
+ */
+async function copy(text: string, key = ''): Promise<void> {
   try {
-    await navigator.clipboard.writeText(text)
-    pushNotice('已复制')
+    await window.sqlpilot.writeClipboard(text)
+    if (key) {
+      copiedKey.value = key
+      setTimeout(() => { if (copiedKey.value === key) copiedKey.value = '' }, 1600)
+    }
+    pushNotice('已复制到剪贴板')
   } catch {
     void window.sqlpilot.uiAlert('复制失败', '当前环境不允许访问剪贴板，请手动选中复制。')
   }
@@ -543,7 +589,7 @@ async function saveCred(): Promise<void> {
     // 保存后立刻试连一次：密码为空 / 密码错在这一步就暴露，
     // 而不是等用户切到「数据库」页才看到一句英文 Access denied。
     const base = r.keptPassword ? '凭据已保存（账号已更新，密码沿用原值）' : '凭据已保存（密码已加密存储于本机）'
-    const tested = await testTenantLogin(platformId.value, t.value.tenant.name)
+    const tested = await testTenantLogin(platformId.value, t.value.tenant.name, isOracle.value ? 'ORACLE' : 'MYSQL')
     credOk.value = tested.ok
     credMsg.value = tested.ok ? `${base}，连接测试通过` : `${base}，但连接测试未通过：${tested.message}`
 
@@ -570,7 +616,7 @@ async function testCred(): Promise<void> {
   if (!platformId.value) return
   credBusy.value = true
   try {
-    const r = await testTenantLogin(platformId.value, t.value.tenant.name)
+    const r = await testTenantLogin(platformId.value, t.value.tenant.name, isOracle.value ? 'ORACLE' : 'MYSQL')
     credOk.value = r.ok
     credMsg.value = r.message
   } finally {
@@ -675,23 +721,41 @@ async function dropUser(u: { user: string; host: string }): Promise<void> {
   }
 }
 
-function openGrant(u: { user: string; host: string }): void {
-  grant.value = { open: true, name: u.user, host: u.host, db: '', priv: isOracle.value ? 'CONNECT' : 'SELECT' }
+async function openGrant(u: { user: string; host: string }): Promise<void> {
+  grant.value = {
+    open: true,
+    name: u.user,
+    host: u.host,
+    dbs: [],
+    privs: defaultPrivs(isOracle.value ? 'ORACLE' : 'MYSQL')
+  }
+  // MySQL 的授权是库级的：把库列表带出来供勾选（Oracle 授的是角色/系统权限，不需要库）
+  if (!isOracle.value && platformId.value) {
+    const r = await tenantDbsAs(platformId.value, t.value.tenant.name)
+    grantDbs.value = r.rows.filter((d) => !d.system)
+    if (r.error) userMsg.value = r.error
+  }
 }
 
 async function doGrant(): Promise<void> {
   if (!platformId.value) return
+  if (!grant.value.privs.length) {
+    userOk.value = false
+    userMsg.value = '请至少勾选一项权限'
+    return
+  }
   userBusy.value = true
   try {
     const r = await grantAs(platformId.value, t.value.tenant.name, {
       name: grant.value.name,
       host: isOracle.value ? undefined : grant.value.host,
-      database: isOracle.value ? undefined : grant.value.db.trim() || undefined,
-      privileges: grant.value.priv.trim(),
+      databases: isOracle.value ? undefined : grant.value.dbs,
+      privileges: grant.value.privs,
       mode: isOracle.value ? 'ORACLE' : 'MYSQL'
     })
     userOk.value = r.ok
     userMsg.value = r.ok ? r.message || '已授权' : r.error || '授权失败'
+    // 授权成功后保留面板，方便继续追加另一组权限；只有失败才留在原地看报错
     if (r.ok) grant.value.open = false
   } finally {
     userBusy.value = false
@@ -735,17 +799,40 @@ async function askOp(kind: 'lock' | 'unlock' | 'delete'): Promise<void> {
   opAction.value = kind
 }
 
+/** 从提交弹窗跳到「任务日志」并展开该任务 */
+function onOpenTask(id: string): void {
+  directTenant.focusTaskId = id
+  closeTenant()
+  setView('dtasks')
+}
+
 async function onOpDone(): Promise<void> {
   const wasDelete = opAction.value === 'delete'
   opAction.value = null
   if (wasDelete) {
     closeTenant()
     await load()
+    // DROP TENANT 在后台跑，列表此时可能还没变；过几秒再补一次刷新
+    scheduleRefresh()
     return
   }
   await reloadAll()
   await load()
+  // 锁定/解锁同样后台执行，稍后再对齐一次状态（失败时也无副作用）
+  scheduleRefresh()
 }
+
+/** 后台任务提交后延迟补刷：任务一般 1~3 秒内结束 */
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleRefresh(): void {
+  if (refreshTimer) clearTimeout(refreshTimer)
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null
+    void load()
+    if (cloud.tenant) void reloadAll()
+  }, 2500)
+}
+onBeforeUnmount(() => { if (refreshTimer) clearTimeout(refreshTimer) })
 
 function onKey(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return
@@ -806,6 +893,21 @@ input:focus, select:focus { border-color: var(--accent); }
 .ghost:hover:not(:disabled), .op:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .ghost:disabled, .op:disabled { opacity: 0.45; cursor: not-allowed; }
 .op { padding: 2px 8px; font-size: 10.5px; }
+/* 授权面板：勾选式，权限与库都平铺，不占输入焦点 */
+.grant {
+  border: 1px solid var(--border); border-radius: 9px; background: var(--bg-card);
+  padding: 10px 11px; display: flex; flex-direction: column; gap: 8px;
+}
+.grant-head { display: flex; align-items: center; gap: 8px; font-size: 11.5px; flex-wrap: wrap; }
+.grant-label { font-size: 10.5px; color: var(--text-dim); display: flex; gap: 6px; align-items: baseline; }
+.chk-grid { display: flex; flex-wrap: wrap; gap: 2px 8px; }
+.chk {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim);
+  cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+.chk:hover { background: var(--bg-card-hover); color: var(--text); }
+.chk input { accent-color: var(--accent); }
+
 /* 危险操作默认中性，hover 才泛红：整片红色反而削弱了"删除"的警示层级 */
 .op.danger { color: var(--text-dim); border-color: var(--border); }
 .op.danger:hover:not(:disabled) { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); background: var(--red-dim); }
@@ -833,6 +935,7 @@ input:focus, select:focus { border-color: var(--accent); }
 .conn-label { font-size: 11px; color: var(--text-dim); }
 .copy { margin-left: auto; border: 1px solid var(--border); background: var(--bg-card); color: var(--text); border-radius: 6px; padding: 2px 8px; font-size: 10.5px; font-family: inherit; cursor: pointer; }
 .copy:hover { color: var(--accent); border-color: var(--accent); }
+.copy.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
 .conn-cmd { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text); white-space: pre-wrap; word-break: break-all; line-height: 1.7; }
 .cred { display: flex; flex-direction: column; gap: 8px; }
 .cred-status { display: flex; align-items: center; gap: 8px; font-size: 11px; }

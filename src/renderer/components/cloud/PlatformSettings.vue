@@ -10,7 +10,14 @@
       </header>
 
       <div class="body">
-        <!-- 已接入平台 -->
+        <!-- 已接入平台：直连模式可同时配多个集群，这里必须给出显式的「新增」入口，
+             否则用户只会在"编辑当前平台"的表单里改地址，把旧集群悄悄覆盖掉 -->
+        <div class="plist-head">
+          <b>已接入平台</b>
+          <span class="dim">直连模式可配多个集群，界面合并展示</span>
+          <span style="flex: 1"></span>
+          <button class="mini primary" @click="startNew('obdirect')">＋ 新增集群</button>
+        </div>
         <div v-if="cloud.platforms.length" class="plist" data-src="cfgOcp">
           <div v-for="p in cloud.platforms" :key="p.id" class="pitem" :class="{ editing: form.id === p.id }">
             <div class="pico" :class="{ ora: p.type === 'oracle' }">{{ p.type === 'oracle' ? 'ORA' : 'OB' }}</div>
@@ -31,6 +38,14 @@
 
         <!-- 表单 -->
         <div class="form">
+          <div class="form-head">
+            <b>{{ form.id ? `编辑：${form.name || '未命名平台'}` : '新增平台' }}</b>
+            <span class="dim">
+              {{ form.id ? '保存会更新这一条；要再加一个集群请点上方「＋ 新增集群」' : '保存后新增一条，不影响已有平台' }}
+            </span>
+            <span style="flex: 1"></span>
+            <button v-if="form.id" class="mini" @click="startNew(form.type)">切换为新增</button>
+          </div>
           <div class="frow">
             <label>类型</label>
             <div class="seg">
@@ -204,7 +219,23 @@ onMounted(() => {
   else reset()
 })
 
+/** 编辑起始的连接目标：保存前用它判断"是不是把地址改掉了" */
+let editOrigin = { host: '', port: 0, username: '' }
+
+/**
+ * 新增一条（不继承当前编辑对象的 id）。
+ * 这是「多集群」的关键：id 为空 → 主进程 push 新平台；带着 id 保存只会覆盖旧的那条。
+ */
+function startNew(type: 'ocp' | 'obdirect' | 'oracle' = 'obdirect'): void {
+  reset()
+  form.type = type
+  form.port = type === 'oracle' ? 1521 : type === 'obdirect' ? 2881 : 1521
+  msg.value = ''
+  msgKind.value = 'ok'
+}
+
 function reset(): void {
+  editOrigin = { host: '', port: 0, username: '' }
   form.id = ''
   form.type = 'ocp'
   form.name = ''
@@ -272,6 +303,7 @@ function payload() {
 }
 
 function edit(p: CloudPlatformView): void {
+  editOrigin = { host: p.host || '', port: p.port || 0, username: p.username || '' }
   form.id = p.id
   form.type = p.type === 'oracle' ? 'oracle' : p.type === 'obdirect' ? 'obdirect' : 'ocp'
   form.name = p.name
@@ -328,6 +360,22 @@ async function test(): Promise<void> {
 }
 
 async function save(): Promise<void> {
+  // 编辑态却改了主机/端口/用户名：多半是想"再加一个集群"，直接保存会把旧集群覆盖掉——
+  // 这里拦一次，并明确告诉用户正确的入口。
+  if (form.id && form.type !== 'ocp') {
+    const moved =
+      String(form.host || '').trim() !== editOrigin.host ||
+      Number(form.port) !== editOrigin.port ||
+      String(form.username || '').trim() !== editOrigin.username
+    if (moved) {
+      const ok = await window.sqlpilot.uiConfirm(
+        `将修改已有平台「${form.name || editOrigin.host}」的连接目标`,
+        '保存会直接更新这一条平台（旧地址不再保留）。如果是要再接入一个集群，请取消后点「＋ 新增集群」。',
+        false
+      )
+      if (!ok) return
+    }
+  }
   busy.value = true
   msg.value = ''
   try {
@@ -386,6 +434,12 @@ function close(): void { emit('close') }
 .x:hover { color: var(--red); border-color: var(--red); }
 .body { overflow-y: auto; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 14px; }
 
+.plist-head { display: flex; align-items: center; gap: 8px; }
+.plist-head b { font-size: 12px; }
+.plist-head .dim, .form-head .dim { font-size: 10.5px; color: var(--text-faint); }
+.mini.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.form-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.form-head b { font-size: 12px; }
 .plist { display: flex; flex-direction: column; gap: 6px; }
 .pitem {
   display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 10px;
