@@ -130,8 +130,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, inject, reactive, ref, watch } from 'vue'
 import { store, curSession, removeSession, createSessionInProject } from '../store'
+import { useSysResources } from '../sysres'
 
 const openProjectModal = inject<() => void>('openProjectModal')!
 const openSessionModal = inject<(mode: 'new' | 'switch') => void>('openSessionModal')!
@@ -159,61 +160,16 @@ const showProjMiss = computed(
     (store.cfg?.projects?.length || 0) > 0
 )
 
-// ---------- 本机资源迷你监控（默认展开；收起即停表） ----------
+// ---------- 本机资源迷你监控 ----------
+// 采样已抽到 renderer/sysres.ts 的单例：顶栏「资源概述」用的是同一份数据。
+// 这里只管“展开/收起”的显示，不再自己起定时器 —— 两处各起一个轮询器会让
+// 主进程的 CPU 差分窗口（两次请求的间隔）被交替调用切碎，双方都算不准。
 const resOpen = ref(true)
-const cpuHist = ref<number[]>([])
-const memHist = ref<number[]>([])
-const lastCpu = ref<number | null>(null)
-const memPct = ref<number | null>(null)
-const cpuTitle = ref('CPU 占用率（3 秒采样窗口）')
-const memTitle = ref('内存占用')
-const disks = ref<{ drive: string; totalBytes: number; freeBytes: number; usedPct: number }[]>([])
-let resTimer: ReturnType<typeof setInterval> | null = null
-const HIST = 40
+const { cpuHist, memHist, lastCpu, memPct, cpuTitle, memTitle, disks, spark, lvl, diskTitle } = useSysResources()
 
-/** 历史序列 → sparkline points（0..100 × 0..22 视区） */
-function spark(hist: number[]): string {
-  if (hist.length < 2) return ''
-  return hist.map((v, i) => `${((i / (hist.length - 1)) * 100).toFixed(1)},${(21 - (Math.min(100, v) / 100) * 19).toFixed(1)}`).join(' ')
-}
-function lvl(v: number | null): string {
-  return v == null ? '' : v > 90 ? 'danger' : v > 70 ? 'warn' : 'ok'
-}
-function fmtGB(bytes: number): string {
-  return (bytes / 1024 ** 3).toFixed(bytes > 100 * 1024 ** 3 ? 0 : 1)
-}
-async function pollRes(): Promise<void> {
-  try {
-    const r = await window.sqlpilot.sysResources()
-    memPct.value = r.mem.usedPct
-    memHist.value = [...memHist.value, r.mem.usedPct].slice(-HIST)
-    if (r.cpu.usagePct != null) {
-      lastCpu.value = r.cpu.usagePct
-      cpuHist.value = [...cpuHist.value, r.cpu.usagePct].slice(-HIST)
-    }
-    cpuTitle.value = `CPU ${r.cpu.model} · ${r.cpu.cores} 线程 · 近 ${HIST} 个采样点`
-    disks.value = (r.disks || []).slice(0, 5)
-    memTitle.value = `内存已用 ${fmtGB(r.mem.totalBytes - r.mem.freeBytes)} / ${fmtGB(r.mem.totalBytes)} GB`
-  } catch { /* 主进程忙时跳过本轮 */ }
-}
-function diskTitle(d: { drive: string; totalBytes: number; freeBytes: number; usedPct: number }): string {
-  return `${d.drive} 共 ${fmtGB(d.totalBytes)} GB · 剩余 ${fmtGB(d.freeBytes)} GB · 已用 ${d.usedPct}%`
-}
 const collapsedTitle = computed(() =>
   `SQLPilot v0.1 · CPU ${lastCpu.value == null ? '—' : lastCpu.value + '%'} · 内存 ${memPct.value == null ? '—' : memPct.value + '%'} · ${store.secretsAvailable ? '密钥 DPAPI 加密' : 'DPAPI 不可用'} · 点 ▤ 展开资源监控`
 )
-
-function syncResTimer(): void {
-  if (resOpen.value && !resTimer) {
-    pollRes()
-    resTimer = setInterval(pollRes, 3_000)
-  } else if (!resOpen.value && resTimer) {
-    clearInterval(resTimer)
-    resTimer = null
-  }
-}
-watch(resOpen, syncResTimer, { immediate: true })
-onUnmounted(() => { if (resTimer) clearInterval(resTimer) })
 
 // 项目右键菜单
 const ctxMenu = reactive({ show: false, x: 0, y: 0, project: null as any })

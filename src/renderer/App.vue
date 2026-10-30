@@ -41,6 +41,11 @@
           <button :class="{ on: isWorkMode }" :aria-pressed="isWorkMode" @click="setAppMode('work')">工作</button>
         </div>
 
+        <!-- 本机资源概述：CPU / 内存 / 系统盘占用，悬停展开趋势与各盘明细。
+             与 AI 侧栏底部的迷你监控共用同一份采样（renderer/sysres.ts 单例），
+             不会因为两处各起一个轮询器把 CPU 差分窗口切碎 -->
+        <SysResourceMeter />
+
         <span
           v-if="store.module === 'agent' && boundProject"
           class="badge blue"
@@ -230,6 +235,7 @@ import { isWorkMode, setAppMode } from './app-mode'
 import SplashOverlay from './components/SplashOverlay.vue'
 import Sidebar from './components/Sidebar.vue'
 import ModuleNav from './components/ModuleNav.vue'
+import SysResourceMeter from './components/common/SysResourceMeter.vue'
 import ReportView from './components/ReportView.vue'
 import MaskingView from './components/MaskingView.vue'
 import Taskbar from './components/Taskbar.vue'
