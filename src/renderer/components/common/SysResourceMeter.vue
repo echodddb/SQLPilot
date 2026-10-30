@@ -26,6 +26,13 @@
         <span class="lbl">{{ sysDisk ? sysDisk.drive.charAt(0) + '盘' : '磁盘' }}</span>
         <b :class="lvl(sysDisk && sysDisk.usedPct)">{{ sysDisk ? sysDisk.usedPct + '%' : '—' }}</b>
       </span>
+      <!-- 温度只在宽屏出现在顶栏：它 30 秒才更一次，挤的时候优先让位给 CPU/内存/磁盘 -->
+      <span class="div pill-temp"></span>
+      <span class="c pill-temp">
+        <i class="dot" :class="tempLvl"></i>
+        <span class="lbl">温度</span>
+        <b :class="tempLvl">{{ tempText }}</b>
+      </span>
     </button>
 
     <div v-if="show" class="srm-pop" role="dialog">
@@ -56,6 +63,15 @@
         {{ info ? `已用 ${fmtGB(info.memTotal - info.memFree)} / ${fmtGB(info.memTotal)} GB · 可用 ${fmtGB(info.memFree)} GB` : '—' }}
       </div>
 
+      <div class="pop-row" :title="tempTitle">
+        <span class="k">温度</span>
+        <div class="bar">
+          <div class="fill" :class="tempLvl" :style="{ width: tempBarW }"></div>
+        </div>
+        <span class="v" :class="tempLvl">{{ tempText }}</span>
+      </div>
+      <div class="pop-sub" :title="tempTitle">{{ tempSub }}</div>
+
       <div class="pop-sep"></div>
 
       <div v-for="d in disks" :key="d.drive" class="pop-row disk" :title="diskTitle(d)">
@@ -72,12 +88,12 @@
       <div class="pop-foot">
         <span>SQLPilot 占用 {{ info ? fmtGB(info.rssBytes) + ' GB' : '—' }}</span>
         <span v-if="info && info.platform" class="dim">{{ info.platform }}</span>
-        <!-- 单独一行：跟上面挤一行时会在换行处留下一个孤零零的「·」。
-             「本机已开机」是整台机器（os.uptime），「本次运行」才是 SQLPilot 进程，
-             两者分开写，免得被读成"程序跑了这么多天"。 -->
-        <span v-if="info" class="dim full" :title="uptimeTitle">
-          本机已开机 {{ uptimeText }} · SQLPilot 本次运行 {{ appUptimeText }}
-        </span>
+        <!-- 分两行写：跟上面挤一行时会在换行处留下一个孤零零的「·」，而且这组数字最容易被误读。
+             「本机已开机」是整台机器（os.uptime），「本次运行」才是 SQLPilot 进程；
+             Windows 开了快速启动时关机不算重置内核计时，所以要带上具体起始日期，
+             用户才能看出这个时长跨了关机（本机 58 天 = 9/02 起一直累计）。 -->
+        <span v-if="info" class="dim full" :title="uptimeTitle">本机已开机 {{ uptimeText }}（自 {{ bootText }} 起）</span>
+        <span v-if="info" class="dim full" :title="uptimeTitle">SQLPilot 本次运行 {{ appUptimeText }}</span>
       </div>
     </div>
   </div>
@@ -87,7 +103,7 @@
 import { computed, ref } from 'vue'
 import { appStartedAt, diskTitle, fmtGB, spark, lvl, useSysResources } from '../../sysres'
 
-const { cpuHist, memHist, lastCpu, memPct, cpuTitle, memTitle, disks, info, histLen } = useSysResources()
+const { cpuHist, memHist, lastCpu, memPct, cpuTitle, memTitle, disks, info, temp, histLen } = useSysResources()
 
 const hover = ref(false)
 /** 点一下钉住，鼠标移开也不收（想对照着看时不用一直悬着） */
@@ -115,14 +131,69 @@ function humanSpan(ms: number): string {
 /** 整台机器的开机时长（主进程 os.uptime） */
 const uptimeText = computed(() => humanSpan((info.value?.uptimeSec || 0) * 1000))
 
+/** 内核会话起点 → 「09-02 08:42」；快速启动下这个日期会早于用户认知里的"上次开机" */
+const bootText = computed(() => {
+  const at = info.value?.bootAt
+  if (!at) return '—'
+  const d = new Date(at)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+})
+
 /** SQLPilot 本次运行的时长：渲染层启动到最近一次采样的间隔 */
 const appUptimeText = computed(() => humanSpan((info.value?.at || Date.now()) - appStartedAt))
 
 const uptimeTitle = computed(() =>
-  `本机已开机：整台电脑自上次开机至今（操作系统运行时间）\n` +
+  `本机已开机：整台电脑的内核计时（Windows 的 os.uptime），起始于 ${bootText.value}\n` +
   `SQLPilot 本次运行：本次启动程序至今\n` +
-  `两者不同，别把本机开机时长当成程序运行时长`
+  `注意：Windows 开启「快速启动」后，关机再开机只是休眠恢复，内核计时不清零，\n` +
+  `所以「本机已开机」会比实际开机时长更长。看「SQLPilot 本次运行」才是程序跑了多久`
 )
+
+// ---------- 温度（ACPI 热区） ----------
+//
+// 主进程 30 秒才采一次（要起 PowerShell 读性能计数器），和 3 秒的资源轮询不是同一尺度，
+// 所以这里只做"当前值 + 条形"，不画趋势线——跟 CPU/内存的趋势线并排画会被误读成同一时间轴。
+
+/** 温度等级：阈值比 CPU 占用率严一点（ACPI 热区读数通常低于核心温度，70℃ 已经不低） */
+const tempLvl = computed(() => {
+  const t = temp.value?.max
+  if (t == null) return ''
+  return t > 85 ? 'danger' : t > 70 ? 'warn' : 'ok'
+})
+
+/** 条形宽度：20℃ 起算、100℃ 满格（绝对刻度，不随机型变化） */
+const tempBarW = computed(() => {
+  const t = temp.value?.max
+  if (t == null) return '0%'
+  return Math.max(0, Math.min(100, ((t - 20) / 80) * 100)).toFixed(1) + '%'
+})
+
+const tempText = computed(() => {
+  const t = temp.value
+  if (!t || (t.at === 0 && !t.error)) return '—'
+  if (t.max == null) return '—'
+  return `${Math.round(t.max)}℃`
+})
+
+const tempSub = computed(() => {
+  const t = temp.value
+  if (!t || (t.at === 0 && !t.error)) return '首次采样中，约 3 秒后显示'
+  if (t.max == null) return t.error || '本机未上报热区温度'
+  const secs = Math.max(0, Math.round(((info.value?.at || Date.now()) - t.at) / 1000))
+  return `${t.zones.length} 个热区 · ${secs} 秒前采样 · 非核心温度`
+})
+
+const tempTitle = computed(() => {
+  const t = temp.value
+  if (!t || (t.at === 0 && !t.error)) return 'ACPI 热区温度：首次采样中…'
+  if (t.max == null) return `ACPI 热区温度不可用：${t.error || '未知原因'}`
+  return [
+    'ACPI 热区温度（主板传感器读数，通常明显低于 CPU 核心温度）',
+    ...t.zones.map((z) => `${z.zone}  ${z.celsius.toFixed(1)}℃`),
+    '主进程每 30 秒采样一次（读 WMI，无需管理员权限）'
+  ].join('\n')
+})
 
 const summaryTitle = computed(() => {
   const parts = [
@@ -130,6 +201,8 @@ const summaryTitle = computed(() => {
     `内存 ${memPct.value == null ? '—' : memPct.value + '%'}`
   ]
   if (sysDisk.value) parts.push(`${sysDisk.value.drive} 剩余 ${fmtGB(sysDisk.value.freeBytes)} GB`)
+  const t = temp.value
+  if (t && t.max != null) parts.push(`温度 ${Math.round(t.max)}℃`)
   return `本机资源：${parts.join(' · ')}\n点击${pinned.value ? '取消' : ''}固定详情面板`
 })
 </script>
@@ -229,6 +302,12 @@ const summaryTitle = computed(() => {
 @media (max-width: 1240px) {
   .c .lbl { display: none; }
   .c { padding: 0 7px; }
+}
+/* 温度 30 秒才更新一次，属于"顺带一看"的信息：窄屏直接整项收掉，不跟 CPU/内存抢位置 */
+.pill-temp { display: none; }
+@media (min-width: 1241px) {
+  .div.pill-temp { display: block; }
+  .c.pill-temp { display: inline-flex; }
 }
 @media (max-width: 1040px) {
   .srm { display: none; }

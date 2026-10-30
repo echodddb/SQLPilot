@@ -611,7 +611,13 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
         mem: { totalBytes: number; freeBytes: number; usedPct: number }
         disks: { drive: string; totalBytes: number; freeBytes: number; usedPct: number }[]
         app: { rssBytes: number; cpuPct: number | null }
-        sys: { hostname: string; platform: string; uptimeSec: number }
+        sys: { hostname: string; platform: string; uptimeSec: number; bootAt: number }
+        temp: {
+          zones: { zone: string; celsius: number }[]
+          maxCelsius: number | null
+          at: number
+          error: string | null
+        }
       }>
       openExternal(url: string): Promise<{ ok: boolean }>
       openFolder(p: string): Promise<{ ok: boolean }>

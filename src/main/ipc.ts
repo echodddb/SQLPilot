@@ -3220,7 +3220,7 @@ export function registerIpc(): void {
   ipcMain.handle('cloud:oraAiSetSections', (_e, { id, sections }: { id: string; sections: string[] }) =>
     setOraAiSections(String(id || ''), (sections || []).map(String)))
 
-  // ---------- 剪贴板 / 外部链接 ----------  // 本机资源（资源面板 2s 轮询；CPU 占用为两次请求的差分，首次返回 null）
+  // ---------- 剪贴板 / 外部链接 ----------  // 本机资源（资源面板 3s 轮询；CPU 占用为两次请求的差分，首次返回 null；温度由主进程侧 30s 独立节流）
   ipcMain.handle('sys:resources', () => getSysResources())
 
   ipcMain.handle('clipboard:write', (_e, { text }: { text: string }) => {

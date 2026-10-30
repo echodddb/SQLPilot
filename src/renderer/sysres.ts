@@ -47,7 +47,22 @@ const info = ref<{
   hostname: string
   platform: string
   uptimeSec: number
+  /** 内核会话起点（ms），= 采样时刻 - uptimeSec；快速启动下它会早于"你以为的上次开机" */
+  bootAt: number
   at: number
+} | null>(null)
+
+/**
+ * 温度（ACPI 热区）。
+ * 主进程侧 30 秒才采一次，比 3 秒的资源轮询慢一个数量级，
+ * 所以单独存：panel 上不能拿它跟 CPU/内存趋势线画在一起对比。
+ */
+const temp = ref<{
+  /** null 且 at=0 → 还没采到（读取中）；error 非 null → 采不到（不支持/超时） */
+  max: number | null
+  zones: { zone: string; celsius: number }[]
+  at: number
+  error: string | null
 } | null>(null)
 
 let timer: ReturnType<typeof setInterval> | null = null
@@ -86,6 +101,9 @@ async function poll(): Promise<void> {
     cpuTitle.value = `CPU ${r.cpu.model} · ${r.cpu.cores} 线程 · 近 ${HIST} 个采样点`
     disks.value = (r.disks || []).slice(0, 6)
     memTitle.value = `内存已用 ${fmtGB(r.mem.totalBytes - r.mem.freeBytes)} / ${fmtGB(r.mem.totalBytes)} GB`
+    if (r.temp) {
+      temp.value = { max: r.temp.maxCelsius, zones: r.temp.zones || [], at: r.temp.at || 0, error: r.temp.error }
+    }
     info.value = {
       cpuModel: r.cpu.model,
       cores: r.cpu.cores,
@@ -96,6 +114,7 @@ async function poll(): Promise<void> {
       hostname: r.sys.hostname,
       platform: r.sys.platform,
       uptimeSec: r.sys.uptimeSec,
+      bootAt: r.sys.bootAt,
       at: Date.now()
     }
   } catch {
@@ -138,6 +157,7 @@ export function useSysResources() {
     memTitle,
     disks,
     info,
+    temp,
     histLen: HIST,
     spark,
     lvl,
