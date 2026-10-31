@@ -1,0 +1,178 @@
+/* CMDB 模块公共样式（前缀 cm-，由 CmdbView 非 scoped 引入一次）
+   组件内部仍用 scoped 写自己独有的布局；这里只放"表单/对话框/列表"这类跨组件复用的部分。 */
+
+.cm-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+/* ---------- 表单 ---------- */
+.cm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.cm-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.2px;
+}
+.cm-label .req {
+  color: var(--red);
+  margin-left: 2px;
+}
+.cm-input,
+.cm-select,
+.cm-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12.5px;
+}
+.cm-textarea {
+  resize: vertical;
+  min-height: 54px;
+  font-family: inherit;
+}
+.cm-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.cm-grid3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+}
+.cm-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+/* ---------- 小按钮 / 标签 ---------- */
+.cm-mini {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  line-height: 1.6;
+}
+.cm-mini:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--bg-card-hover);
+}
+.cm-mini.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent-dim);
+}
+.cm-mini.danger:hover {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
+  background: var(--red-dim);
+}
+.cm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  background: var(--bg-card-hover);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ---------- 对话框 ---------- */
+.cm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 6, 16, 0.55);
+  backdrop-filter: blur(2px);
+}
+.cm-dlg {
+  width: min(720px, calc(100vw - 80px));
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.cm-dlg-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.cm-dlg-head .sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+.cm-dlg-body {
+  padding: 14px 16px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cm-dlg-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-input);
+}
+.cm-dlg-foot .spacer {
+  flex: 1;
+}
+.cm-close {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.cm-close:hover {
+  color: var(--text);
+  background: var(--bg-card-hover);
+}
+
+/* ---------- 空态 ---------- */
+.cm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 30px 16px;
+  text-align: center;
+}
+.cm-empty .big {
+  font-size: 26px;
+  opacity: 0.3;
+}

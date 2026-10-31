@@ -235,6 +235,28 @@ declare type CloudOraAiEvent = import('../main/cloud/oracle/ai').OraAiEvent
 declare type CloudOraAiUnit = import('../main/cloud/oracle/ai').OraAiUnit
 declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
 
+// ---------------- CMDB 资产台账（类型单一来源：main/cmdb-model.ts） ----------------
+declare type CmdbDocView = import('../main/cmdb-model').CmdbDoc
+declare type CmdbViewDocView = import('../main/cmdb-model').CmdbViewDoc
+declare type CmdbCustomerView = import('../main/cmdb-model').CmdbCustomer
+declare type CmdbIdcView = import('../main/cmdb-model').CmdbIdc
+declare type CmdbRackView = import('../main/cmdb-model').CmdbRack
+declare type CmdbAssetView = import('../main/cmdb-model').CmdbAsset
+declare type CmdbRelationView = import('../main/cmdb-model').CmdbRelation
+declare type CmdbCableView = import('../main/cmdb-model').CmdbCable
+declare type CmdbLogEntryView = import('../main/cmdb-model').CmdbLogEntry
+declare type CmdbCameraView = import('../main/cmdb-model').CmdbCamera
+declare type CmdbViewModeView = import('../main/cmdb-model').CmdbViewMode
+declare type CmdbStatusView = import('../main/cmdb-model').CmdbStatus
+declare type CmdbRelationKindView = import('../main/cmdb-model').CmdbRelationKind
+declare type CmdbAssetKindView = import('../main/cmdb-model').CmdbAssetKind
+declare type CmdbFilterView = import('../main/cmdb-model').CmdbFilter
+declare type CmdbGraphView = import('../main/cmdb-model').CmdbGraph
+declare type CmdbStatsView = import('../main/cmdb-model').CmdbStats
+declare type CmdbSyncPreview = { total: number; creates: number; updates: number; skipped: number }
+declare type CmdbSyncResult = { ok: boolean; error?: string; preview?: CmdbSyncPreview; doc?: CmdbDocView; created?: number; updated?: number; skipped?: number }
+declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView; value?: any }
+
   interface Window {
     sqlpilot: {
       winMinimize(): Promise<void>
@@ -604,6 +626,31 @@ declare type CloudAiEvent = import('../main/cloud/ai').CloudAiEvent
       cloudOraAiDelete(id: string): Promise<{ ok: boolean }>
       cloudOraAiRefresh(id: string): Promise<{ ok: boolean; contextAt?: number; contextChars?: number; error?: string }>
       cloudOraAiSetSections(id: string, sections: string[]): Promise<{ ok: boolean; error?: string }>
+      // ---- CMDB 资产台账 ----
+      cmdbLoad(): Promise<{ ok: boolean; doc: CmdbDocView; view: CmdbViewDocView; log: CmdbLogEntryView[]; file: string }>
+      cmdbSaveCustomer(customer: Partial<CmdbCustomerView>): Promise<CmdbWriteResult>
+      cmdbDeleteCustomer(id: string): Promise<CmdbWriteResult>
+      cmdbSaveIdc(idc: Partial<CmdbIdcView>): Promise<CmdbWriteResult>
+      cmdbDeleteIdc(id: string): Promise<CmdbWriteResult>
+      cmdbSaveRack(rack: Partial<CmdbRackView>): Promise<CmdbWriteResult>
+      cmdbDeleteRack(id: string): Promise<CmdbWriteResult>
+      cmdbSaveAsset(asset: Partial<CmdbAssetView>): Promise<CmdbWriteResult>
+      cmdbDeleteAsset(id: string): Promise<CmdbWriteResult>
+      cmdbRestoreAsset(id: string): Promise<CmdbWriteResult>
+      cmdbPurgeAsset(id: string): Promise<CmdbWriteResult>
+      cmdbSaveRelation(relation: Partial<CmdbRelationView>): Promise<CmdbWriteResult>
+      cmdbDeleteRelation(id: string): Promise<CmdbWriteResult>
+      cmdbSaveCable(cable: Partial<CmdbCableView>): Promise<CmdbWriteResult>
+      cmdbDeleteCable(id: string): Promise<CmdbWriteResult>
+      cmdbSaveView(view: CmdbViewDocView): Promise<{ ok: boolean; error?: string }>
+      cmdbLog(assetId?: string, limit?: number): Promise<{ ok: boolean; entries: CmdbLogEntryView[] }>
+      cmdbSyncServers(customerId: string, idcId?: string, apply?: boolean): Promise<CmdbSyncResult>
+      cmdbSyncCloud(platformId: string, customerId: string, idcId?: string, apply?: boolean): Promise<CmdbSyncResult>
+      cmdbExportJson(): Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>
+      cmdbImportJson(): Promise<{ ok: boolean; canceled?: boolean; doc?: CmdbDocView; path?: string; error?: string }>
+      cmdbExportCsv(ids?: string[]): Promise<{ ok: boolean; canceled?: boolean; path?: string; count?: number; error?: string }>
+      cmdbImportCsv(): Promise<{ ok: boolean; canceled?: boolean; doc?: CmdbDocView; value?: { created: number; skipped: number; errors: string[] }; path?: string; error?: string }>
+      cmdbAiContext(id: string): Promise<{ ok: boolean; text?: string; error?: string }>
       onCloudOraAiEvent(cb: (ev: CloudOraAiEvent) => void): () => void
       onCloudAiEvent(cb: (ev: CloudAiEvent) => void): () => void
       sysResources(): Promise<{

@@ -33,6 +33,15 @@ import { cached, metaDropConn, metaGet, metaKeys, metaSet } from './meta'
 import { buildCsv } from './csv'
 import { getArtifact } from './artifacts'
 import { defaultMaskingConfig, maskText, normalizeMaskingConfig, validateMaskingConfig, type MaskingConfig, type MaskingFileType } from './masking'
+import { appendLog as cmdbLog, docPath as cmdbDocPath, ensureSeed, loadDoc as cmdbLoadDoc, loadView as cmdbLoadView, mutate as cmdbMutate, readLog as cmdbReadLog, replaceDoc as cmdbReplaceDoc, saveDoc as cmdbSaveDoc, saveView as cmdbSaveView } from './cmdb'
+import {
+  assetContextText, buildAssetCsv, deleteCustomer as cmdbDeleteCustomer, deleteIdc as cmdbDeleteIdc,
+  deleteRack as cmdbDeleteRack, deleteRelation as cmdbDeleteRelation, importAssetCsv, normalizeView, planSync,
+  deleteCable as cmdbDeleteCable, upsertCable as cmdbUpsertCable,
+  purgeAsset as cmdbPurgeAsset, restoreAsset as cmdbRestoreAsset, softDeleteAsset as cmdbSoftDeleteAsset,
+  upsertAsset as cmdbUpsertAsset, upsertCustomer as cmdbUpsertCustomer, upsertIdc as cmdbUpsertIdc,
+  upsertRack as cmdbUpsertRack, upsertRelation as cmdbUpsertRelation, type SyncItem
+} from './cmdb-model'
 import type { AppConfig, ConnProfile, EditSupport, ProjectConfig } from './types'
 import type { ApprovalOutcome, ApprovalDecision, ApprovalRequest } from './tools'
 import { listSubagentTasks, onSubtaskChange, stopSubagentTask, stopSubtasksOfSession } from './agent/subtask-registry'
@@ -3384,10 +3393,295 @@ export function registerIpc(): void {
     } catch { /* 窗口可能正在关闭 */ }
   })
 
+  // ---------- CMDB 资产台账（客户 / 机房 / 机柜 / 资产 / 关系） ----------
+  // 数据落 userData/cmdb/ 三个文件，不进 config.json：台账上千节点混进全量读写的
+  // 配置热路径会互相拖累，且一次坏写会连数据库连接一起丢。
+  ipcMain.handle('cmdb:load', () => {
+    const doc = ensureSeed()
+    return { ok: true, doc, view: cmdbLoadView(), log: cmdbReadLog(undefined, 80), file: cmdbDocPath() }
+  })
+
+  ipcMain.handle('cmdb:customer:save', (_e, { customer }: { customer: any }) =>
+    cmdbMutate((doc) => {
+      const r = cmdbUpsertCustomer(doc, customer || {})
+      if (!r.ok) return { value: undefined, error: r.error, dirty: false }
+      return { value: r.value, log: { action: customer?.id ? 'customer.update' : 'customer.create', target: r.value!.name, detail: `客户「${r.value!.name}」已保存` } }
+    }))
+
+  ipcMain.handle('cmdb:customer:delete', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.customers.find((c) => c.id === id)
+      if (!hit) return { value: undefined, error: '客户不存在', dirty: false }
+      const cleared = cmdbDeleteCustomer(doc, String(id))
+      return { value: cleared, log: { action: 'customer.delete', target: hit.name, detail: `删除客户「${hit.name}」，${cleared} 项资产转为未归属（记录保留）` } }
+    }))
+
+  ipcMain.handle('cmdb:idc:save', (_e, { idc }: { idc: any }) =>
+    cmdbMutate((doc) => {
+      const r = cmdbUpsertIdc(doc, idc || {})
+      if (!r.ok) return { value: undefined, error: r.error, dirty: false }
+      return { value: r.value, log: { action: idc?.id ? 'idc.update' : 'idc.create', target: r.value!.name, detail: `机房「${r.value!.name}」已保存` } }
+    }))
+
+  ipcMain.handle('cmdb:idc:delete', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.idcs.find((d) => d.id === id)
+      if (!hit) return { value: undefined, error: '机房不存在', dirty: false }
+      const r = cmdbDeleteIdc(doc, String(id))
+      return { value: r, log: { action: 'idc.delete', target: hit.name, detail: `删除机房「${hit.name}」：连带 ${r.racks} 个机柜，${r.assets} 项资产的位置被清空` } }
+    }))
+
+  ipcMain.handle('cmdb:rack:save', (_e, { rack }: { rack: any }) =>
+    cmdbMutate((doc) => {
+      const r = cmdbUpsertRack(doc, rack || {})
+      if (!r.ok) return { value: undefined, error: r.error, dirty: false }
+      return { value: r.value, log: { action: rack?.id ? 'rack.update' : 'rack.create', target: r.value!.code, detail: `机柜「${r.value!.code}」已保存` } }
+    }))
+
+  ipcMain.handle('cmdb:rack:delete', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.racks.find((r) => r.id === id)
+      if (!hit) return { value: undefined, error: '机柜不存在', dirty: false }
+      const n = cmdbDeleteRack(doc, String(id))
+      return { value: n, log: { action: 'rack.delete', target: hit.code, detail: `删除机柜「${hit.code}」，${n} 项资产转为未上架` } }
+    }))
+
+  ipcMain.handle('cmdb:asset:save', (_e, { asset }: { asset: any }) =>
+    cmdbMutate((doc) => {
+      const isNew = !asset?.id
+      const r = cmdbUpsertAsset(doc, asset || {})
+      if (!r.ok) return { value: undefined, error: r.error, dirty: false }
+      return {
+        value: r.value,
+        log: {
+          action: isNew ? 'asset.create' : 'asset.update',
+          target: r.value!.name,
+          assetId: r.value!.id,
+          detail: `${isNew ? '新增' : '修改'}资产「${r.value!.name}」`
+        }
+      }
+    }))
+
+  ipcMain.handle('cmdb:asset:delete', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.assets.find((a) => a.id === id)
+      if (!hit) return { value: undefined, error: '资产不存在', dirty: false }
+      // 软删：关系边留着，回收站恢复时关系自动回来（图投影会过滤掉已删节点）
+      cmdbSoftDeleteAsset(doc, String(id))
+      return { value: true, log: { action: 'asset.delete', target: hit.name, assetId: hit.id, detail: `删除资产「${hit.name}」（已移入回收站，关系保留）` } }
+    }))
+
+  ipcMain.handle('cmdb:asset:restore', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.assets.find((a) => a.id === id)
+      if (!hit) return { value: undefined, error: '资产不存在', dirty: false }
+      cmdbRestoreAsset(doc, String(id))
+      return { value: true, log: { action: 'asset.restore', target: hit.name, assetId: hit.id, detail: `从回收站恢复「${hit.name}」` } }
+    }))
+
+  ipcMain.handle('cmdb:asset:purge', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.assets.find((a) => a.id === id)
+      if (!hit) return { value: undefined, error: '资产不存在', dirty: false }
+      const n = cmdbPurgeAsset(doc, String(id))
+      return { value: n, log: { action: 'asset.purge', target: hit.name, assetId: hit.id, detail: `彻底删除「${hit.name}」并清理 ${n} 条关系` } }
+    }))
+
+  ipcMain.handle('cmdb:relation:save', (_e, { relation }: { relation: any }) =>
+    cmdbMutate((doc) => {
+      const r = cmdbUpsertRelation(doc, relation || {})
+      if (!r.ok) return { value: undefined, error: r.error, dirty: false }
+      const from = doc.assets.find((a) => a.id === r.value!.fromId)?.name || '?'
+      const to = doc.assets.find((a) => a.id === r.value!.toId)?.name || '?'
+      return { value: r.value, log: { action: 'relation.save', target: `${from} → ${to}`, detail: `建立关系 ${from} → ${to}${r.value!.label ? `（${r.value!.label}）` : ''}` } }
+    }))
+
+  ipcMain.handle('cmdb:relation:delete', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const rel = doc.relations.find((r) => r.id === id)
+      if (!rel) return { value: undefined, error: '关系不存在', dirty: false }
+      cmdbDeleteRelation(doc, String(id))
+      const from = doc.assets.find((a) => a.id === rel.fromId)?.name || '?'
+      const to = doc.assets.find((a) => a.id === rel.toId)?.name || '?'
+      return { value: true, log: { action: 'relation.delete', target: `${from} → ${to}`, detail: `断开关系 ${from} → ${to}` } }
+    }))
+
+  // 网线：端口到端口。台账里单独一张表（不是 relations）：
+  // 关系回答"逻辑上谁依赖谁"，网线回答"这根线插在哪两个口上"，两者数量级和生命周期都不同。
+  ipcMain.handle('cmdb:cable:save', (_e, { cable }: { cable: any }) =>
+    cmdbMutate((doc) => {
+      const r = cmdbUpsertCable(doc, cable || {})
+      if (!r.ok) return { value: undefined, error: r.error, dirty: false }
+      const from = doc.assets.find((a) => a.id === r.value!.fromId)?.name || '?'
+      const to = doc.assets.find((a) => a.id === r.value!.toId)?.name || '?'
+      return {
+        value: r.value,
+        log: {
+          action: 'cable.save',
+          target: `${from} → ${to}`,
+          detail: `接线 ${from}:${r.value!.fromPort} → ${to}:${r.value!.toPort}（${r.value!.net}）`
+        }
+      }
+    }))
+
+  ipcMain.handle('cmdb:cable:delete', (_e, { id }: { id: string }) =>
+    cmdbMutate((doc) => {
+      const hit = doc.cables.find((c) => c.id === id)
+      if (!hit) return { value: undefined, error: '网线不存在', dirty: false }
+      cmdbDeleteCable(doc, String(id))
+      const from = doc.assets.find((a) => a.id === hit.fromId)?.name || '?'
+      const to = doc.assets.find((a) => a.id === hit.toId)?.name || '?'
+      return { value: true, log: { action: 'cable.delete', target: `${from} → ${to}`, detail: `拔掉网线 ${from}:${hit.fromPort} → ${to}:${hit.toPort}` } }
+    }))
+
+  // 视图态（坐标 + 相机）：高频写，单独文件，不落台账
+  ipcMain.handle('cmdb:view:save', (_e, { view }: { view: any }) => {    try {
+      cmdbSaveView(normalizeView(view))
+      return { ok: true }
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('cmdb:log', (_e, { assetId, limit }: { assetId?: string; limit?: number }) =>
+    ({ ok: true, entries: cmdbReadLog(assetId || undefined, Math.min(500, Number(limit) || 200)) }))
+
+  // 纳管：先出计划（apply=false）给用户确认，再落库。只增不改人工字段。
+  const doCmdbSync = (items: SyncItem[], customerId: string, idcId: string, apply: boolean): any => {
+    if (!customerId) return { ok: false, error: '请先选择要纳管到的客户' }
+    const doc = cmdbLoadDoc()
+    const plan = planSync(doc, items, { customerId, idcId: idcId || undefined })
+    if (!apply) {
+      return { ok: true, preview: { total: items.length, creates: plan.creates.length, updates: plan.updates.length, skipped: plan.skipped } }
+    }
+    let created = 0
+    let updated = 0
+    for (const c of plan.creates) {
+      const r = cmdbUpsertAsset(doc, c)
+      if (r.ok) created++
+    }
+    for (const u of plan.updates) {
+      const a = doc.assets.find((x) => x.id === u.id)
+      if (!a) continue
+      Object.assign(a, u.patch, { updatedAt: Date.now() })
+      updated++
+    }
+    if (created || updated) {
+      cmdbSaveDoc(doc)
+      cmdbLog({
+        action: 'sync',
+        target: '纳管',
+        detail: `纳管完成：新增 ${created} 项，更新 ${updated} 项，跳过 ${plan.skipped} 项（已存在）`
+      })
+    }
+    return { ok: true, doc, created, updated, skipped: plan.skipped }
+  }
+
+  ipcMain.handle('cmdb:sync:servers', (_e, { customerId, idcId, apply }: { customerId: string; idcId?: string; apply?: boolean }) => {
+    const cfg = loadConfig()
+    const items: SyncItem[] = (cfg.servers || []).map((s: any) => ({
+      key: `server:${s.id}`,
+      name: s.name || s.host,
+      ip: s.host,
+      linkServerId: s.id,
+      meta: { 来源: 'SSH 服务器', 端口: String(s.port || 22), ...(s.group ? { 分组: String(s.group) } : {}) }
+    }))
+    if (!items.length) return { ok: false, error: '服务器注册表为空，先去「服务器」模块添加机器' }
+    return doCmdbSync(items, String(customerId || ''), String(idcId || ''), !!apply)
+  })
+
+  ipcMain.handle('cmdb:sync:cloud', async (_e, { platformId, customerId, idcId, apply }: { platformId: string; customerId: string; idcId?: string; apply?: boolean }) => {
+    const r = await cloudHosts(String(platformId || ''))
+    if (!r?.ok) return { ok: false, error: r?.error || '无法读取云平台主机列表（检查平台连接与权限）' }
+    const items: SyncItem[] = (r.data || []).map((h) => ({
+      key: `${platformId}:${h.id}`,
+      name: h.alias || h.name || h.ip,
+      ip: h.ip,
+      os: h.os,
+      status: h.status,
+      cloudRef: `${platformId}:${h.id}`,
+      meta: {
+        来源: '云管平台',
+        区域: h.region || '',
+        机房: h.idc || '',
+        Agent: h.agentStatus || '',
+        机型: h.typeName || '',
+        服务: (h.services || []).map((s) => s.name).join(' ')
+      }
+    }))
+    if (!items.length) return { ok: false, error: '该平台没有返回主机' }
+    return doCmdbSync(items, String(customerId || ''), String(idcId || ''), !!apply)
+  })
+
+  // 导入导出
+  ipcMain.handle('cmdb:export:json', async () => {
+    const doc = cmdbLoadDoc()
+    const defaultPath = `cmdb-${new Date().toISOString().slice(0, 10)}.json`
+    const filters = [{ name: 'CMDB 备份 (JSON)', extensions: ['json'] }]
+    const r = win ? await dialog.showSaveDialog(win, { defaultPath, filters }) : await dialog.showSaveDialog({ defaultPath, filters })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      writeFileAtomic(r.filePath, JSON.stringify(doc, null, 2))
+      return { ok: true, path: r.filePath }
+    } catch (e: any) { return { ok: false, error: `写出失败：${e?.message || e}` } }
+  })
+
+  ipcMain.handle('cmdb:import:json', async () => {
+    const filters = [{ name: 'CMDB 备份 (JSON)', extensions: ['json'] }]
+    const r = win ? await dialog.showOpenDialog(win, { filters, properties: ['openFile'] }) : await dialog.showOpenDialog({ filters, properties: ['openFile'] })
+    if (r.canceled || !r.filePaths?.length) return { ok: false, canceled: true }
+    try {
+      const raw = JSON.parse(await fs.readFile(r.filePaths[0], 'utf8'))
+      const doc = cmdbReplaceDoc(raw)
+      return { ok: true, doc, path: r.filePaths[0] }
+    } catch (e: any) { return { ok: false, error: `导入失败：${e?.message || e}` } }
+  })
+
+  ipcMain.handle('cmdb:export:csv', async (_e, { ids }: { ids?: string[] }) => {
+    const doc = cmdbLoadDoc()
+    const set = Array.isArray(ids) && ids.length ? new Set(ids) : null
+    const list = doc.assets.filter((a) => !a.deletedAt && (!set || set.has(a.id)))
+    if (!list.length) return { ok: false, error: '没有可导出的资产' }
+    const defaultPath = `cmdb-assets-${new Date().toISOString().slice(0, 10)}.csv`
+    const filters = [{ name: 'CSV（Excel 可直接打开）', extensions: ['csv'] }]
+    const r = win ? await dialog.showSaveDialog(win, { defaultPath, filters }) : await dialog.showSaveDialog({ defaultPath, filters })
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+    try {
+      // 加 BOM：Excel 直接双击打开中文不乱码
+      writeFileAtomic(r.filePath, '\uFEFF' + buildAssetCsv(doc, list))
+      return { ok: true, path: r.filePath, count: list.length }
+    } catch (e: any) { return { ok: false, error: `写出失败：${e?.message || e}` } }
+  })
+
+  ipcMain.handle('cmdb:import:csv', async () => {
+    const filters = [{ name: 'CSV', extensions: ['csv', 'txt'] }]
+    const r = win ? await dialog.showOpenDialog(win, { filters, properties: ['openFile'] }) : await dialog.showOpenDialog({ filters, properties: ['openFile'] })
+    if (r.canceled || !r.filePaths?.length) return { ok: false, canceled: true }
+    try {
+      const text = await fs.readFile(r.filePaths[0], 'utf8')
+      const result = cmdbMutate((doc) => {
+        const res = importAssetCsv(doc, text)
+        return {
+          value: res,
+          log: { action: 'import.csv', target: '台账', detail: `CSV 导入：新增 ${res.created} 项，跳过 ${res.skipped} 项` }
+        }
+      })
+      return result.ok ? { ok: true, doc: result.doc, value: result.value, path: r.filePaths[0] } : { ok: false, error: result.error }
+    } catch (e: any) { return { ok: false, error: `导入失败：${e?.message || e}` } }
+  })
+
+  /** 给 AI 助手的资产上下文（含邻接关系）。数据不出本机，直到用户自己发送。 */
+  ipcMain.handle('cmdb:aiContext', (_e, { id }: { id: string }) => {
+    const doc = cmdbLoadDoc()
+    const text = assetContextText(doc, String(id || ''))
+    return text ? { ok: true, text } : { ok: false, error: '资产不存在' }
+  })
+
   ipcMain.handle('app:info', () => ({
     secretsAvailable: secretsAvailable(),
     version: '0.1.0'
   }))
+
 }
 
 export async function shutdown(): Promise<void> {

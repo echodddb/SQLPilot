@@ -84,6 +84,13 @@
           title="文本编辑器 · 多标签 / 语法高亮 / 正则替换 / 编码转换"
         >文本编辑</span>
 
+        <!-- 资产台账：客户 / 机房 / 机柜 / 资产 + 关系图谱与 3D 拓扑 -->
+        <span
+          v-if="store.module === 'cmdb'"
+          class="badge blue"
+          title="CMDB：客户与机房是两个正交维度（一个机房可服务多个客户），关系独立成边、可跨机房"
+        >资产台账 · CMDB</span>
+
         <button
           v-if="store.module === 'agent' && curSession()"
           class="btn ghost"
@@ -177,6 +184,7 @@
           <TextEditorView v-else-if="store.module === 'editor'" style="flex: 1; min-height: 0" />
           <MaskingView v-else-if="store.module === 'masking'" style="flex: 1; min-height: 0" />
           <CloudView v-else-if="store.module === 'cloud'" style="flex: 1; min-height: 0" />
+          <CmdbView v-else-if="store.module === 'cmdb'" style="flex: 1; min-height: 0" />
 
           <!-- 数据库控制台（独立一级模块）：v-show 保活——切到别的模块处理完再回来，
                查询标签页 / 结果集 / 未提交事务全部还在；只有 ✕ 关闭控制台才销毁 -->
@@ -246,6 +254,7 @@ import DbWorkbenchView from './components/DbWorkbenchView.vue'
 import ServerView from './components/server/ServerView.vue'
 import { srv as srvState } from './server/state'
 import CloudView from './components/cloud/CloudView.vue'
+import CmdbView from './components/cmdb/CmdbView.vue'
 import { engineOf } from './cloud/engines'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
 import ArtifactsPanel from './components/artifacts/ArtifactsPanel.vue'

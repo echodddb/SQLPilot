@@ -476,6 +476,33 @@ const api = {
     ipcRenderer.on('cloud:oraAi:event', l)
     return () => ipcRenderer.removeListener('cloud:oraAi:event', l)
   },
+  // ---------- CMDB 资产台账（客户/机房/机柜/资产/关系 + 视图态） ----------
+  cmdbLoad: () => ipcRenderer.invoke('cmdb:load'),
+  cmdbSaveCustomer: (customer: any) => ipcRenderer.invoke('cmdb:customer:save', { customer: plain(customer) }),
+  cmdbDeleteCustomer: (id: string) => ipcRenderer.invoke('cmdb:customer:delete', { id }),
+  cmdbSaveIdc: (idc: any) => ipcRenderer.invoke('cmdb:idc:save', { idc: plain(idc) }),
+  cmdbDeleteIdc: (id: string) => ipcRenderer.invoke('cmdb:idc:delete', { id }),
+  cmdbSaveRack: (rack: any) => ipcRenderer.invoke('cmdb:rack:save', { rack: plain(rack) }),
+  cmdbDeleteRack: (id: string) => ipcRenderer.invoke('cmdb:rack:delete', { id }),
+  cmdbSaveAsset: (asset: any) => ipcRenderer.invoke('cmdb:asset:save', { asset: plain(asset) }),
+  cmdbDeleteAsset: (id: string) => ipcRenderer.invoke('cmdb:asset:delete', { id }),
+  cmdbRestoreAsset: (id: string) => ipcRenderer.invoke('cmdb:asset:restore', { id }),
+  cmdbPurgeAsset: (id: string) => ipcRenderer.invoke('cmdb:asset:purge', { id }),
+  cmdbSaveRelation: (relation: any) => ipcRenderer.invoke('cmdb:relation:save', { relation: plain(relation) }),
+  cmdbDeleteRelation: (id: string) => ipcRenderer.invoke('cmdb:relation:delete', { id }),
+  cmdbSaveCable: (cable: any) => ipcRenderer.invoke('cmdb:cable:save', { cable: plain(cable) }),
+  cmdbDeleteCable: (id: string) => ipcRenderer.invoke('cmdb:cable:delete', { id }),
+  cmdbSaveView: (view: any) => ipcRenderer.invoke('cmdb:view:save', { view: plain(view) }),
+  cmdbLog: (assetId?: string, limit?: number) => ipcRenderer.invoke('cmdb:log', { assetId, limit }),
+  cmdbSyncServers: (customerId: string, idcId?: string, apply?: boolean) =>
+    ipcRenderer.invoke('cmdb:sync:servers', { customerId, idcId, apply: !!apply }),
+  cmdbSyncCloud: (platformId: string, customerId: string, idcId?: string, apply?: boolean) =>
+    ipcRenderer.invoke('cmdb:sync:cloud', { platformId, customerId, idcId, apply: !!apply }),
+  cmdbExportJson: () => ipcRenderer.invoke('cmdb:export:json'),
+  cmdbImportJson: () => ipcRenderer.invoke('cmdb:import:json'),
+  cmdbExportCsv: (ids?: string[]) => ipcRenderer.invoke('cmdb:export:csv', { ids: ids ? [...ids] : undefined }),
+  cmdbImportCsv: () => ipcRenderer.invoke('cmdb:import:csv'),
+  cmdbAiContext: (id: string) => ipcRenderer.invoke('cmdb:aiContext', { id }),
   // 剪贴板与外链
   writeClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', { text }),
   // 本机资源（资源面板轮询）

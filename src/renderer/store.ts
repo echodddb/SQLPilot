@@ -67,8 +67,8 @@ export function toPlain<T>(v: T): T {
 
 export const store = reactive({
   ready: false,
-  /** 一级功能模块：AI 助手（对话/终端）/ 数据库控制台 / 云管平台 / 服务器 / 文本编辑 / 脱敏工具 / 巡检报告 */
-  module: 'agent' as 'agent' | 'db' | 'cloud' | 'server' | 'editor' | 'masking' | 'report',
+  /** 一级功能模块：AI 助手（对话/终端）/ 数据库控制台 / 服务器 / 资产台账 / 云管平台 / 文本编辑 / 脱敏工具 / 巡检报告 */
+  module: 'agent' as 'agent' | 'db' | 'cloud' | 'server' | 'cmdb' | 'editor' | 'masking' | 'report',
   /** 设置浮窗（横切关注点，不占主视图轨道；对话/工作台保持原样在浮窗下方） */
   settingsOpen: false,
   cfg: null as any,
