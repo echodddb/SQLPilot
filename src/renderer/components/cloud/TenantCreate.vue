@@ -92,6 +92,11 @@
           </div>
         </div>
 
+        <div v-if="hiddenSpecs.length" class="zhint">
+          已隐藏 {{ hiddenSpecs.length }} 个 CPU &lt; 1 的规格（{{ hiddenSpecs.map((s) => s.name).join(' / ') }}）：
+          OB 4.x 的 Resource Unit 要求 MAX_CPU ≥ 1，选它们会让「Create ob tenant」这一步失败。
+        </div>
+
         <div class="row two">
           <div class="frow">
             <label>主 Zone</label>
@@ -177,14 +182,16 @@ const charsets = Object.keys(CHARSET_COLLATIONS)
 const clusters = ref<CloudCluster[]>([])
 const clusterLabel = computed(() => clusters.value.find((c) => c.id === form.clusterId)?.name || '请选择集群')
 
-/** OCP 元数据集群（metadb_cluster），在里面建业务租户几乎一定是误操作 */
+/** OCP 元数据集群（metadb_cluster / Metac），在里面建业务租户几乎一定是误操作 */
 function isMetaCluster(name: string): boolean {
-  return /metadb|meta_cluster|ocp.?meta/i.test(name)
+  return /metac|metadb|meta[_-]?cluster|ocp.?meta/i.test(name)
 }
 
 const loadingCluster = ref(false)
 const zoneNames = ref<string[]>([])
 const unitSpecs = ref<{ name: string; cpu: number; memory: number; type: string }[]>([])
+/** CPU < 1 的规格（B 0.25C / S0 0.5C）：OB 4.x 的 RESOURCE UNIT 要求 MAX_CPU ≥ 1，选它任务必失败 */
+const hiddenSpecs = ref<{ name: string; cpu: number }[]>([])
 
 const form = reactive({
   // 集群在 onMounted 里确定：优先用调用方传入的，其次当前打开的集群，最后取第一个运行中的
@@ -247,14 +254,26 @@ async function loadCluster(id: number): Promise<void> {
       return
     }
     zoneNames.value = (r.data.zones || []).map((z) => z.name)
-    const list = r.data.unitSpecs || []
-    const normal = list.filter((u) => u.type !== 'SYSTEM')
-    unitSpecs.value = normal.length ? normal : list
+    const all = r.data.unitSpecs || []
+    // OB 4.x 建 Resource Unit 时 MAX_CPU 最小是 1，B(0.25C)/S0(0.5C) 这类规格提交后会在
+    // "Create ob tenant" 这一步失败、还可能留下 CREATING 状态的僵尸租户记录，这里直接不给选。
+    // 例外：整个集群只有 CPU<1 的规格时（极简测试环境）不能全隐藏，否则没法建租户。
+    const usable = all.filter((u) => u.cpu >= 1)
+    const source = usable.length ? usable : all
+    hiddenSpecs.value = usable.length ? all.filter((u) => u.cpu < 1).map((u) => ({ name: u.name, cpu: u.cpu })) : []
+    // 排序：自定义规格 → 内置通用规格 → LogOnly*（那是给日志副本用的，默认选中会让人误解）
+    const rank = (u: { name: string; type: string }): number =>
+      /^logonly/i.test(u.name) ? 2 : u.type === 'CUSTOM' ? 0 : 1
+    const picked = source
+      .slice()
+      .sort((a, b) => rank(a) - rank(b) || a.cpu - b.cpu || a.name.localeCompare(b.name))
+    unitSpecs.value = picked
+    const keep = picked.find((u) => u.name === form.zones[0]?.unitSpecName)?.name
     // 默认勾选全部 Zone（OCP 向导默认全选，三副本集群即 3F）
     form.zones = zoneNames.value.map((n) => ({
       name: n,
       replicaType: 'FULL',
-      unitSpecName: unitSpecs.value[0]?.name || 'S1',
+      unitSpecName: keep || picked[0]?.name || 'S1',
       unitCount: 1
     }))
     if (form.primaryZone !== 'RANDOM' && !zoneNames.value.includes(form.primaryZone)) form.primaryZone = 'RANDOM'
@@ -333,7 +352,11 @@ async function submit(): Promise<void> {
       msg.value = r.error || '创建失败'
       return
     }
-    pushNotice(r.taskId ? `创建租户任务已提交：任务 #${r.taskId}` : '创建租户任务已提交')
+    pushNotice(
+      r.taskId
+        ? `租户「${form.name.trim()}」创建任务已提交：任务 #${r.taskId}（进度见「任务」页）`
+        : `租户「${form.name.trim()}」创建任务已提交`
+    )
     emit('close')
   } catch (e: any) {
     msgKind.value = 'err'
@@ -399,6 +422,7 @@ input::placeholder { color: var(--text-faint); }
 .zdel { width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim); cursor: pointer; font-size: 10px; }
 .zdel:hover { color: var(--red); border-color: var(--red); }
 .zsum { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 8px; border-top: 1px solid var(--border); background: var(--bg-card); }
+.zhint { font-size: 10.5px; line-height: 1.6; color: var(--yellow); background: var(--yellow-dim); border-radius: 8px; padding: 6px 9px; }
 .pwd { display: flex; gap: 6px; }
 .pwd input { flex: 1; }
 .gen { border: 1px solid var(--border); background: var(--bg-input); color: var(--text-dim); border-radius: 8px; padding: 0 10px; font-size: 11.5px; font-family: inherit; cursor: pointer; white-space: nowrap; }

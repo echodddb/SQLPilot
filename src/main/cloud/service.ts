@@ -33,6 +33,15 @@ import {
   ocpTaskDetail,
   ocpTaskStats,
   ocpTaskCreators,
+  ocpTaskAction,
+  ocpSubtaskAction,
+  ocpTaskBatchRetry,
+  ocpSubtaskLog,
+  ocpTaskLogText,
+  ocpTaskDiagnosis,
+  type TaskOpKind,
+  type SubtaskOpKind,
+  type TaskOpResult,
   type AlarmQuery,
   type AlarmListResult,
   type AlarmHistoryResult,
@@ -139,6 +148,25 @@ import {
   type TenantBackupStrategy,
   type TenantBackupTask,
   type TenantUser,
+  type TenantRole,
+  type TenantObject,
+  type CreateTenantUserInput,
+  ocpTenantRoles,
+  ocpTenantRole,
+  ocpTenantUser,
+  ocpTenantCreateUser,
+  ocpTenantChangeUserPassword,
+  ocpTenantSetUserLocked,
+  ocpTenantDropUser,
+  ocpTenantModifyUserGlobalPrivileges,
+  ocpTenantCreateRole,
+  ocpTenantDropRole,
+  ocpTenantObjects,
+  ocpTenantResourcePlans,
+  ocpTenantResourcePlanAction,
+  ocpTenantDropResourcePlan,
+  ocpTenantConsumerGroups,
+  type TenantResourcePlan,
   type TenantTde,
   ocpUnitSpecs,
   ocpUnitSpecCreate,
@@ -660,6 +688,39 @@ export const taskStats = (id: string): Promise<{ ok: boolean; data?: { status: s
 export const taskCreators = (id: string): Promise<{ ok: boolean; data?: string[]; error?: string }> =>
   wrap(() => ocpTaskCreators(clientOf(id)))
 
+// ---------- 任务操作（写） ----------
+// 与 OCP 任务页一致：重试 / 回滚 / 放弃、子任务重试 / 跳过 / 终止、批量重试、日志与诊断包。
+// 全部走 OCP 原生接口，失败时把 OCP 的 error.message 原样带回（如「任务在当前状态不支持此操作…」）。
+
+export const taskAction = (id: string, taskId: number, action: TaskOpKind): Promise<{ ok: boolean; data?: TaskOpResult; error?: string }> =>
+  wrap(() => ocpTaskAction(clientOf(id), Number(taskId), action))
+
+export const subtaskAction = (
+  id: string,
+  taskId: number,
+  subtaskId: number,
+  action: SubtaskOpKind
+): Promise<{ ok: boolean; data?: TaskOpResult; error?: string }> =>
+  wrap(() => ocpSubtaskAction(clientOf(id), Number(taskId), Number(subtaskId), action))
+
+export const taskBatchRetry = (id: string, taskIds: number[]): Promise<{ ok: boolean; data?: { count: number }; error?: string }> =>
+  wrap(() => ocpTaskBatchRetry(clientOf(id), Array.isArray(taskIds) ? taskIds : []))
+
+export const subtaskLog = (id: string, taskId: number, subtaskId: number): Promise<{ ok: boolean; data?: { text: string }; error?: string }> =>
+  wrap(() => ocpSubtaskLog(clientOf(id), Number(taskId), Number(subtaskId)))
+
+export const taskLogText = (
+  id: string,
+  taskId: number
+): Promise<{ ok: boolean; data?: { text: string; subtasks: number; empty: number }; error?: string }> =>
+  wrap(() => ocpTaskLogText(clientOf(id), Number(taskId)))
+
+export const taskDiagnosis = (
+  id: string,
+  taskId: number
+): Promise<{ ok: boolean; data?: { data: Buffer; fileName: string }; error?: string }> =>
+  wrap(() => ocpTaskDiagnosis(clientOf(id), Number(taskId)))
+
 
 // ---------- 监控 ----------
 
@@ -671,7 +732,7 @@ export const metrics = (id: string, q: MetricQuery): Promise<{ ok: boolean; data
 export const clusterAction = (id: string, clusterId: number, action: string): Promise<{ ok: boolean; data?: { taskId?: number; message?: string }; error?: string }> =>
   wrap(() => ocpClusterAction(clientOf(id), clusterId, action))
 
-export const createTenant = (id: string, clusterId: number, input: CreateTenantInput): Promise<{ ok: boolean; data?: { taskId?: number }; error?: string }> =>
+export const createTenant = (id: string, clusterId: number, input: CreateTenantInput): Promise<{ ok: boolean; data?: { taskId?: number; tenantId?: number }; error?: string }> =>
   wrap(() => ocpCreateTenant(clientOf(id), clusterId, input))
 
 export const deleteTenant = (id: string, clusterId: number, tenantId: number): Promise<{ ok: boolean; data?: { taskId?: number }; error?: string }> =>
@@ -695,7 +756,9 @@ export const clusterParams = (id: string, clusterId: number): Promise<{ ok: bool
 export const clusterUpdateParams = (id: string, clusterId: number, items: { name: string; value: string }[]): Promise<{ ok: boolean; error?: string }> =>
   wrap(async () => { await ocpClusterUpdateParameters(clientOf(id), clusterId, items) })
 
-export const tenantParams = (id: string, clusterId: number, tenantId: number): Promise<{ ok: boolean; data?: { name: string; value: string; def: string; type: string; description: string }[]; error?: string }> =>
+export const tenantParams = (
+  id: string, clusterId: number, tenantId: number
+): Promise<{ ok: boolean; data?: { name: string; value: string; def: string; type: string; description: string; needRestart: boolean; readonly: boolean; valueRange: string }[]; error?: string }> =>
   wrap(() => ocpTenantParameters(clientOf(id), clusterId, tenantId))
 
 
@@ -872,6 +935,73 @@ export const tenantUsers = (id: string, clusterId: number, tenantId: number): Pr
 
 export const tenantTde = (id: string, clusterId: number, tenantId: number): Promise<{ ok: boolean; data?: TenantTde | null; error?: string }> =>
   wrap(() => ocpTenantTde(clientOf(id), clusterId, tenantId))
+
+// ---------- 用户 / 角色 / 授权对象 ----------
+// MySQL 调 /roles 会 400、Oracle 调 /databases 会 400，所以这里不预先判断模式，
+// 让服务端报错原样透传（前端用 tenantMode 决定要不要发这个请求）。
+
+export const tenantRoles = (id: string, clusterId: number, tenantId: number): Promise<{ ok: boolean; data?: TenantRole[]; error?: string }> =>
+  wrap(() => ocpTenantRoles(clientOf(id), clusterId, tenantId))
+
+export const tenantRole = (id: string, clusterId: number, tenantId: number, role: string): Promise<{ ok: boolean; data?: TenantRole | null; error?: string }> =>
+  wrap(() => ocpTenantRole(clientOf(id), clusterId, tenantId, String(role || '')))
+
+export const tenantUser = (id: string, clusterId: number, tenantId: number, user: string): Promise<{ ok: boolean; data?: TenantUser | null; error?: string }> =>
+  wrap(() => ocpTenantUser(clientOf(id), clusterId, tenantId, String(user || '')))
+
+export const tenantCreateUser = (id: string, clusterId: number, tenantId: number, input: CreateTenantUserInput): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantCreateUser(clientOf(id), clusterId, tenantId, input) })
+
+export const tenantChangeUserPassword = (id: string, clusterId: number, tenantId: number, user: string, password: string): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantChangeUserPassword(clientOf(id), clusterId, tenantId, String(user || ''), String(password || '')) })
+
+export const tenantSetUserLocked = (id: string, clusterId: number, tenantId: number, user: string, locked: boolean): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantSetUserLocked(clientOf(id), clusterId, tenantId, String(user || ''), !!locked) })
+
+export const tenantDropUser = (id: string, clusterId: number, tenantId: number, user: string): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantDropUser(clientOf(id), clusterId, tenantId, String(user || '')) })
+
+export const tenantModifyUserGlobalPrivileges = (
+  id: string, clusterId: number, tenantId: number, user: string, privileges: string[]
+): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => {
+    await ocpTenantModifyUserGlobalPrivileges(clientOf(id), clusterId, tenantId, String(user || ''), privileges || [])
+  })
+
+export const tenantCreateRole = (
+  id: string, clusterId: number, tenantId: number, roleName: string, globalPrivileges: string[] = []
+): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantCreateRole(clientOf(id), clusterId, tenantId, String(roleName || ''), globalPrivileges || []) })
+
+export const tenantDropRole = (id: string, clusterId: number, tenantId: number, roleName: string): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantDropRole(clientOf(id), clusterId, tenantId, String(roleName || '')) })
+
+export const tenantObjects = (
+  id: string, clusterId: number, tenantId: number, opts: { keyword?: string; type?: string; userName?: string } = {}
+): Promise<{ ok: boolean; data?: TenantObject[]; error?: string }> =>
+  wrap(() => ocpTenantObjects(clientOf(id), clusterId, tenantId, opts || {}))
+
+// 资源管理（资源隔离计划 / 资源组）：这一组在 OCP 里要求已登记租户 root 密码，否则 428
+
+export const tenantResourcePlans = (
+  id: string, clusterId: number, tenantId: number
+): Promise<{ ok: boolean; data?: TenantResourcePlan[]; error?: string }> =>
+  wrap(() => ocpTenantResourcePlans(clientOf(id), clusterId, tenantId))
+
+export const tenantResourcePlanAction = (
+  id: string, clusterId: number, tenantId: number, planName: string, action: 'enable' | 'disable'
+): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantResourcePlanAction(clientOf(id), clusterId, tenantId, String(planName || ''), action) })
+
+export const tenantDropResourcePlan = (
+  id: string, clusterId: number, tenantId: number, planName: string
+): Promise<{ ok: boolean; error?: string }> =>
+  wrap(async () => { await ocpTenantDropResourcePlan(clientOf(id), clusterId, tenantId, String(planName || '')) })
+
+export const tenantConsumerGroups = (
+  id: string, clusterId: number, tenantId: number
+): Promise<{ ok: boolean; data?: TenantResourcePlan[]; error?: string }> =>
+  wrap(() => ocpTenantConsumerGroups(clientOf(id), clusterId, tenantId))
 
 // ---------- Unit 规格 / 克隆租户 / 创建备租户 ----------
 
@@ -1154,16 +1284,49 @@ export const directClearTasks = (
 
 const tenantCredKey = (id: string, tenant: string): string => `obtenant:${id}:${tenant}`
 
-export function tenantLoginOf(id: string, tenant: string): TenantLogin | null {
-  const raw = getPassword(tenantCredKey(id, tenant))
-  if (!raw) return null
+/** 同一台实例上可能配了多条直连平台（重复添加/改过名字），凭据按平台 id 存，换了条目就"丢"了 */
+function siblingPlatformIds(id: string): string[] {
   try {
-    const j = JSON.parse(raw) as { user?: string; password?: string }
-    if (!j.user || j.password === undefined) return null
-    return { user: String(j.user), password: String(j.password), tenant }
+    const list = loadConfig().cloudPlatforms || []
+    const self = list.find((x) => x.id === id)
+    if (!self || self.type !== 'obdirect') return []
+    const key = `${self.host}:${self.port}:${self.username}`
+    return list
+      .filter((x) => x.type === 'obdirect' && x.id !== id && `${x.host}:${x.port}:${x.username}` === key)
+      .map((x) => x.id)
+  } catch {
+    return []
+  }
+}
+
+/** 平台账号自带租户后缀（root@sys），当要操作的就是这个租户时直接复用平台密码 */
+function platformOwnLogin(id: string, tenant: string): TenantLogin | null {
+  try {
+    const p = getObDirectPlatform(id)
+    const at = p.username.indexOf('@')
+    const user = at >= 0 ? p.username.slice(0, at) : p.username
+    const t = at >= 0 ? p.username.slice(at + 1) : 'sys'
+    if (String(tenant || '').trim().toLowerCase() !== t.toLowerCase()) return null
+    return { user, password: directPassword(id), tenant: t }
   } catch {
     return null
   }
+}
+
+export function tenantLoginOf(id: string, tenant: string): TenantLogin | null {
+  for (const pid of [id, ...siblingPlatformIds(id)]) {
+    const raw = getPassword(tenantCredKey(pid, tenant))
+    if (!raw) continue
+    try {
+      const j = JSON.parse(raw) as { user?: string; password?: string }
+      if (!j.user || j.password === undefined) continue
+      return { user: String(j.user), password: String(j.password), tenant }
+    } catch {
+      continue
+    }
+  }
+  // 没有单独录入 → 若租户正是平台连接的那个租户（sys），直接用平台凭据
+  return platformOwnLogin(id, tenant)
 }
 
 export const saveTenantCredential = (
@@ -1191,9 +1354,16 @@ export const saveTenantCredential = (
   return { ok: true }
 }
 
-export const tenantCredentialStatus = (id: string, tenant: string): { has: boolean; user?: string } => {
+export const tenantCredentialStatus = (
+  id: string,
+  tenant: string
+): { has: boolean; user?: string; inherited?: boolean } => {
   const login = tenantLoginOf(id, tenant)
-  return login ? { has: true, user: login.user } : { has: false }
+  if (login) {
+    // inherited：没有单独保存过，用的是平台自身的 root@sys 密码
+    return { has: true, user: login.user, inherited: !getPassword(tenantCredKey(id, tenant)) }
+  }
+  return { has: false }
 }
 
 export const clearTenantCredential = (id: string, tenant: string): { ok: boolean } => {
@@ -1557,6 +1727,53 @@ export const directTenantUsers = (
     const { p, pw } = requireDirect(id)
     return obd.tenantUsersOf(p, pw, Number(tenantId) || 0)
   })
+
+// ---------- 直连：租户运维视图（事务 / 合并 / 监控 / 备份 / 资源管理） ----------
+
+export const directTenantTxns = (
+  id: string,
+  tenantId: number,
+  limit = 200
+): Promise<{ ok: boolean; data?: obd.ObTenantTxn[]; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantTxnsOf(p, pw, Number(tenantId) || 0, limit)
+  })
+
+export const directTenantCompaction = (
+  id: string,
+  tenantId: number
+): Promise<{ ok: boolean; data?: obd.ObCompactionBundle; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantCompactionOf(p, pw, Number(tenantId) || 0)
+  })
+
+export const directTenantMetrics = (
+  id: string,
+  tenantId: number,
+  tenantName: string
+): Promise<{ ok: boolean; data?: obd.ObTenantMetrics; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantMetricsOf(p, pw, Number(tenantId) || 0, String(tenantName || ''))
+  })
+
+export const directTenantBackup = (
+  id: string,
+  tenantId: number
+): Promise<{ ok: boolean; data?: Awaited<ReturnType<typeof obd.tenantBackupOf>>; error?: string }> =>
+  wrap(async () => {
+    const { p, pw } = requireDirect(id)
+    return obd.tenantBackupOf(p, pw, Number(tenantId) || 0)
+  })
+
+/** 资源隔离计划在租户内部，必须用已录入的业务凭据连进去 */
+export const directTenantRsrc = (
+  id: string,
+  tenant: string
+): Promise<{ ok: boolean; data?: obd.ObRsrcBundle; error?: string }> =>
+  wrap(() => withTenantLogin(id, tenant, (p, login) => obd.tenantRsrcAs(p, login)))
 
 export const directTenantParams = (
   id: string,

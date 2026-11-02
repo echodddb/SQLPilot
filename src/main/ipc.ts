@@ -70,6 +70,12 @@ import {
   taskDetail as cloudTaskDetail,
   taskStats as cloudTaskStats,
   taskCreators as cloudTaskCreators,
+  taskAction as cloudTaskAction,
+  subtaskAction as cloudSubtaskAction,
+  taskBatchRetry as cloudTaskBatchRetry,
+  subtaskLog as cloudSubtaskLog,
+  taskLogText as cloudTaskLogText,
+  taskDiagnosis as cloudTaskDiagnosis,
   // 直连模式（无 OCP）专有接口
   directCapability as cloudDirectCapability,
   directTopSql as cloudDirectTopSql,
@@ -95,6 +101,11 @@ import {
   directTenantDatabases as cloudDirectTenantDbs,
   directTenantUsers as cloudDirectTenantUsers,
   directTenantParams as cloudDirectTenantParams,
+  directTenantTxns as cloudDirectTenantTxns,
+  directTenantCompaction as cloudDirectTenantCompaction,
+  directTenantMetrics as cloudDirectTenantMetrics,
+  directTenantBackup as cloudDirectTenantBackup,
+  directTenantRsrc as cloudDirectTenantRsrc,
   directTenantTopSql as cloudDirectTenantTopSql,
   initDirectTaskLog,
   directTasks as cloudDirectTasks,
@@ -162,6 +173,21 @@ import {
   tenantGatherAll as cloudTenantGatherAll,
   tenantBackupAll as cloudTenantBackupAll,
   tenantUsers as cloudTenantUsers,
+  tenantRoles as cloudTenantRoles,
+  tenantRole as cloudTenantRole,
+  tenantUser as cloudTenantUser,
+  tenantCreateUser as cloudTenantCreateUser,
+  tenantChangeUserPassword as cloudTenantChangeUserPassword,
+  tenantSetUserLocked as cloudTenantSetUserLocked,
+  tenantDropUser as cloudTenantDropUser,
+  tenantModifyUserGlobalPrivileges as cloudTenantModifyUserGlobalPrivileges,
+  tenantCreateRole as cloudTenantCreateRole,
+  tenantDropRole as cloudTenantDropRole,
+  tenantObjects as cloudTenantObjects,
+  tenantResourcePlans as cloudTenantResourcePlans,
+  tenantResourcePlanAction as cloudTenantResourcePlanAction,
+  tenantDropResourcePlan as cloudTenantDropResourcePlan,
+  tenantConsumerGroups as cloudTenantConsumerGroups,
   tenantTde as cloudTenantTde,
   unitSpecs as cloudUnitSpecs,
   unitSpecCreate as cloudUnitSpecCreate,
@@ -2958,6 +2984,46 @@ export function registerIpc(): void {
     cloudTaskDetail(String(id || ''), Number(taskId)))
   ipcMain.handle('cloud:taskStats', (_e, { id }: { id: string }) => cloudTaskStats(String(id || '')))
   ipcMain.handle('cloud:taskCreators', (_e, { id }: { id: string }) => cloudTaskCreators(String(id || '')))
+  // ---- 任务操作（与 OCP 任务页一致的写操作） ----
+  ipcMain.handle('cloud:taskAction', (_e, { id, taskId, action }: { id: string; taskId: number; action: any }) =>
+    cloudTaskAction(String(id || ''), Number(taskId), action))
+  ipcMain.handle('cloud:subtaskAction', (_e, { id, taskId, subtaskId, action }: { id: string; taskId: number; subtaskId: number; action: any }) =>
+    cloudSubtaskAction(String(id || ''), Number(taskId), Number(subtaskId), action))
+  ipcMain.handle('cloud:taskBatchRetry', (_e, { id, taskIds }: { id: string; taskIds: number[] }) =>
+    cloudTaskBatchRetry(String(id || ''), Array.isArray(taskIds) ? taskIds.map(Number) : []))
+  ipcMain.handle('cloud:subtaskLog', (_e, { id, taskId, subtaskId }: { id: string; taskId: number; subtaskId: number }) =>
+    cloudSubtaskLog(String(id || ''), Number(taskId), Number(subtaskId)))
+  // 整任务日志：主进程拉全部子任务日志拼接后落盘（UTF-8 文本）
+  ipcMain.handle('cloud:taskLogSave', async (_e, { id, taskId, name }: { id: string; taskId: number; name?: string }) => {
+    const r = await cloudTaskLogText(String(id || ''), Number(taskId))
+    if (!r.ok || !r.data) return { ok: false, error: r.error || '读取任务日志失败' }
+    const safe = String(name || `task-${taskId}`).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)
+    const defaultPath = `${safe}_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}.txt`
+    const filters = [{ name: '文本日志', extensions: ['txt', 'log'] }]
+    const pick = win ? await dialog.showSaveDialog(win, { defaultPath, filters }) : await dialog.showSaveDialog({ defaultPath, filters })
+    if (pick.canceled || !pick.filePath) return { ok: false, canceled: true }
+    try {
+      writeFileAtomic(pick.filePath, r.data.text)
+      return { ok: true, path: pick.filePath, count: r.data.subtasks, empty: r.data.empty, bytes: Buffer.byteLength(r.data.text, 'utf8') }
+    } catch (e: any) {
+      return { ok: false, error: `写出失败：${e?.message || e}` }
+    }
+  })
+  // 任务诊断包：OCP 返回 zip，主进程直接落盘
+  ipcMain.handle('cloud:taskDiagnosis', async (_e, { id, taskId }: { id: string; taskId: number }) => {
+    const r = await cloudTaskDiagnosis(String(id || ''), Number(taskId))
+    if (!r.ok || !r.data) return { ok: false, error: r.error || '下载诊断包失败' }
+    const defaultPath = String(r.data.fileName || `task-${taskId}-diagnosis.zip`)
+    const filters = [{ name: 'ZIP 压缩包', extensions: ['zip'] }]
+    const pick = win ? await dialog.showSaveDialog(win, { defaultPath, filters }) : await dialog.showSaveDialog({ defaultPath, filters })
+    if (pick.canceled || !pick.filePath) return { ok: false, canceled: true }
+    try {
+      fsSync.writeFileSync(pick.filePath, r.data.data)
+      return { ok: true, path: pick.filePath, bytes: r.data.data.length }
+    } catch (e: any) {
+      return { ok: false, error: `写出失败：${e?.message || e}` }
+    }
+  })
 
   // 直连模式（无 OCP）：参数 / TopSQL / 事件 / 写操作
   ipcMain.handle('cloud:directCapability', (_e, { id }: { id: string }) => cloudDirectCapability(String(id || '')))
@@ -3009,6 +3075,17 @@ export function registerIpc(): void {
     cloudDirectTenantParams(String(id || ''), Number(tenantId) || 0, opts || {}))
   ipcMain.handle('cloud:directTenantTopSql', (_e, { id, tenantId, opts }: { id: string; tenantId: number; opts?: any }) =>
     cloudDirectTenantTopSql(String(id || ''), Number(tenantId) || 0, opts || {}))
+  // 直连：租户运维视图（事务 / 合并 / 监控 / 备份 / 资源管理）
+  ipcMain.handle('cloud:directTenantTxns', (_e, { id, tenantId, limit }: { id: string; tenantId: number; limit?: number }) =>
+    cloudDirectTenantTxns(String(id || ''), Number(tenantId) || 0, Number(limit) || 200))
+  ipcMain.handle('cloud:directTenantCompaction', (_e, { id, tenantId }: { id: string; tenantId: number }) =>
+    cloudDirectTenantCompaction(String(id || ''), Number(tenantId) || 0))
+  ipcMain.handle('cloud:directTenantMetrics', (_e, { id, tenantId, tenantName }: { id: string; tenantId: number; tenantName: string }) =>
+    cloudDirectTenantMetrics(String(id || ''), Number(tenantId) || 0, String(tenantName || '')))
+  ipcMain.handle('cloud:directTenantBackup', (_e, { id, tenantId }: { id: string; tenantId: number }) =>
+    cloudDirectTenantBackup(String(id || ''), Number(tenantId) || 0))
+  ipcMain.handle('cloud:directTenantRsrc', (_e, { id, tenant }: { id: string; tenant: string }) =>
+    cloudDirectTenantRsrc(String(id || ''), String(tenant || '')))
   // 任务日志（本地文本）：列表 / 详情 / 动作清单 / 清理
   ipcMain.handle('cloud:directTasks', (_e, q: any) => cloudDirectTasks(q || {}))
   ipcMain.handle('cloud:directTaskDetail', (_e, { id }: { id: string }) => cloudDirectTaskDetail(String(id || '')))
@@ -3155,6 +3232,46 @@ export function registerIpc(): void {
     cloudTenantUsers(String(id || ''), Number(clusterId), Number(tenantId)))
   ipcMain.handle('cloud:tenantTde', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
     cloudTenantTde(String(id || ''), Number(clusterId), Number(tenantId)))
+
+  // ---------- 用户 / 角色 / 授权对象（Oracle 与 MySQL 字段集不同）----------
+  ipcMain.handle('cloud:tenantRoles', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantRoles(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantRole', (_e, { id, clusterId, tenantId, role }: { id: string; clusterId: number; tenantId: number; role: string }) =>
+    cloudTenantRole(String(id || ''), Number(clusterId), Number(tenantId), String(role || '')))
+  ipcMain.handle('cloud:tenantUser', (_e, { id, clusterId, tenantId, user }: { id: string; clusterId: number; tenantId: number; user: string }) =>
+    cloudTenantUser(String(id || ''), Number(clusterId), Number(tenantId), String(user || '')))
+  ipcMain.handle('cloud:tenantCreateUser', (_e, { id, clusterId, tenantId, input }: { id: string; clusterId: number; tenantId: number; input: any }) =>
+    cloudTenantCreateUser(String(id || ''), Number(clusterId), Number(tenantId), input || {}))
+  ipcMain.handle('cloud:tenantChangeUserPassword', (
+    _e, { id, clusterId, tenantId, user, password }: { id: string; clusterId: number; tenantId: number; user: string; password: string }
+  ) => cloudTenantChangeUserPassword(String(id || ''), Number(clusterId), Number(tenantId), String(user || ''), String(password || '')))
+  ipcMain.handle('cloud:tenantSetUserLocked', (
+    _e, { id, clusterId, tenantId, user, locked }: { id: string; clusterId: number; tenantId: number; user: string; locked: boolean }
+  ) => cloudTenantSetUserLocked(String(id || ''), Number(clusterId), Number(tenantId), String(user || ''), !!locked))
+  ipcMain.handle('cloud:tenantDropUser', (_e, { id, clusterId, tenantId, user }: { id: string; clusterId: number; tenantId: number; user: string }) =>
+    cloudTenantDropUser(String(id || ''), Number(clusterId), Number(tenantId), String(user || '')))
+  ipcMain.handle('cloud:tenantModifyUserGlobalPrivileges', (
+    _e, { id, clusterId, tenantId, user, privileges }: { id: string; clusterId: number; tenantId: number; user: string; privileges: string[] }
+  ) => cloudTenantModifyUserGlobalPrivileges(String(id || ''), Number(clusterId), Number(tenantId), String(user || ''), privileges || []))
+  ipcMain.handle('cloud:tenantCreateRole', (
+    _e, { id, clusterId, tenantId, roleName, globalPrivileges }: { id: string; clusterId: number; tenantId: number; roleName: string; globalPrivileges?: string[] }
+  ) => cloudTenantCreateRole(String(id || ''), Number(clusterId), Number(tenantId), String(roleName || ''), globalPrivileges || []))
+  ipcMain.handle('cloud:tenantDropRole', (_e, { id, clusterId, tenantId, roleName }: { id: string; clusterId: number; tenantId: number; roleName: string }) =>
+    cloudTenantDropRole(String(id || ''), Number(clusterId), Number(tenantId), String(roleName || '')))
+  ipcMain.handle('cloud:tenantObjects', (
+    _e, { id, clusterId, tenantId, opts }: { id: string; clusterId: number; tenantId: number; opts?: { keyword?: string; type?: string; userName?: string } }
+  ) => cloudTenantObjects(String(id || ''), Number(clusterId), Number(tenantId), opts || {}))
+  // ---------- 资源管理（资源隔离计划 / 资源组）----------
+  ipcMain.handle('cloud:tenantResourcePlans', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantResourcePlans(String(id || ''), Number(clusterId), Number(tenantId)))
+  ipcMain.handle('cloud:tenantResourcePlanAction', (
+    _e, { id, clusterId, tenantId, planName, action }: { id: string; clusterId: number; tenantId: number; planName: string; action: 'enable' | 'disable' }
+  ) => cloudTenantResourcePlanAction(String(id || ''), Number(clusterId), Number(tenantId), String(planName || ''), action))
+  ipcMain.handle('cloud:tenantDropResourcePlan', (
+    _e, { id, clusterId, tenantId, planName }: { id: string; clusterId: number; tenantId: number; planName: string }
+  ) => cloudTenantDropResourcePlan(String(id || ''), Number(clusterId), Number(tenantId), String(planName || '')))
+  ipcMain.handle('cloud:tenantConsumerGroups', (_e, { id, clusterId, tenantId }: { id: string; clusterId: number; tenantId: number }) =>
+    cloudTenantConsumerGroups(String(id || ''), Number(clusterId), Number(tenantId)))
 
   // ---------- Unit 规格 / 克隆租户 / 创建备租户 ----------
   ipcMain.handle('cloud:unitSpecs', (_e, { id }: { id: string }) => cloudUnitSpecs(String(id || '')))

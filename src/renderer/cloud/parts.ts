@@ -121,8 +121,51 @@ export function taskStatus(s: string): { label: string; tone: Tone } {
   if (s === 'FAILED') return { label: '失败', tone: 'bad' }
   if (s === 'RUNNING') return { label: '执行中', tone: 'info' }
   if (s === 'PENDING') return { label: '等待中', tone: 'idle' }
+  if (s === 'READY') return { label: '准备执行', tone: 'idle' }
+  // OCP 的「放弃」是任务级终点状态（abort 之后），与子任务的 DISREGARDED（跳过）区分开
+  if (s === 'ABORTED') return { label: '已放弃', tone: 'idle' }
+  if (s === 'DISREGARDED') return { label: '已跳过', tone: 'warn' }
   if (s === 'CANCELED' || s === 'CANCELLED') return { label: '已取消', tone: 'idle' }
   return { label: s || '未知', tone: 'idle' }
+}
+
+/** 任务级可执行操作（对齐 OCP 任务页：失败→重试/回滚，运行中→放弃，任意→下载日志） */
+export type TaskOp = 'retry' | 'rollback' | 'abort'
+
+export interface TaskOpDef {
+  key: TaskOp
+  label: string
+  danger: boolean
+  /** 二次确认里的说明 */
+  desc: string
+}
+
+export function taskOps(status: string): TaskOpDef[] {
+  if (status === 'FAILED') {
+    return [
+      { key: 'retry', label: '重试', danger: false, desc: 'OCP 会重新执行该任务的失败步骤，并生成一个新的任务实例。' },
+      { key: 'rollback', label: '回滚', danger: true, desc: 'OCP 会按逆序回滚已完成的步骤，可能影响相关对象，请确认后再执行。' }
+    ]
+  }
+  if (/RUNNING|PENDING|READY/.test(status)) {
+    return [
+      {
+        key: 'abort',
+        label: '放弃',
+        danger: true,
+        desc: '此操作会忽略任务当前状态并直接结束它，之后该任务不再支持任何操作，可能造成 OCP 元信息缺失或与真实状态不一致。'
+      }
+    ]
+  }
+  return []
+}
+
+export type SubtaskOp = 'retry' | 'skip' | 'cancel'
+
+export function subtaskOps(status: string): SubtaskOp[] {
+  if (status === 'FAILED') return ['retry', 'skip']
+  if (status === 'RUNNING') return ['cancel']
+  return []
 }
 
 export function clusterMode(m: string): string {

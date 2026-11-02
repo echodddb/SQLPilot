@@ -78,6 +78,22 @@ export {
 } from './tenantInfo'
 export type { ObTenantSession, ObTenantDatabase, ObTenantUser, ObTenantParameter, ObTenantTopSql } from './tenantInfo'
 
+// 租户运维视图：事务 / 合并 / 监控 / 备份 / 资源管理（SQL 见 tenantOps.ts 顶部注释，4.2.1 实测）
+export { tenantTxnsOf, tenantCompactionOf, tenantMetricsOf, tenantBackupOf, tenantRsrcAs } from './tenantOps'
+export type {
+  ObTenantTxn,
+  ObCompactionBundle,
+  ObCompactionProgress,
+  ObCompactionSuggestion,
+  ObMajorCompaction,
+  ObTenantMetrics,
+  ObTenantMetricCard,
+  ObBackupJob,
+  ObRsrcBundle,
+  ObRsrcPlan,
+  ObRsrcDirective
+} from './tenantOps'
+
 /** 供上层判断"这条连接是否直连模式" */
 export const isObDirect = (type: string): boolean => type === 'obdirect'
 

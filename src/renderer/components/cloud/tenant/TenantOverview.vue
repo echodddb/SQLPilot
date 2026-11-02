@@ -87,11 +87,13 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { cloud, refreshTenant } from '../../../cloud/state'
 import { fmtBytes, fmtTime } from '../../../cloud/parts'
 import { pushNotice } from '../../../store'
+import { tenantCaps } from '../../../cloud/tenantMode'
 
 const props = defineProps<{ reloadToken: number }>()
 const d = computed(() => cloud.tenant as CloudTenantDetail)
 const t = computed(() => d.value.tenant)
 
+const caps = computed(() => tenantCaps(d.value?.tenant?.mode))
 const err = ref('')
 const stats = ref<CloudTenantSessionStats | null>(null)
 const dbs = ref<CloudTenantDatabase[]>([])
@@ -125,18 +127,21 @@ async function load(): Promise<void> {
   const cid = t.value.clusterId
   const tid = t.value.id
   const plat = cloud.activeId
+    // Oracle 租户的 /databases 会 400（官方也不给库表），不发这个请求
   const [s, ds, us] = await Promise.all([
     window.sqlpilot.cloudTenantSessionStats(plat, cid, tid),
-    window.sqlpilot.cloudTenantDbs(plat, cid, tid),
+    caps.value.dbManagement
+      ? window.sqlpilot.cloudTenantDbs(plat, cid, tid)
+      : Promise.resolve({ ok: true, data: [] as CloudTenantDatabase[] }),
     window.sqlpilot.cloudTenantUsers(plat, cid, tid)
   ])
   stats.value = s.ok ? s.data || null : null
   dbs.value = ds.ok ? ds.data || [] : []
-  if (!ds.ok && ds.error) err.value = `库列表读取失败：${ds.error}`
-  // 连接串优先取 root 用户（各版本 OCP 都返回 OBPROXY + DIRECT 两种）
+  if (!ds.ok && ds.error && caps.value.dbManagement) err.value = `库列表读取失败：${ds.error}`
+  // 连接串优先取管理用户（MySQL 是 root，Oracle 是 SYS），各版本 OCP 都返回 OBPROXY + DIRECT 两种
   const users = us.ok ? us.data || [] : []
-  const root = users.find((u) => u.username === 'root') || users[0]
-  conns.value = root?.connections || []
+  const admin = users.find((u) => caps.value.normUser(u.username) === caps.value.normUser(caps.value.adminUser)) || users[0]
+  conns.value = admin?.connections || []
 }
 
 onMounted(load)

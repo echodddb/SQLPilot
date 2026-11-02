@@ -215,6 +215,10 @@ export interface CloudSubtask {
   parallelIdx: number
   upstreams: number[]
   downstreams: number[]
+  /** 服务端标记该步不允许回滚（详情接口才返回） */
+  prohibitRollback: boolean
+  /** 该步不允许跳过（详情接口在部分版本才返回，缺省视为允许） */
+  prohibitSkip: boolean
 }
 
 export interface CloudTask {
@@ -309,6 +313,8 @@ interface RawResponse {
   status: number
   headers: http.IncomingHttpHeaders
   text: string
+  /** 原始字节（诊断包等二进制下载用；文本响应与 text 等价） */
+  buf: Buffer
 }
 
 function joinUrl(base: string, p: string): string {
@@ -388,7 +394,10 @@ function requestRaw(
       (res) => {
         const chunks: Buffer[] = []
         res.on('data', (c: Buffer) => chunks.push(c))
-        res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, text: Buffer.concat(chunks).toString('utf8') }))
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks)
+          resolve({ status: res.statusCode || 0, headers: res.headers, text: buf.toString('utf8'), buf })
+        })
       }
     )
     req.setTimeout(opts.timeoutMs ?? 20000, () => req.destroy(new Error(`连接 ${url.host} 超时（20s）：检查网络、VPN 或端口`)))
@@ -569,7 +578,7 @@ export class OcpClient {
       return this.call<T>(p, opts, true)
     }
     if (!json) throw new OcpError(`OCP 响应无法解析（HTTP ${res.status}）`)
-    if (json.successful === false) throw new OcpError(json?.error?.message || `OCP 请求失败（HTTP ${res.status}）`)
+    if (json.successful === false) throw new OcpError(opErrorMessage(json, res.status))
     return json.data as T
   }
 
@@ -579,6 +588,34 @@ export class OcpClient {
     const publicKey = keyRes?.publicKey
     if (!publicKey) throw new OcpError('获取 OCP 公钥失败，无法加密密码')
     return this.encryptPassword(publicKey, plain)
+  }
+
+  /**
+   * 下载二进制附件（如任务诊断包 zip）。path 必须是真实接口：
+   * OCP 对不存在的子路径一律回 200 + SPA HTML，这里显式识别，避免把网页存成 zip。
+   * retried 与 call() 同义：401 只重登一次，避免会话异常时无限递归。
+   */
+  async download(
+    p: string,
+    opts: { method?: string; query?: Record<string, any> } = {},
+    retried = false
+  ): Promise<{ data: Buffer; fileName: string; contentType: string }> {
+    await this.ensureLogin()
+    const stale = this.jar.get('SESSION')
+    const res = await this.raw(buildQuery(p, opts.query), { method: opts.method || 'GET' })
+    if (res.status === 401) {
+      if (retried) throw new OcpError('OCP 会话已失效，且重新登录失败')
+      await this.session(stale)
+      return this.download(p, opts, true)
+    }
+    const ct = String(res.headers['content-type'] || '')
+    if (res.status >= 400 || ct.includes('text/html') || String(res.text).trim().startsWith('<!DOCTYPE')) {
+      throw new OcpError(`OCP 未返回文件（HTTP ${res.status}）：该端点可能不存在或当前版本不支持`)
+    }
+    const cd = String(res.headers['content-disposition'] || '')
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd)
+    const fileName = m && m[1] && m[1] !== 'null' ? decodeURIComponent(m[1]) : ''
+    return { data: res.buf, fileName, contentType: ct }
   }
 
   get infoCache(): OcpInfo | null { return this.info }
@@ -600,6 +637,22 @@ export async function ocpAtLeast(client: OcpClient, major: number, minor: number
   const a = Number(m[1])
   const b = Number(m[2])
   return a > major || (a === major && b >= minor)
+}
+
+/**
+ * 拼接 OCP 的错误信息。
+ * 参数校验失败时 `error.message` 只给第一条违规，真正有用的逐字段原因在 `error.subErrors` 里
+ * （如建租户时 `zones[0].resourcePool: 传入的资源池参数不能为空`）。这里把不重复的细则补在冒号后面，
+ * 用户不用翻网络面板就能看出是哪个字段不对。
+ */
+function opErrorMessage(json: any, status: number): string {
+  const err = json?.error || {}
+  const base = str(err.message) || `OCP 请求失败（HTTP ${status}）`
+  const subs: string[] = Array.isArray(err.subErrors)
+    ? err.subErrors.map((s: any) => str(s?.message)).filter((m: string) => !!m)
+    : []
+  const extra = [...new Set(subs)].filter((m) => m !== base)
+  return extra.length ? `${base}：${extra.join('；')}` : base
 }
 
 function buildQuery(p: string, query?: Record<string, any>): string {
@@ -624,6 +677,17 @@ function contentsOf(data: any): any[] {
 }
 
 const num = (v: any): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
+
+/**
+ * 从「提交任务」类接口的返回体里取任务号。
+ * OCP 4.3 多数写接口直接返回任务实例 `{id, status, subtasks…}`（字段名是 id 不是 taskId），
+ * 少数包装成 `{taskId}`；两者都认，取不到返回 undefined。
+ */
+function taskIdOf(data: any): number | undefined {
+  const v = data?.taskId ?? data?.id
+  const n = num(v)
+  return n > 0 ? n : undefined
+}
 const pct = (used: number, total: number): number => (total > 0 ? Math.min(100, Math.round((used / total) * 1000) / 10) : 0)
 const str = (v: any): string => (v === undefined || v === null ? '' : String(v))
 
@@ -843,7 +907,9 @@ function toSubtask(raw: any): CloudSubtask {
     timeout: num(raw?.timeout),
     parallelIdx: num(raw?.parallelIdx),
     upstreams: (Array.isArray(raw?.upstreams) ? raw.upstreams : []).map(num),
-    downstreams: (Array.isArray(raw?.downstreams) ? raw.downstreams : []).map(num)
+    downstreams: (Array.isArray(raw?.downstreams) ? raw.downstreams : []).map(num),
+    prohibitRollback: !!raw?.prohibitRollback,
+    prohibitSkip: !!raw?.prohibitSkip
   }
 }
 
@@ -1571,6 +1637,175 @@ export async function ocpTaskCreators(client: OcpClient): Promise<string[]> {
   return (data?.contents || []).map(str)
 }
 
+// ---------------------------------------------------------------- 任务操作（写）
+// 逆向自 OCP 前端（4.3 实测可用，全部成功时回 200 + successful:true）：
+//   任务：POST /tasks/instances/{id}/retry | /rollback | /abort
+//   子任务：POST /tasks/instances/{tid}/subtasks/{sid}/retry | /skip | /cancel
+//   批量：POST /tasks/instances/batchRetry  body { taskInstanceIdList: number[] }
+//   日志：GET  /tasks/instances/{tid}/subtasks/{sid}/log → data.log
+//   诊断包：POST /tasks/instances/{id}/downloadDiagnosis → application/octet-stream（zip）
+// 注意：OCP 把 taskInstanceId / subtaskInstanceId 当**查询参数**，不是 JSON body。
+
+/** retry=重试，rollback=回滚，abort=放弃（终止） */
+export type TaskOpKind = 'retry' | 'rollback' | 'abort'
+/** retry=重试，skip=跳过（置为成功），cancel=终止运行 */
+export type SubtaskOpKind = 'retry' | 'skip' | 'cancel'
+
+const TASK_OP_SEG: Record<TaskOpKind, string> = { retry: 'retry', rollback: 'rollback', abort: 'abort' }
+const SUBTASK_OP_SEG: Record<SubtaskOpKind, string> = { retry: 'retry', skip: 'skip', cancel: 'cancel' }
+
+export interface TaskOpResult {
+  taskId: number
+  subtaskId?: number
+  /** 提交成功后的提示语（由调用方直接展示） */
+  message: string
+}
+
+/** OCP 个别错误消息带未替换的占位符（如回滚接口的「任务 {0} 不存在」），补一下可读性 */
+function cleanOpError(e: any, taskId: number): string {
+  const msg = String(e?.message || e || '操作失败')
+  return msg.replace(/\{0\}/g, String(taskId))
+}
+
+export async function ocpTaskAction(client: OcpClient, taskId: number, action: TaskOpKind): Promise<TaskOpResult> {
+  const id = num(taskId)
+  const seg = TASK_OP_SEG[action]
+  if (!id) throw new OcpError('任务 ID 无效')
+  if (!seg) throw new OcpError(`不支持的任务操作：${action}`)
+  try {
+    await client.call(`/api/v2/tasks/instances/${id}/${seg}`, { method: 'POST', query: { taskInstanceId: id } })
+  } catch (e: any) {
+    throw new OcpError(cleanOpError(e, id))
+  }
+  const label = action === 'retry' ? '已提交重试' : action === 'rollback' ? '已提交回滚' : '已放弃'
+  return { taskId: id, message: `任务 ${id} ${label}` }
+}
+
+export async function ocpSubtaskAction(
+  client: OcpClient,
+  taskId: number,
+  subtaskId: number,
+  action: SubtaskOpKind
+): Promise<TaskOpResult> {
+  const tid = num(taskId)
+  const sid = num(subtaskId)
+  const seg = SUBTASK_OP_SEG[action]
+  if (!tid || !sid) throw new OcpError('任务 / 子任务 ID 无效')
+  if (!seg) throw new OcpError(`不支持的子任务操作：${action}`)
+  try {
+    await client.call(`/api/v2/tasks/instances/${tid}/subtasks/${sid}/${seg}`, {
+      method: 'POST',
+      query: { taskInstanceId: tid, subtaskInstanceId: sid }
+    })
+  } catch (e: any) {
+    throw new OcpError(cleanOpError(e, tid))
+  }
+  const label = action === 'retry' ? '已提交重试' : action === 'skip' ? '已置为成功' : '已终止运行'
+  return { taskId: tid, subtaskId: sid, message: `子任务 ${sid} ${label}` }
+}
+
+/** 批量重试：只接受失败态任务，OCP 会逐个校验 */
+export async function ocpTaskBatchRetry(client: OcpClient, taskIds: number[]): Promise<{ count: number }> {
+  const ids = (Array.isArray(taskIds) ? taskIds : []).map(num).filter((n) => n > 0)
+  if (!ids.length) throw new OcpError('请先勾选要重试的任务')
+  if (ids.length > 50) throw new OcpError('一次最多重试 50 个任务')
+  await client.call('/api/v2/tasks/instances/batchRetry', { method: 'POST', body: { taskInstanceIdList: ids } })
+  return { count: ids.length }
+}
+
+/** 子任务日志全文（OCP 会返回该步执行期间的服务器日志） */
+export async function ocpSubtaskLog(client: OcpClient, taskId: number, subtaskId: number): Promise<{ text: string }> {
+  const tid = num(taskId)
+  const sid = num(subtaskId)
+  if (!tid || !sid) throw new OcpError('任务 / 子任务 ID 无效')
+  const data = await client.call<any>(`/api/v2/tasks/instances/${tid}/subtasks/${sid}/log`, {
+    query: { taskInstanceId: tid, subtaskInstanceId: sid }
+  })
+  return { text: str(data?.log) }
+}
+
+const TASK_LOG_CAP = 16 * 1024 * 1024
+
+/**
+ * 整任务日志 = 各子任务日志按顺序拼接（OCP 任务页的「下载日志」也是这个内容）。
+ * 子任务多时并发取，单步失败只写一行占位，不整单失败。
+ */
+export async function ocpTaskLogText(
+  client: OcpClient,
+  taskId: number
+): Promise<{ text: string; subtasks: number; empty: number }> {
+  const tid = num(taskId)
+  if (!tid) throw new OcpError('任务 ID 无效')
+  const d = await ocpTaskDetail(client, tid)
+  // 按开始时间排序（= 执行顺序）；还没开始执行的步骤（PENDING，没有 startTime）排最后，不要顶到最前面
+  const steps = d.subtasks.slice().sort((a, b) => {
+    const ta = a.startTime ? new Date(a.startTime).getTime() : 0
+    const tb = b.startTime ? new Date(b.startTime).getTime() : 0
+    if (!ta && !tb) return a.id - b.id
+    if (!ta) return 1
+    if (!tb) return -1
+    return ta - tb || a.id - b.id
+  })
+  const parts: string[] = [
+    `# 任务 ${d.id} · ${d.name}`,
+    `# 状态 ${d.status} · 操作 ${d.operation} · 发起者 ${d.creator || '—'} · 执行器 ${d.executor || '—'}`,
+    `# 开始 ${d.startTime || '—'} · 结束 ${d.finishTime || '—'}`,
+    `# 导出时间 ${new Date().toISOString()}`,
+    ''
+  ]
+  let size = parts.join('\n').length
+  let empty = 0
+  const PARALLEL = 4
+  const results: string[] = new Array(steps.length).fill('')
+  let cursor = 0
+
+  async function worker(): Promise<void> {
+    while (cursor < steps.length) {
+      const i = cursor++
+      const s = steps[i]
+      let body = ''
+      try {
+        const r = await ocpSubtaskLog(client, tid, s.id)
+        body = r.text.trim()
+        if (!body) empty++
+      } catch (e: any) {
+        body = `[读取日志失败] ${e?.message || e}`
+      }
+      const head = [
+        `${'='.repeat(78)}`,
+        `## 子任务 ${i + 1}/${steps.length} · #${s.id} ${s.name}`,
+        `## 状态 ${s.status} · 操作 ${s.operation} · 节点 ${s.nodeType || '—'} · 耗时 ${s.runTime}s`,
+        `## 开始 ${s.startTime || '—'} · 结束 ${s.finishTime || '—'}`,
+        `${'-'.repeat(78)}`
+      ].join('\n')
+      results[i] = `${head}\n${body || '(无日志)'}\n`
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PARALLEL, steps.length || 1) }, worker))
+
+  for (const r of results) {
+    if (!r) continue
+    if (size + r.length > TASK_LOG_CAP) {
+      parts.push(`\n[日志过大，已在 ${Math.round(TASK_LOG_CAP / 1024 / 1024)}MB 处截断，剩余子任务请单独查看]\n`)
+      break
+    }
+    parts.push(r)
+    size += r.length
+  }
+  return { text: parts.join('\n'), subtasks: steps.length, empty }
+}
+
+/** 任务诊断包（zip）：POST /tasks/instances/{id}/downloadDiagnosis */
+export async function ocpTaskDiagnosis(client: OcpClient, taskId: number): Promise<{ data: Buffer; fileName: string }> {
+  const tid = num(taskId)
+  if (!tid) throw new OcpError('任务 ID 无效')
+  const r = await client.download(`/api/v2/tasks/instances/${tid}/downloadDiagnosis`, {
+    method: 'POST',
+    query: { taskInstanceId: tid }
+  })
+  return { data: r.data, fileName: r.fileName || `task-${tid}-diagnosis.zip` }
+}
+
 // ---------------------------------------------------------------- 监控指标
 // 逆向自 OCP 前端：GET /api/v2/monitor/metric?scope=&metrics=&groupBy=&labels=&startTime=&endTime=&maxPoints=
 // scope ∈ CLUSTER / TENANT / HOST；labels 形如 "ob_cluster_name:obc"（多标签用逗号）
@@ -1678,7 +1913,12 @@ export interface CreateTenantInput {
   zones: { name: string; unitSpecName: string; unitCount: number; replicaType?: string }[]
 }
 
-export async function ocpCreateTenant(client: OcpClient, clusterId: number, input: CreateTenantInput): Promise<{ taskId?: number }> {
+/**
+ * 建租户。返回体不是 `{taskId}`，而是**任务实例本身**（实测 4.3）：
+ * `{ id: 任务ID, tenantId: 租户ID, status, subtasks, ... }`。所以任务号取 `data.id`，
+ * 之前只认 `data.taskId` → 界面上永远显示"已提交"但拿不到任务号。
+ */
+export async function ocpCreateTenant(client: OcpClient, clusterId: number, input: CreateTenantInput): Promise<{ taskId?: number; tenantId?: number }> {
   // OCP 前端对 rootPassword 也做 RSA 加密后提交（不加密在真机创建时会校验失败）
   const encPassword = await client.encryptSensitive(input.rootPassword)
   const body: Record<string, any> = {
@@ -1689,18 +1929,22 @@ export async function ocpCreateTenant(client: OcpClient, clusterId: number, inpu
     rootPassword: encPassword,
     whitelist: input.whitelist || '%',
     primaryZone: input.primaryZone || 'RANDOM',
+    // 关键：规格与 Unit 数必须嵌在 zones[].resourcePool 里。
+    // 平铺成 zones[].unitSpecName 会被服务端判为「传入的资源池参数不能为空」（zones[0].resourcePool）。
     zones: input.zones.map((z) => ({
       name: z.name,
       replicaType: z.replicaType || 'FULL',
-      unitSpecName: z.unitSpecName,
-      unitCount: z.unitCount
+      resourcePool: {
+        unitSpecName: z.unitSpecName,
+        unitCount: Math.max(1, num(z.unitCount) || 1)
+      }
     }))
   }
   // 可选字段：留空就不传，让 OCP 用默认（与前端向导行为一致）
   if (input.collation) body.collation = input.collation
   if (input.description) body.description = input.description
   const data = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/createTenant`, { method: 'POST', body })
-  return { taskId: data?.taskId ? num(data.taskId) : undefined }
+  return { taskId: taskIdOf(data), tenantId: data?.tenantId ? num(data.tenantId) : undefined }
 }
 
 export async function ocpDeleteTenant(client: OcpClient, clusterId: number, tenantId: number): Promise<{ taskId?: number }> {
@@ -1842,14 +2086,38 @@ export async function ocpClusterParameters(client: OcpClient, clusterId: number)
 }
 
 /** 租户参数（简单列表） */
-export async function ocpTenantParameters(client: OcpClient, clusterId: number, tenantId: number): Promise<{ name: string; value: string; def: string; type: string; description: string }[]> {
-  const data = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/parameters`, { query: { page: 1, size: 500 } })
+/**
+ * 租户参数：GET /tenants/{tid}/parameters
+ *
+ * 4.3 实测两种模式的返回字段不同：
+ *   · MySQL 租户：826 条，只有 name / parameterType / currentValue
+ *   · Oracle 租户：194 条，另有 defaultValue / needRestart / readonly / valueRange / description
+ * 所以其余字段一律按「缺省不显示」处理，不要假设一定有。
+ */
+export interface TenantParamRow {
+  name: string
+  value: string
+  def: string
+  type: string
+  description: string
+  /** 修改后是否需要重启（Oracle 租户才有） */
+  needRestart: boolean
+  readonly: boolean
+  /** 取值范围（Oracle 租户才有） */
+  valueRange: string
+}
+
+export async function ocpTenantParameters(client: OcpClient, clusterId: number, tenantId: number): Promise<TenantParamRow[]> {
+  const data = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/parameters`, { query: { page: 1, size: 1000 } })
   return (data?.contents || []).map((p: any) => ({
     name: str(p.name),
     value: str(p.currentValue),
     def: str(p.defaultValue),
     type: str(p.parameterType),
-    description: str(p.description)
+    description: str(p.description),
+    needRestart: !!p.needRestart,
+    readonly: !!p.readonly,
+    valueRange: str(p.valueRange)
   }))
 }
 

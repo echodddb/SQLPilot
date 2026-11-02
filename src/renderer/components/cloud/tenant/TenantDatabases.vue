@@ -1,5 +1,16 @@
 <template>
   <div class="tp-pane">
+    <!-- Oracle 租户官方不支持库表管理（/tenants/{tid}/databases 返回 400），照官方渲染空态 -->
+    <div v-if="!caps.dbManagement" class="oracle-empty">
+      <div class="oe-tag">ORACLE</div>
+      <h4 class="tp-h">Oracle 类型的租户不支持该功能</h4>
+      <div class="tp-note" style="text-align:center;max-width:520px">
+        官方 OCP 对 Oracle 租户的「库表」tab 同样渲染空态。Oracle 租户的对象授权请看「用户」tab
+        里用户的「可访问对象」，或直接在 SQL 编辑器里查 ALL_TABLES。
+      </div>
+    </div>
+
+    <template v-else>
     <div class="tp-bar">
       <h4 class="tp-h">数据库 <span class="cnt">{{ dbs.length }}</span></h4>
       <input v-model="dbFilter" class="tp-input tp-search" placeholder="过滤库名" spellcheck="false" />
@@ -76,6 +87,7 @@
         </template>
       </div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -88,9 +100,11 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { cloud } from '../../../cloud/state'
 import { fmtBytes } from '../../../cloud/parts'
 import { pushNotice } from '../../../store'
+import { tenantCaps } from '../../../cloud/tenantMode'
 
 const props = defineProps<{ reloadToken: number }>()
 const d = computed(() => cloud.tenant as CloudTenantDetail)
+const caps = computed(() => tenantCaps(d.value?.tenant?.mode))
 
 const dbs = ref<CloudTenantDatabase[]>([])
 const loading = ref(false)
@@ -170,3 +184,8 @@ watch(() => props.reloadToken, async () => {
   if (activeDb.value) await pickDb(activeDb.value)
 })
 </script>
+
+<style scoped>
+.oracle-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 60px 20px; }
+.oe-tag { font-size: 10px; letter-spacing: 0.14em; color: var(--yellow); border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent); background: var(--yellow-dim); border-radius: 99px; padding: 2px 9px; }
+</style>

@@ -69,6 +69,54 @@
             </table>
           </template>
 
+          <!-- 以下五个 tab 的数据都来自 sys 租户里的系统视图（资源管理需要租户凭据） -->
+          <template v-else-if="tab === 'txn'">
+            <DirectTenantTxns :platform-id="platformId" :tenant-id="t.tenant.obTenantId" :reload-token="reloadToken" />
+          </template>
+          <template v-else-if="tab === 'compaction'">
+            <DirectTenantCompaction :platform-id="platformId" :tenant-id="t.tenant.obTenantId" :reload-token="reloadToken" />
+          </template>
+          <template v-else-if="tab === 'monitor'">
+            <DirectTenantMonitor :platform-id="platformId" :tenant-id="t.tenant.obTenantId" :tenant-name="t.tenant.name" :reload-token="reloadToken" />
+          </template>
+          <template v-else-if="tab === 'backup'">
+            <DirectTenantBackup :platform-id="platformId" :tenant-id="t.tenant.obTenantId" :reload-token="reloadToken" />
+          </template>
+          <template v-else-if="tab === 'rsrc'">
+            <DirectTenantResource :platform-id="platformId" :tenant-name="t.tenant.name" :reload-token="reloadToken" @goto="(x) => (tab = x as TabKey)" />
+          </template>
+
+          <!-- 拓扑：租户 → Zone → OBServer（数据全部来自同一份租户详情，不额外打库） -->
+          <template v-else-if="tab === 'topo'">
+            <div class="sec">副本拓扑</div>
+            <div class="topo">
+              <div class="topo-root">
+                <b>{{ t.tenant.name }}</b>
+                <span class="mono dim">{{ t.tenant.mode }} · {{ t.tenant.obTenantId }}</span>
+              </div>
+              <div class="topo-zones">
+                <div v-for="z in t.zones" :key="z.name" class="topo-zone">
+                  <div class="tz-head">
+                    <b class="mono">{{ z.name }}</b>
+                    <span class="dim">{{ z.unitCount }} Unit · {{ round(z.unitCpu) }}C / {{ fmtMem(z.unitMemory) }}</span>
+                  </div>
+                  <div class="tz-body">
+                    <span v-for="u in z.units" :key="`${u.ip}:${u.port}`" class="tz-srv mono" :class="{ off: u.status !== 'ACTIVE' }">
+                      <i class="dot"></i>{{ u.ip }}:{{ u.port }}
+                    </span>
+                    <span v-if="!z.units.length" class="dim tz-none">该 Zone 没有 Unit 落点</span>
+                  </div>
+                </div>
+                <div v-if="!t.zones.length" class="empty">没有 Zone / Unit 信息（需要 sys 账号读 DBA_OB_UNITS）</div>
+              </div>
+            </div>
+            <div class="hint">
+              拓扑直接由租户详情的 Unit 落点拼出（DBA_OB_UNITS + DBA_OB_ZONES），不额外发 SQL；
+              Locality 为 <span class="mono">{{ t.tenant.locality || '—' }}</span>，主 Zone 为
+              <span class="mono">{{ t.tenant.primaryZone || '—' }}</span>。
+            </div>
+          </template>
+
           <!-- 连接：连接串 + 业务凭据 -->
           <template v-else-if="tab === 'connect'">
             <div class="sec">连接串（口令以占位符表示，不会回显历史密码）</div>
@@ -88,7 +136,8 @@
               <div class="cred-status">
                 <span v-if="cred.has" class="pill ok">已录入 {{ cred.user }}</span>
                 <span v-else class="pill warn">未录入</span>
-                <span class="dim">用于租户内部的建库 / 建账号 / 授权；密码加密保存在本机</span>
+                <span v-if="cred.inherited" class="dim">直接沿用平台账号（{{ platform?.username || 'root@sys' }}）的密码，无需再录一次</span>
+                <span v-else class="dim">用于租户内部的建库 / 建账号 / 授权；密码加密保存在本机</span>
               </div>
               <div class="row">
                 <label>账号</label>
@@ -478,33 +527,50 @@ import {
 } from '../../../cloud/directTenant'
 import { pushNotice } from '../../../store'
 import DirectOpModal from './DirectOpModal.vue'
+import DirectTenantTxns from './tenant/DirectTenantTxns.vue'
+import DirectTenantCompaction from './tenant/DirectTenantCompaction.vue'
+import DirectTenantMonitor from './tenant/DirectTenantMonitor.vue'
+import DirectTenantBackup from './tenant/DirectTenantBackup.vue'
+import DirectTenantResource from './tenant/DirectTenantResource.vue'
 
-type TabKey = 'overview' | 'resource' | 'connect' | 'session' | 'database' | 'user' | 'params' | 'topsql'
+type TabKey =
+  | 'overview' | 'resource' | 'topo' | 'connect' | 'session' | 'txn'
+  | 'database' | 'user' | 'params' | 'compaction' | 'topsql' | 'monitor' | 'backup' | 'rsrc'
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'overview', label: '概览' },
   { key: 'resource', label: '副本与资源' },
+  { key: 'topo', label: '拓扑' },
   { key: 'connect', label: '连接' },
   { key: 'session', label: '会话' },
+  { key: 'txn', label: '事务' },
   { key: 'database', label: '数据库' },
   { key: 'user', label: '用户' },
   { key: 'params', label: '参数' },
-  { key: 'topsql', label: 'TopSQL' }
+  { key: 'compaction', label: '合并' },
+  { key: 'topsql', label: 'TopSQL' },
+  { key: 'monitor', label: '监控' },
+  { key: 'backup', label: '备份' },
+  { key: 'rsrc', label: '资源管理' }
 ]
 
 const PAGE_SIZE = 20
 
 const t = computed(() => cloud.tenant as CloudTenantDetail)
 const platformId = computed(() => platformOfCluster(t.value.tenant.clusterId))
+/** 当前租户归属的直连平台（用于展示「沿用的是哪个平台账号」） */
+const platform = computed(() => cloud.platforms.find((p) => p.id === platformId.value))
 const isSys = computed(() => String(t.value.tenant.name).toLowerCase() === 'sys')
 const isOracle = computed(() => t.value.tenant.mode === 'ORACLE')
 
 const tab = ref<TabKey>('overview')
+/** 头部刷新 / 凭据变更后自增，子面板 watch 到就重新拉数据 */
+const reloadToken = ref(0)
 const loading = ref(false)
 const opAction = ref<'lock' | 'unlock' | 'delete' | null>(null)
 
 // 连接 / 凭据
 const conns = ref<{ label: string; command: string }[]>([])
-const cred = ref<{ has: boolean; user?: string }>({ has: false })
+const cred = ref<{ has: boolean; user?: string; inherited?: boolean }>({ has: false })
 const credForm = ref({ user: '', password: '' })
 const credBusy = ref(false)
 const credMsg = ref('')
@@ -1017,6 +1083,8 @@ async function reloadAll(): Promise<void> {
   const cur = t.value.tenant
   await openTenant(cur.clusterId, cur.obTenantId)
   await loadTab(tab.value)
+  // 运维类 tab（事务/合并/监控/备份/资源管理）各自持有数据，统一靠这个令牌重取
+  reloadToken.value++
 }
 
 /**
@@ -1078,6 +1146,7 @@ function scheduleRefresh(): void {
   refreshTimer = setTimeout(() => {
     refreshTimer = null
     void load()
+    reloadToken.value++
     if (cloud.tenant) void reloadAll()
   }, 2500)
 }
@@ -1191,6 +1260,18 @@ input:focus, select:focus { border-color: var(--accent); }
 .row label { font-size: 11px; color: var(--text-dim); }
 .form { border: 1px solid var(--border); background: var(--bg-card); border-radius: 8px; padding: 8px 10px; }
 .sec { font-size: 11px; font-weight: 600; color: var(--accent); letter-spacing: 0.4px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.topo { display: flex; flex-direction: column; gap: 10px; padding: 4px 0 6px; }
+.topo-root { align-self: flex-start; display: flex; align-items: baseline; gap: 8px; border: 1px solid var(--accent); background: var(--accent-dim); border-radius: 9px; padding: 6px 12px; }
+.topo-zones { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 9px; }
+.topo-zone { border: 1px solid var(--border); border-radius: 9px; background: var(--bg-input); padding: 8px 10px; display: flex; flex-direction: column; gap: 7px; }
+.tz-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.tz-head .dim { font-size: 10.5px; }
+.tz-body { display: flex; flex-wrap: wrap; gap: 5px; }
+.tz-srv { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; border: 1px solid var(--border); border-radius: 99px; padding: 2px 8px; background: var(--bg-card); }
+.tz-srv .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+.tz-srv.off .dot { background: var(--yellow); }
+.tz-none { font-size: 10.5px; }
+.hint { font-size: 10.5px; color: var(--text-faint); line-height: 1.55; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 .tbl th, .tbl td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .tbl th { font-size: 10.5px; color: var(--text-faint); font-weight: 500; background: var(--bg-card); }

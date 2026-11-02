@@ -12,13 +12,20 @@
 
     <div class="tp-tbl-wrap tp-scroll-y" data-src="tnParams" :data-tenant="d.tenant.name" :data-detail="`已加载 ${params.length} 个参数|租户 ${d.tenant.name}（OB 租户 ID ${d.tenant.obTenantId}）`">
       <table class="tp-tbl">
-        <thead><tr><th style="width:34%">参数</th><th>当前值</th><th>默认值</th><th>类型</th><th></th></tr></thead>
+        <thead>
+          <tr>
+            <th style="width:30%">参数</th><th>当前值</th><th>默认值</th><th>类型</th>
+            <template v-if="rich"><th>需重启</th><th>只读</th><th>取值范围</th></template>
+            <th></th>
+          </tr>
+        </thead>
         <tbody>
           <tr v-for="p in filtered" :key="p.name">
             <td class="tp-mono" :title="p.description">{{ p.name }}<div v-if="p.description" class="tp-note" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.description }}</div></td>
             <template v-if="edit?.name === p.name">
               <td colspan="2"><input v-model="edit.value" class="tp-input tp-mono" style="width:100%" spellcheck="false" @keyup.enter="save" @keyup.esc="edit = null" /></td>
               <td class="tp-dim">{{ p.type || '—' }}</td>
+              <template v-if="rich"><td class="tp-dim">—</td><td class="tp-dim">—</td><td class="tp-dim">—</td></template>
               <td>
                 <button class="tp-btn sm primary" :disabled="busy" @click="save">保存</button>
                 <button class="tp-btn sm" @click="edit = null">取消</button>
@@ -28,10 +35,18 @@
               <td class="tp-mono" :class="p.value !== p.def ? 'changed' : ''" :title="p.value">{{ p.value || '—' }}</td>
               <td class="tp-mono tp-faint" :title="p.def">{{ p.def || '—' }}</td>
               <td class="tp-dim">{{ p.type || '—' }}</td>
-              <td><button class="tp-btn sm" @click="edit = { name: p.name, value: p.value }">改</button></td>
+              <template v-if="rich">
+                <td class="tp-dim">{{ p.needRestart ? '是' : '' }}</td>
+                <td class="tp-dim">{{ p.readonly ? '是' : '' }}</td>
+                <td class="tp-dim ell" style="max-width:180px" :title="p.valueRange">{{ p.valueRange || '—' }}</td>
+              </template>
+              <td>
+                <button v-if="!p.readonly" class="tp-btn sm" @click="edit = { name: p.name, value: p.value }">改</button>
+                <span v-else class="tp-note" title="OCP 标记为只读参数">只读</span>
+              </td>
             </template>
           </tr>
-          <tr v-if="!filtered.length"><td colspan="5" class="tp-empty">{{ loading ? '读取中…' : params.length ? '没有匹配的参数' : '点「加载参数」读取（约 200+ 项，首次稍慢）' }}</td></tr>
+          <tr v-if="!filtered.length"><td :colspan="rich ? 8 : 5" class="tp-empty">{{ loading ? '读取中…' : params.length ? '没有匹配的参数' : '点「加载参数」读取（约 200+ 项，首次稍慢）' }}</td></tr>
         </tbody>
       </table>
     </div>
@@ -47,11 +62,23 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { cloud, tenantUpdateParams } from '../../../cloud/state'
 import { pushNotice } from '../../../store'
+import { tenantCaps } from '../../../cloud/tenantMode'
 
 const props = defineProps<{ reloadToken: number }>()
 const d = computed(() => cloud.tenant as CloudTenantDetail)
+const caps = computed(() => tenantCaps(d.value?.tenant?.mode))
 
-const params = ref<{ name: string; value: string; def: string; type: string; description: string }[]>([])
+interface ParamRow {
+  name: string; value: string; def: string; type: string; description: string
+  needRestart: boolean; readonly: boolean; valueRange: string
+}
+const params = ref<ParamRow[]>([])
+
+/**
+ * Oracle 参数多了 是否需重启/只读/取值范围 三列（4.3 实测：Oracle 194 条 8 字段 / MySQL 826 条 3 字段）。
+ * 只看模式，不看返回字段——MySQL 的部分参数也带 readonly 标记，按字段判断会让界面在两种模式间跳。
+ */
+const rich = computed(() => caps.value.objectPrivileges)
 const loading = ref(false)
 const err = ref('')
 const msg = ref('')

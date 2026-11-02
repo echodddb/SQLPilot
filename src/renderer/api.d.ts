@@ -51,6 +51,16 @@ declare type CloudTenant = import('../main/cloud/ocp').CloudTenant
 
 /** 直连租户的已授权条目（MySQL 解析 SHOW GRANTS，Oracle 读 DBA_*_PRIVS） */
 declare type CloudDirectGrantRow = import('../main/cloud/obdirect/tenantIn').GrantRow
+
+declare type CloudDirectTxn = import('../main/cloud/obdirect/tenantOps').ObTenantTxn
+
+declare type CloudDirectCompaction = import('../main/cloud/obdirect/tenantOps').ObCompactionBundle
+
+declare type CloudDirectMetrics = import('../main/cloud/obdirect/tenantOps').ObTenantMetrics
+
+declare type CloudDirectBackup = Awaited<ReturnType<typeof import('../main/cloud/obdirect/tenantOps').tenantBackupOf>>
+
+declare type CloudDirectRsrc = import('../main/cloud/obdirect/tenantOps').ObRsrcBundle
 /** 直连内置告警规则定义（含可调阈值的键与范围） */
 declare type CloudDirectAlarmRule = import('../main/cloud/obdirect/alarm').AlarmRuleDef
 
@@ -202,6 +212,14 @@ declare type CloudTenantBackupAbility = import('../main/cloud/tenant').TenantBac
 declare type CloudTenantBackupBundle = import('../main/cloud/service').TenantBackupBundle
 
 declare type CloudTenantUser = import('../main/cloud/tenant').TenantUser
+
+declare type CloudTenantRole = import('../main/cloud/tenant').TenantRole
+
+declare type CloudTenantObject = import('../main/cloud/tenant').TenantObject
+
+declare type CloudTenantResourcePlan = import('../main/cloud/tenant').TenantResourcePlan
+
+declare type CloudCreateTenantUserInput = import('../main/cloud/tenant').CreateTenantUserInput
 
 declare type CloudTenantTde = import('../main/cloud/tenant').TenantTde
 
@@ -482,6 +500,12 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
         sqlId: string; sqlText: string; executions: number; avgElapsedMs: number; maxElapsedMs: number; rowsOut: number; retCode: number; lastUs: number
       }[]>>
       /** 直连任务日志（本地文本） */
+      // 直连：租户运维视图（事务 / 合并 / 监控 / 备份 / 资源管理）
+      cloudDirectTenantTxns(id: string, tenantId: number, limit?: number): Promise<CloudApi<CloudDirectTxn[]>>
+      cloudDirectTenantCompaction(id: string, tenantId: number): Promise<CloudApi<CloudDirectCompaction>>
+      cloudDirectTenantMetrics(id: string, tenantId: number, tenantName: string): Promise<CloudApi<CloudDirectMetrics>>
+      cloudDirectTenantBackup(id: string, tenantId: number): Promise<CloudApi<CloudDirectBackup>>
+      cloudDirectTenantRsrc(id: string, tenant: string): Promise<CloudApi<CloudDirectRsrc>>
       cloudDirectTasks(q?: { page?: number; size?: number; keyword?: string; action?: string; status?: string; cluster?: string; since?: number }): Promise<CloudApi<{
         items: CloudDirectTaskRow[]
         total: number; page: number; size: number
@@ -492,7 +516,7 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       cloudDirectTaskActions(): Promise<CloudApi<string[]>>
       cloudDirectClearTasks(opts?: { before?: number }): Promise<CloudApi<{ removed: number; kept: number }>>
       /** 业务租户凭据 */
-      cloudTenantCredStatus(id: string, tenant: string): Promise<CloudApi<{ has: boolean; user?: string }>>
+      cloudTenantCredStatus(id: string, tenant: string): Promise<CloudApi<{ has: boolean; user?: string; inherited?: boolean }>>
       cloudTenantCredSave(id: string, tenant: string, user: string, password: string): Promise<CloudApi<{ keptPassword: boolean }>>
       cloudTenantCredClear(id: string, tenant: string): Promise<CloudApi<{ ok: boolean }>>
       cloudDirectTestTenantLogin(id: string, tenant: string, mode?: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ message: string }>>
@@ -531,17 +555,27 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       cloudTaskDetail(id: string, taskId: number): Promise<CloudApi<CloudTaskDetail>>
       cloudTaskStats(id: string): Promise<CloudApi<{ status: string; count: number }[]>>
       cloudTaskCreators(id: string): Promise<CloudApi<string[]>>
+      /** 任务操作：retry=重试 / rollback=回滚 / abort=放弃（终止） */
+      cloudTaskAction(id: string, taskId: number, action: 'retry' | 'rollback' | 'abort'): Promise<CloudApi<{ taskId: number; message: string }>>
+      /** 子任务操作：retry=重试 / skip=跳过（置为成功）/ cancel=终止运行 */
+      cloudSubtaskAction(id: string, taskId: number, subtaskId: number, action: 'retry' | 'skip' | 'cancel'): Promise<CloudApi<{ taskId: number; subtaskId?: number; message: string }>>
+      cloudTaskBatchRetry(id: string, taskIds: number[]): Promise<CloudApi<{ count: number }>>
+      cloudSubtaskLog(id: string, taskId: number, subtaskId: number): Promise<CloudApi<{ text: string }>>
+      /** 整任务日志（全部子任务拼接）→ 主进程弹保存框落盘 */
+      cloudTaskLogSave(id: string, taskId: number, name?: string): Promise<{ ok: boolean; path?: string; count?: number; empty?: number; bytes?: number; error?: string; canceled?: boolean }>
+      /** 任务诊断包（zip）→ 主进程弹保存框落盘 */
+      cloudTaskDiagnosis(id: string, taskId: number): Promise<{ ok: boolean; path?: string; bytes?: number; error?: string; canceled?: boolean }>
       cloudExportCsv(fileName: string, columns: string[], rows: unknown[][]): Promise<{ ok: boolean; path?: string; count?: number; error?: string; canceled?: boolean }>
       cloudMetrics(id: string, query: CloudMetricQuery): Promise<CloudApi<{ series: CloudMetricSeries[]; warnings: string[]; step: number }>>
       cloudClusterAction(id: string, clusterId: number, action: string): Promise<CloudApi<{ taskId?: number; message?: string }>>
-      cloudCreateTenant(id: string, clusterId: number, input: CloudCreateTenantInput): Promise<CloudApi<{ taskId?: number }>>
+      cloudCreateTenant(id: string, clusterId: number, input: CloudCreateTenantInput): Promise<CloudApi<{ taskId?: number; tenantId?: number }>>
       cloudDeleteTenant(id: string, clusterId: number, tenantId: number): Promise<CloudApi<{ taskId?: number }>>
       cloudPackages(id: string): Promise<CloudApi<{ id: number; name: string; version: string; architecture: string }[]>>
       cloudClusterPreCheck(id: string, input: CloudClusterCreateInput): Promise<CloudApi<{ checkId?: string; items: { key: string; name: string; status: string; message?: string }[] }>>
       cloudClusterCreate(id: string, input: CloudClusterCreateInput, checkId?: string): Promise<CloudApi<{ taskId?: number }>>
       cloudClusterParams(id: string, clusterId: number): Promise<CloudApi<CloudParamRow[]>>
       cloudClusterUpdateParams(id: string, clusterId: number, items: { name: string; value: string }[]): Promise<CloudApi<void>>
-      cloudTenantParams(id: string, clusterId: number, tenantId: number): Promise<CloudApi<{ name: string; value: string; def: string; type: string; description: string }[]>>
+      cloudTenantParams(id: string, clusterId: number, tenantId: number): Promise<CloudApi<{ name: string; value: string; def: string; type: string; description: string; needRestart: boolean; readonly: boolean; valueRange: string }[]>>
       cloudTenantUpdateParams(id: string, clusterId: number, tenantId: number, items: { name: string; value: string }[]): Promise<CloudApi<void>>
       cloudTenantChangePassword(id: string, clusterId: number, tenantId: number, newPassword: string): Promise<CloudApi<void>>
       cloudTenantModifyWhitelist(id: string, clusterId: number, tenantId: number, whitelist: string): Promise<CloudApi<void>>
@@ -588,6 +622,22 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       cloudTenantBackup(id: string, clusterId: number, tenantId: number): Promise<CloudApi<CloudTenantBackupBundle>>
       cloudTenantUsers(id: string, clusterId: number, tenantId: number): Promise<CloudApi<CloudTenantUser[]>>
       cloudTenantTde(id: string, clusterId: number, tenantId: number): Promise<CloudApi<CloudTenantTde | null>>
+      // 用户 / 角色 / 授权对象（Oracle 租户才有角色；MySQL 调 roles 会 400）
+      cloudTenantRoles(id: string, clusterId: number, tenantId: number): Promise<CloudApi<CloudTenantRole[]>>
+      cloudTenantRole(id: string, clusterId: number, tenantId: number, role: string): Promise<CloudApi<CloudTenantRole | null>>
+      cloudTenantUser(id: string, clusterId: number, tenantId: number, user: string): Promise<CloudApi<CloudTenantUser | null>>
+      cloudTenantCreateUser(id: string, clusterId: number, tenantId: number, input: CloudCreateTenantUserInput): Promise<CloudApi<void>>
+      cloudTenantChangeUserPassword(id: string, clusterId: number, tenantId: number, user: string, password: string): Promise<CloudApi<void>>
+      cloudTenantSetUserLocked(id: string, clusterId: number, tenantId: number, user: string, locked: boolean): Promise<CloudApi<void>>
+      cloudTenantDropUser(id: string, clusterId: number, tenantId: number, user: string): Promise<CloudApi<void>>
+      cloudTenantModifyUserGlobalPrivileges(id: string, clusterId: number, tenantId: number, user: string, privileges: string[]): Promise<CloudApi<void>>
+      cloudTenantCreateRole(id: string, clusterId: number, tenantId: number, roleName: string, globalPrivileges?: string[]): Promise<CloudApi<void>>
+      cloudTenantDropRole(id: string, clusterId: number, tenantId: number, roleName: string): Promise<CloudApi<void>>
+      cloudTenantObjects(id: string, clusterId: number, tenantId: number, opts?: { keyword?: string; type?: string; userName?: string }): Promise<CloudApi<CloudTenantObject[]>>
+      cloudTenantResourcePlans(id: string, clusterId: number, tenantId: number): Promise<CloudApi<CloudTenantResourcePlan[]>>
+      cloudTenantResourcePlanAction(id: string, clusterId: number, tenantId: number, planName: string, action: 'enable' | 'disable'): Promise<CloudApi<void>>
+      cloudTenantDropResourcePlan(id: string, clusterId: number, tenantId: number, planName: string): Promise<CloudApi<void>>
+      cloudTenantConsumerGroups(id: string, clusterId: number, tenantId: number): Promise<CloudApi<CloudTenantResourcePlan[]>>
       // Unit 规格 / 克隆租户 / 创建备租户
       cloudUnitSpecs(id: string): Promise<CloudApi<CloudUnitSpec[]>>
       cloudUnitSpecCreate(id: string, input: CloudUnitSpecInput): Promise<CloudApi<void>>

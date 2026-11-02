@@ -286,6 +286,17 @@ const api = {
     ipcRenderer.invoke('cloud:directTenantParams', { id, tenantId, opts }),
   cloudDirectTenantTopSql: (id: string, tenantId: number, opts?: { hours?: number; limit?: number }) =>
     ipcRenderer.invoke('cloud:directTenantTopSql', { id, tenantId, opts }),
+  // 直连：租户运维视图
+  cloudDirectTenantTxns: (id: string, tenantId: number, limit?: number) =>
+    ipcRenderer.invoke('cloud:directTenantTxns', { id, tenantId, limit }),
+  cloudDirectTenantCompaction: (id: string, tenantId: number) =>
+    ipcRenderer.invoke('cloud:directTenantCompaction', { id, tenantId }),
+  cloudDirectTenantMetrics: (id: string, tenantId: number, tenantName: string) =>
+    ipcRenderer.invoke('cloud:directTenantMetrics', { id, tenantId, tenantName }),
+  cloudDirectTenantBackup: (id: string, tenantId: number) =>
+    ipcRenderer.invoke('cloud:directTenantBackup', { id, tenantId }),
+  cloudDirectTenantRsrc: (id: string, tenant: string) =>
+    ipcRenderer.invoke('cloud:directTenantRsrc', { id, tenant }),
   // 任务日志（本地文本存档）
   cloudDirectTasks: (q?: { page?: number; size?: number; keyword?: string; action?: string; status?: string }) =>
     ipcRenderer.invoke('cloud:directTasks', q || {}),
@@ -349,6 +360,18 @@ const api = {
   cloudTaskDetail: (id: string, taskId: number) => ipcRenderer.invoke('cloud:taskDetail', { id, taskId }),
   cloudTaskStats: (id: string) => ipcRenderer.invoke('cloud:taskStats', { id }),
   cloudTaskCreators: (id: string) => ipcRenderer.invoke('cloud:taskCreators', { id }),
+  cloudTaskAction: (id: string, taskId: number, action: 'retry' | 'rollback' | 'abort') =>
+    ipcRenderer.invoke('cloud:taskAction', { id, taskId, action }),
+  cloudSubtaskAction: (id: string, taskId: number, subtaskId: number, action: 'retry' | 'skip' | 'cancel') =>
+    ipcRenderer.invoke('cloud:subtaskAction', { id, taskId, subtaskId, action }),
+  cloudTaskBatchRetry: (id: string, taskIds: number[]) =>
+    ipcRenderer.invoke('cloud:taskBatchRetry', { id, taskIds: plain(taskIds) }),
+  cloudSubtaskLog: (id: string, taskId: number, subtaskId: number) =>
+    ipcRenderer.invoke('cloud:subtaskLog', { id, taskId, subtaskId }),
+  cloudTaskLogSave: (id: string, taskId: number, name?: string) =>
+    ipcRenderer.invoke('cloud:taskLogSave', { id, taskId, name }),
+  cloudTaskDiagnosis: (id: string, taskId: number) =>
+    ipcRenderer.invoke('cloud:taskDiagnosis', { id, taskId }),
   cloudExportCsv: (fileName: string, columns: string[], rows: unknown[][]) =>
     ipcRenderer.invoke('cloud:exportCsv', { fileName, columns, rows }),
   cloudMetrics: (id: string, query: any) => ipcRenderer.invoke('cloud:metrics', { id, query: plain(query) }),
@@ -420,6 +443,37 @@ const api = {
   cloudTenantBackup: (id: string, clusterId: number, tenantId: number) => ipcRenderer.invoke('cloud:tenantBackup', { id, clusterId, tenantId }),
   cloudTenantUsers: (id: string, clusterId: number, tenantId: number) => ipcRenderer.invoke('cloud:tenantUsers', { id, clusterId, tenantId }),
   cloudTenantTde: (id: string, clusterId: number, tenantId: number) => ipcRenderer.invoke('cloud:tenantTde', { id, clusterId, tenantId }),
+  // 用户 / 角色 / 授权对象（Oracle 与 MySQL 字段集不同，模式判断在前端）
+  cloudTenantRoles: (id: string, clusterId: number, tenantId: number) => ipcRenderer.invoke('cloud:tenantRoles', { id, clusterId, tenantId }),
+  cloudTenantRole: (id: string, clusterId: number, tenantId: number, role: string) =>
+    ipcRenderer.invoke('cloud:tenantRole', { id, clusterId, tenantId, role }),
+  cloudTenantUser: (id: string, clusterId: number, tenantId: number, user: string) =>
+    ipcRenderer.invoke('cloud:tenantUser', { id, clusterId, tenantId, user }),
+  cloudTenantCreateUser: (id: string, clusterId: number, tenantId: number, input: any) =>
+    ipcRenderer.invoke('cloud:tenantCreateUser', { id, clusterId, tenantId, input: plain(input) }),
+  cloudTenantChangeUserPassword: (id: string, clusterId: number, tenantId: number, user: string, password: string) =>
+    ipcRenderer.invoke('cloud:tenantChangeUserPassword', { id, clusterId, tenantId, user, password }),
+  cloudTenantSetUserLocked: (id: string, clusterId: number, tenantId: number, user: string, locked: boolean) =>
+    ipcRenderer.invoke('cloud:tenantSetUserLocked', { id, clusterId, tenantId, user, locked }),
+  cloudTenantDropUser: (id: string, clusterId: number, tenantId: number, user: string) =>
+    ipcRenderer.invoke('cloud:tenantDropUser', { id, clusterId, tenantId, user }),
+  cloudTenantModifyUserGlobalPrivileges: (id: string, clusterId: number, tenantId: number, user: string, privileges: string[]) =>
+    ipcRenderer.invoke('cloud:tenantModifyUserGlobalPrivileges', { id, clusterId, tenantId, user, privileges: plain(privileges) }),
+  cloudTenantCreateRole: (id: string, clusterId: number, tenantId: number, roleName: string, globalPrivileges?: string[]) =>
+    ipcRenderer.invoke('cloud:tenantCreateRole', { id, clusterId, tenantId, roleName, globalPrivileges: plain(globalPrivileges || []) }),
+  cloudTenantDropRole: (id: string, clusterId: number, tenantId: number, roleName: string) =>
+    ipcRenderer.invoke('cloud:tenantDropRole', { id, clusterId, tenantId, roleName }),
+  cloudTenantObjects: (id: string, clusterId: number, tenantId: number, opts?: { keyword?: string; type?: string; userName?: string }) =>
+    ipcRenderer.invoke('cloud:tenantObjects', { id, clusterId, tenantId, opts: plain(opts || {}) }),
+  // 资源管理（资源隔离计划 / 资源组）
+  cloudTenantResourcePlans: (id: string, clusterId: number, tenantId: number) =>
+    ipcRenderer.invoke('cloud:tenantResourcePlans', { id, clusterId, tenantId }),
+  cloudTenantResourcePlanAction: (id: string, clusterId: number, tenantId: number, planName: string, action: 'enable' | 'disable') =>
+    ipcRenderer.invoke('cloud:tenantResourcePlanAction', { id, clusterId, tenantId, planName, action }),
+  cloudTenantDropResourcePlan: (id: string, clusterId: number, tenantId: number, planName: string) =>
+    ipcRenderer.invoke('cloud:tenantDropResourcePlan', { id, clusterId, tenantId, planName }),
+  cloudTenantConsumerGroups: (id: string, clusterId: number, tenantId: number) =>
+    ipcRenderer.invoke('cloud:tenantConsumerGroups', { id, clusterId, tenantId }),
   // Unit 规格 / 克隆租户 / 创建备租户
   cloudUnitSpecs: (id: string) => ipcRenderer.invoke('cloud:unitSpecs', { id }),
   cloudUnitSpecCreate: (id: string, input: any) => ipcRenderer.invoke('cloud:unitSpecCreate', { id, input: plain(input) }),

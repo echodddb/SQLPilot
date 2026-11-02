@@ -60,6 +60,23 @@
 
     <div v-if="cloud.error" class="tp-err">{{ cloud.error }}</div>
 
+    <!-- 批量条：勾选后才出现，避免常态占用高度 -->
+    <div v-if="cloud.taskSel.length" class="tp-bar sel-bar">
+      <b class="sel-n">已选 {{ cloud.taskSel.length }} 个任务</b>
+      <span class="tp-note">批量重试只对「失败」状态生效</span>
+      <span class="sp"></span>
+      <button class="tp-btn sm" @click="selectFailed">只选本页失败任务</button>
+      <button class="tp-btn sm" @click="clearTaskSel">取消选择</button>
+      <button
+        class="tp-btn sm primary"
+        :disabled="!!cloud.taskOpBusy || !selectedFailed.length"
+        :title="selectedFailed.length ? `对 ${selectedFailed.length} 个失败任务提交重试` : '所选任务里没有失败状态的任务'"
+        @click="doBatchRetry"
+      >
+        {{ cloud.taskOpBusy === 'batch' ? '提交中…' : `批量重试 ${selectedFailed.length}` }}
+      </button>
+    </div>
+
     <div
       class="tp-tbl-wrap tp-scroll-y"
       data-ai="tasks.list"
@@ -69,41 +86,70 @@
       <table class="tp-tbl">
         <thead>
           <tr>
+            <th class="ck">
+              <input
+                type="checkbox"
+                title="选中本页全部任务"
+                :checked="allSelected"
+                :indeterminate.prop="someSelected && !allSelected"
+                @change="toggleAll"
+              />
+            </th>
             <th>任务名</th><th>操作对象</th><th>状态</th><th class="r">执行进度</th>
             <th>发起者</th>
             <th class="sortable" @click="toggleSort">开始时间<span class="sort">{{ cloud.taskFilter.sort === 'start_asc' ? '↑' : cloud.taskFilter.sort === 'duration_desc' ? '⇅' : '↓' }}</span></th>
             <th>结束时间</th>
             <th class="r sortable" @click="toggleDuration">耗时<span class="sort">{{ cloud.taskFilter.sort === 'duration_desc' ? '↓' : '⇅' }}</span></th>
+            <th class="r opc">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in cloud.tasks.items" :key="t.id" class="clickable" @click="openTask(t.id)">
-            <td>
-              <div class="tk-name">{{ t.name }}</div>
-              <div class="tk-sub mono">ID: {{ t.id }} · {{ t.operation }} · {{ kindLabel(t.type) }}</div>
+          <tr v-for="tt in cloud.tasks.items" :key="tt.id" class="clickable" :class="{ picked: isSel(tt.id) }" @click="openTask(tt.id)">
+            <td class="ck" @click.stop>
+              <input type="checkbox" :checked="isSel(tt.id)" @change="toggleTaskSel(tt.id)" />
             </td>
             <td>
-              <div class="tk-obj mono">{{ objLine(t) }}</div>
-              <div class="tk-sub">{{ typeLabel(t) }}</div>
+              <div class="tk-name">{{ tt.name }}</div>
+              <div class="tk-sub mono">ID: {{ tt.id }} · {{ tt.operation }} · {{ kindLabel(tt.type) }}</div>
             </td>
             <td>
-              <span class="tk-st" :class="taskStatus(t.status).tone">
-                <i class="dot"></i>{{ taskStatus(t.status).label }}
+              <div class="tk-obj mono">{{ objLine(tt) }}</div>
+              <div class="tk-sub">{{ typeLabel(tt) }}</div>
+            </td>
+            <td>
+              <span class="tk-st" :class="taskStatus(tt.status).tone">
+                <i class="dot"></i>{{ taskStatus(tt.status).label }}
               </span>
             </td>
             <td class="r">
               <div class="prog-cell">
-                <span class="tp-bar-meter"><i :class="{ bad: hasFailed(t), warn: t.status === 'RUNNING' || isRunning(t) }" :style="{ width: progressPct(t) + '%' }" /></span>
-                <span class="mono">{{ progress(t) }}</span>
+                <span class="tp-bar-meter"><i :class="{ bad: hasFailed(tt), warn: tt.status === 'RUNNING' || isRunning(tt) }" :style="{ width: progressPct(tt) + '%' }" /></span>
+                <span class="mono">{{ progress(tt) }}</span>
               </div>
             </td>
-            <td class="tp-dim">{{ t.creator || '—' }}</td>
-            <td class="tp-dim">{{ t.startTime ? fmtTimeShort(t.startTime) : '—' }}</td>
-            <td class="tp-dim">{{ t.finishTime ? fmtTimeShort(t.finishTime) : '—' }}</td>
-            <td class="r tp-mono tp-dim">{{ t.startTime ? duration(t.startTime, t.finishTime) : '—' }}</td>
+            <td class="tp-dim">{{ tt.creator || '—' }}</td>
+            <td class="tp-dim">{{ tt.startTime ? fmtTimeShort(tt.startTime) : '—' }}</td>
+            <td class="tp-dim">{{ tt.finishTime ? fmtTimeShort(tt.finishTime) : '—' }}</td>
+            <td class="r tp-mono tp-dim">{{ tt.startTime ? duration(tt.startTime, tt.finishTime) : '—' }}</td>
+            <td class="r opc" @click.stop>
+              <div class="row-ops">
+                <template v-for="op in taskOps(tt.status)" :key="op.key">
+                  <button
+                    class="lnk"
+                    :class="{ danger: op.danger }"
+                    :disabled="!!cloud.taskOpBusy"
+                    :title="op.desc"
+                    @click="askOp(tt, op)"
+                  >{{ op.label }}</button>
+                </template>
+                <button class="lnk" :disabled="!!cloud.taskOpBusy || logBusyId === tt.id" title="下载该任务全部子任务日志" @click="saveLog(tt)">
+                  {{ logBusyId === tt.id ? '…' : '日志' }}
+                </button>
+              </div>
+            </td>
           </tr>
           <tr v-if="!cloud.tasks.items.length">
-            <td colspan="8" class="tp-empty">{{ cloud.loading ? '读取中…' : '没有符合条件的任务' }}</td>
+            <td colspan="10" class="tp-empty">{{ cloud.loading ? '读取中…' : '没有符合条件的任务' }}</td>
           </tr>
         </tbody>
       </table>
@@ -123,6 +169,7 @@
     </div>
 
     <TaskDetail v-if="cloud.taskDetail" />
+    <TaskAbortModal v-if="abortFor" :task="abortFor" @close="abortFor = null" />
   </div>
 </template>
 
@@ -132,13 +179,15 @@
  * 搜索、耗时排序、进度条、CSV 导出、任务详情抽屉（子任务时间轴）。
  * 服务端只认 status / name / clusterId / tenantId；其余条件由主进程在候选集里过滤，见 ocpTasks。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  cloud, load, ensureClusters, openTask, setTaskPage, setTaskStatus, setTaskName, setTaskFilter, resetTaskFilters, exportCsv
+  cloud, load, ensureClusters, openTask, setTaskPage, setTaskStatus, setTaskName, setTaskFilter, resetTaskFilters, exportCsv,
+  toggleTaskSel, clearTaskSel, selectFailedTasks, retrySelectedTasks, runTaskAction, downloadTaskLog
 } from '../../cloud/state'
-import { duration, fmtTimeShort, relTime, taskStatus } from '../../cloud/parts'
+import { duration, fmtTimeShort, relTime, taskStatus, taskOps, type TaskOpDef } from '../../cloud/parts'
 import { pushNotice } from '../../store'
 import TaskDetail from './task/TaskDetail.vue'
+import TaskAbortModal from './task/TaskAbortModal.vue'
 
 const TASK_KINDS = [
   { key: 'MANUAL', label: '手动任务' },
@@ -162,18 +211,81 @@ const maxPage = computed(() => Math.max(1, Math.ceil(cloud.tasks.total / Math.ma
 const clusterName = computed(() => cloud.clusters.find((c) => c.id === cloud.taskFilter.clusterId)?.name || '')
 const hasLocalFilter = computed(() => !!(cloud.taskFilter.creator || cloud.taskFilter.objType || cloud.taskFilter.type || cloud.taskFilter.hours))
 
+// ---- 多选（批量重试） ----
+const isSel = (id: number): boolean => cloud.taskSel.includes(id)
+const allSelected = computed(() => rows.value.length > 0 && rows.value.every((r) => isSel(r.id)))
+const someSelected = computed(() => rows.value.some((r) => isSel(r.id)))
+/** 只有失败态任务能批量重试，OCP 收到其他状态会整批报错 */
+const selectedFailed = computed(() => rows.value.filter((r) => isSel(r.id) && r.status === 'FAILED').map((r) => r.id))
+
+function toggleAll(e: Event): void {
+  const on = (e.target as HTMLInputElement).checked
+  for (const r of rows.value) {
+    if (on && !isSel(r.id)) toggleTaskSel(r.id)
+    else if (!on && isSel(r.id)) toggleTaskSel(r.id)
+  }
+}
+function selectFailed(): void {
+  selectFailedTasks()
+  if (!cloud.taskSel.length) pushNotice('本页没有失败状态的任务')
+}
+async function doBatchRetry(): Promise<void> {
+  if (!selectedFailed.value.length) return
+  const ok = await window.sqlpilot.uiConfirm(
+    `批量重试 ${selectedFailed.value.length} 个失败任务？`,
+    'OCP 会为每个任务重新提交执行，并各自生成新的任务实例。',
+    false
+  )
+  if (!ok) return
+  const r = await retrySelectedTasks()
+  if (!r.ok) pushNotice(r.error || '批量重试失败')
+}
+
+// ---- 行内操作 ----
+const abortFor = ref<{ id: number; name: string } | null>(null)
+const logBusyId = ref(0)
+
+async function askOp(task: CloudTask, op: TaskOpDef): Promise<void> {
+  if (op.key === 'abort') {
+    abortFor.value = { id: task.id, name: task.name }
+    return
+  }
+  const ok = await window.sqlpilot.uiConfirm(`${op.label}任务「${task.name}」？`, op.desc, op.danger)
+  if (!ok) return
+  const r = await runTaskAction(task.id, op.key)
+  if (!r.ok) pushNotice(r.error || '操作失败')
+}
+
+async function saveLog(task: CloudTask): Promise<void> {
+  if (logBusyId.value) return
+  logBusyId.value = task.id
+  const r = await downloadTaskLog(task.id, task.name)
+  logBusyId.value = 0
+  if (!r.ok && !r.canceled) pushNotice(r.error || '日志保存失败')
+}
+
 /** 状态 tab 的计数来自 state-statistics-batch（只有实际存在的状态），执行中把 PENDING/EXECUTING 合并 */
 const statusTabs = computed(() => {
   const sum = (m: RegExp) => cloud.taskStats.filter((x) => m.test(x.status)).reduce((s, x) => s + x.count, 0)
   const base = [
     { key: '', label: '全部', count: cloud.taskStats.reduce((s, x) => s + x.count, 0) },
     { key: 'SUCCESSFUL', label: '已完成', count: sum(/^SUCCESSFUL$/) },
-    { key: 'RUNNING', label: '执行中', count: sum(/RUNNING|PENDING|EXECUTING/) },
+    { key: 'RUNNING', label: '执行中', count: sum(/RUNNING|PENDING|EXECUTING|READY/) },
     { key: 'FAILED', label: '失败', count: sum(/^FAILED$/) }
   ]
-  const paused = sum(/PAUSED|CANCELED|CANCELLED/)
-  if (paused) base.push({ key: 'PAUSED', label: '暂停中', count: paused })
+  // 放弃 / 终止后是终点状态，OCP 上单独归一类
+  const aborted = sum(/ABORTED|CANCELED|CANCELLED/)
+  if (aborted) base.push({ key: 'ABORTED', label: '已放弃', count: aborted })
   return base
+})
+
+/**
+ * 「已放弃」tab 只在真有这类任务时出现；如果筛选状态下计数归零、tab 消失，
+ * 列表会卡在一个看不见的筛选上——这里自动回落到「全部」。
+ */
+watch(statusTabs, (tabs) => {
+  const cur = cloud.tasks.status
+  if (cur && !tabs.some((t) => t.key === cur)) void setTaskStatus('')
 })
 
 function statusLabel(key: string): string {
@@ -319,4 +431,26 @@ th.sortable:hover { color: var(--text); }
 .tp-note.warn { color: var(--yellow); }
 .pager { display: flex; align-items: center; gap: 7px; }
 .pager .sp { flex: 1; }
+
+/* 多选与行内操作 */
+th.ck, td.ck { width: 22px; padding-right: 0; }
+th.ck input, td.ck input { cursor: pointer; accent-color: var(--accent); }
+/* 操作列给足宽度：失败行要放 重试/回滚/日志 三个链接，窄了会挤成一条 */
+th.opc, td.opc { width: 124px; min-width: 124px; }
+tr.picked { background: var(--accent-dim); }
+tr.picked:hover { background: var(--accent-dim); }
+.row-ops { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.row-ops .lnk { opacity: 0.85; }
+tr:hover .row-ops .lnk { opacity: 1; }
+.lnk {
+  border: 0; background: none; padding: 0; font: inherit; font-size: 10.5px; color: var(--accent);
+  cursor: pointer; white-space: nowrap;
+}
+.lnk:hover:not(:disabled) { text-decoration: underline; }
+.lnk.danger { color: var(--yellow); }
+.lnk:disabled { color: var(--text-faint); cursor: not-allowed; opacity: 0.5; }
+.sel-bar {
+  border: 1px solid var(--accent); background: var(--accent-dim); border-radius: 9px; padding: 6px 10px;
+}
+.sel-bar .sel-n { font-size: 12px; color: var(--accent); }
 </style>

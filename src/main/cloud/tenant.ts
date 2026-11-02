@@ -723,19 +723,22 @@ export interface TenantUser {
   username: string
   host: string
   locked: boolean
+  /** 创建时间（Oracle 租户的列表才有） */
+  createTime: string
   accessibleDatabases: string[]
   globalPrivileges: string[]
   dbPrivileges: { db: string; privileges: string[] }[]
   connections: { type: string; url: string }[]
 }
 
-/** 租户内数据库用户：GET /tenants/{tid}/users */
+/** 租户内数据库用户：GET /tenants/{tid}/users（MySQL / Oracle 共用，字段随模式不同） */
 export async function ocpTenantUsers(client: OcpClient, clusterId: number, tenantId: number): Promise<TenantUser[]> {
   const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users`, { query: { page: 1, size: 200 } })
   return arr(d?.contents).map((o: any) => ({
     username: str(o?.username),
     host: str(o?.hostName ?? o?.host) || '%',
     locked: !!o?.isLocked,
+    createTime: str(o?.createTime),
     accessibleDatabases: arr(o?.accessibleDatabases).map(str),
     globalPrivileges: arr(o?.globalPrivileges).map(str),
     dbPrivileges: arr(o?.dbPrivileges).map((p: any) => ({ db: str(p?.dbName), privileges: arr(p?.privileges).map(str) })),
@@ -743,6 +746,239 @@ export async function ocpTenantUsers(client: OcpClient, clusterId: number, tenan
       type: str(c?.type) || (c?.obProxyAddress ? 'OBPROXY' : 'DIRECT'),
       url: str(c?.connectionString)
     }))
+  }))
+}
+
+// ---------------------------------------------------------------- 用户 / 角色（Oracle 与 MySQL 的差异都在这里）
+// 4.3 实测端点（参数走 body 的 JSON，密码必须先 RSA 加密，服务端会按复杂度校验明文）：
+//   GET    /tenants/{tid}/users                    列表（MySQL 带 dbPrivileges，Oracle 带 createTime）
+//   GET    /tenants/{tid}/users/{username}         详情（含 globalPrivileges，**不含角色**）
+//   POST   /tenants/{tid}/users                    {username, password, globalPrivileges?, roleNames?, dbPrivileges?}
+//   POST   /tenants/{tid}/users/{u}/changePassword {newPassword}
+//   POST   /tenants/{tid}/users/{u}/lock|unlock
+//   DELETE /tenants/{tid}/users/{u}
+//   POST   /tenants/{tid}/users/{u}/modifyGlobalPrivilege {globalPrivileges: []}
+//   GET    /tenants/{tid}/roles                    列表（MySQL 调用会 400「MySQL租户不支持该操作」）
+//   GET    /tenants/{tid}/roles/{role}             详情（含 userGrantees：被哪些用户/角色引用）
+//   POST   /tenants/{tid}/roles                    {roleName, globalPrivileges?}
+//   DELETE /tenants/{tid}/roles/{role}
+//   GET    /tenants/{tid}/objects                  授权对象搜索（空参数返回空列表）
+// 注意：Oracle 的系统权限名是 CREATE_SESSION 这类，传 MySQL 的 SELECT 会 500「unrecognized system privilege」。
+
+export interface TenantRole {
+  name: string
+  globalPrivileges: string[]
+  /** 被引用的用户/角色（OCP 的 userGrantees），据此反查「某用户拥有哪些角色」 */
+  grantees: string[]
+}
+
+function toRole(raw: any): TenantRole {
+  return {
+    name: str(raw?.name),
+    globalPrivileges: arr(raw?.globalPrivileges).map(str),
+    grantees: arr(raw?.userGrantees).map(str)
+  }
+}
+
+export async function ocpTenantRoles(client: OcpClient, clusterId: number, tenantId: number): Promise<TenantRole[]> {
+  const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/roles`, { query: { page: 1, size: 200 } })
+  return arr(d?.contents).map(toRole)
+}
+
+export async function ocpTenantRole(
+  client: OcpClient, clusterId: number, tenantId: number, role: string
+): Promise<TenantRole | null> {
+  const name = String(role || '').trim()
+  if (!name) return null
+  const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/roles/${encodeURIComponent(name)}`)
+  return d ? toRole(d) : null
+}
+
+/** 用户详情（不含角色；角色关系用 roles[].grantees 反查） */
+export async function ocpTenantUser(
+  client: OcpClient, clusterId: number, tenantId: number, user: string
+): Promise<TenantUser | null> {
+  const name = String(user || '').trim()
+  if (!name) return null
+  const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users/${encodeURIComponent(name)}`)
+  if (!d) return null
+  return {
+    username: str(d.username),
+    host: str(d.hostName) || '%',
+    locked: !!d.isLocked,
+    createTime: str(d.createTime),
+    accessibleDatabases: arr(d.accessibleDatabases).map(str),
+    globalPrivileges: arr(d.globalPrivileges).map(str),
+    dbPrivileges: arr(d.dbPrivileges).map((p: any) => ({ db: str(p?.dbName), privileges: arr(p?.privileges).map(str) })),
+    connections: arr(d.connectionStrings).map((c: any) => ({
+      type: str(c?.type) || (c?.obProxyAddress ? 'OBPROXY' : 'DIRECT'),
+      url: str(c?.connectionString)
+    }))
+  }
+}
+
+export interface CreateTenantUserInput {
+  username: string
+  /** 明文密码，主进程负责加密 */
+  password: string
+  hostName?: string
+  globalPrivileges?: string[]
+  /** Oracle：新建时授予的角色名 */
+  roleNames?: string[]
+  /** MySQL：库级权限 */
+  dbPrivileges?: { dbName: string; privileges: string[] }[]
+}
+
+export async function ocpTenantCreateUser(
+  client: OcpClient, clusterId: number, tenantId: number, input: CreateTenantUserInput
+): Promise<void> {
+  const username = String(input.username || '').trim()
+  if (!username) throw new OcpError('请填写用户名')
+  if (!input.password) throw new OcpError('请填写密码')
+  const body: Record<string, any> = { username, password: await client.encryptSensitive(input.password) }
+  if (input.hostName) body.hostName = input.hostName
+  if (input.globalPrivileges?.length) body.globalPrivileges = input.globalPrivileges
+  if (input.roleNames?.length) body.roleNames = input.roleNames
+  if (input.dbPrivileges?.length) body.dbPrivileges = input.dbPrivileges
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users`, { method: 'POST', body })
+}
+
+export async function ocpTenantChangeUserPassword(
+  client: OcpClient, clusterId: number, tenantId: number, user: string, password: string
+): Promise<void> {
+  if (!password) throw new OcpError('请填写新密码')
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users/${encodeURIComponent(user)}/changePassword`, {
+    method: 'POST',
+    body: { newPassword: await client.encryptSensitive(password) }
+  })
+}
+
+export async function ocpTenantSetUserLocked(
+  client: OcpClient, clusterId: number, tenantId: number, user: string, locked: boolean
+): Promise<void> {
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users/${encodeURIComponent(user)}/${locked ? 'lock' : 'unlock'}`, { method: 'POST' })
+}
+
+export async function ocpTenantDropUser(
+  client: OcpClient, clusterId: number, tenantId: number, user: string
+): Promise<void> {
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users/${encodeURIComponent(user)}`, { method: 'DELETE' })
+}
+
+/** 覆盖式设置系统权限（OCP 的 modifyGlobalPrivilege 语义：整份列表覆盖） */
+export async function ocpTenantModifyUserGlobalPrivileges(
+  client: OcpClient, clusterId: number, tenantId: number, user: string, privileges: string[]
+): Promise<void> {
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/users/${encodeURIComponent(user)}/modifyGlobalPrivilege`, {
+    method: 'POST',
+    body: { globalPrivileges: privileges }
+  })
+}
+
+export async function ocpTenantCreateRole(
+  client: OcpClient, clusterId: number, tenantId: number, roleName: string, globalPrivileges: string[] = []
+): Promise<void> {
+  const name = String(roleName || '').trim()
+  if (!name) throw new OcpError('请填写角色名')
+  const body: Record<string, any> = { roleName: name }
+  if (globalPrivileges.length) body.globalPrivileges = globalPrivileges
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/roles`, { method: 'POST', body })
+}
+
+export async function ocpTenantDropRole(
+  client: OcpClient, clusterId: number, tenantId: number, roleName: string
+): Promise<void> {
+  await client.call(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/roles/${encodeURIComponent(roleName)}`, { method: 'DELETE' })
+}
+
+/** 授权时搜索可访问对象（表/视图等）；4.3 不传参数返回空列表 */
+export interface TenantObject {
+  name: string
+  type: string
+  schema: string
+}
+
+export async function ocpTenantObjects(
+  client: OcpClient, clusterId: number, tenantId: number, opts: { keyword?: string; type?: string; userName?: string } = {}
+): Promise<TenantObject[]> {
+  const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/objects`, {
+    query: {
+      name: opts.keyword || undefined,
+      objectType: opts.type || undefined,
+      // Oracle 用户详情里不含「可访问对象」，只能按 userName 反查（probe40 试出的参数名）
+      userName: opts.userName || undefined,
+      page: 1,
+      size: 100
+    }
+  })
+  return arr(d?.contents).map((o: any) => ({
+    name: str(o?.name ?? o?.objectName),
+    type: str(o?.type ?? o?.objectType),
+    schema: str(o?.schema ?? o?.dbName ?? o?.schemaName)
+  }))
+}
+
+// ---------------------------------------------------------------- 资源管理（资源隔离计划 / 资源组）
+// 4.3 端点（逆向自 umi.js，参数走 query + JSON body，与任务接口同款）：
+//   GET    /tenants/{tid}/resourcePlans?page&size         列表（实测：POST 同路径报「不能为空」）
+//   POST   /tenants/{tid}/resourcePlans/{planName}/enable|disable
+//   DELETE /tenants/{tid}/resourcePlans/{planName}
+//   GET    /tenants/{tid}/consumerGroups                  资源组列表（同 GET）
+//   DELETE /tenants/{tid}/consumerGroups/{groupName}
+// 重要：这一组接口要求 OCP 里已登记该租户的 root 密码，否则直接 428
+// 「该操作需要集群 X 下租户 Y 的 root 用户凭据，请先在凭据管理中添加」——原样透传给前端提示。
+
+export interface TenantResourcePlan {
+  name: string
+  enabled: boolean | null
+  targetTenant: string
+  comment: string
+}
+
+export async function ocpTenantResourcePlans(
+  client: OcpClient, clusterId: number, tenantId: number
+): Promise<TenantResourcePlan[]> {
+  const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/resourcePlans`, {
+    query: { id: clusterId, tenantId, page: 1, size: 100 }
+  })
+  return arr(d?.contents ?? d).map((o: any) => ({
+    name: str(o?.planName ?? o?.name),
+    enabled: typeof o?.enabled === 'boolean' ? o.enabled : String(o?.status || '').toUpperCase() === 'ENABLED' ? true : null,
+    targetTenant: str(o?.targetTenantName ?? o?.tenantName),
+    comment: str(o?.comment ?? o?.description)
+  }))
+}
+
+export async function ocpTenantResourcePlanAction(
+  client: OcpClient, clusterId: number, tenantId: number, planName: string, action: 'enable' | 'disable'
+): Promise<void> {
+  await client.call(
+    `/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/resourcePlans/${encodeURIComponent(planName)}/${action}`,
+    { method: 'POST', query: { id: clusterId, tenantId, planName } }
+  )
+}
+
+export async function ocpTenantDropResourcePlan(
+  client: OcpClient, clusterId: number, tenantId: number, planName: string
+): Promise<void> {
+  await client.call(
+    `/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/resourcePlans/${encodeURIComponent(planName)}`,
+    { method: 'DELETE', query: { id: clusterId, tenantId, planName } }
+  )
+}
+
+/** 资源组（OCP 4.3 叫 consumerGroups） */
+export async function ocpTenantConsumerGroups(
+  client: OcpClient, clusterId: number, tenantId: number
+): Promise<TenantResourcePlan[]> {
+  const d = await client.call<any>(`/api/v2/ob/clusters/${clusterId}/tenants/${tenantId}/consumerGroups`, {
+    query: { id: clusterId, tenantId, page: 1, size: 100 }
+  })
+  return arr(d?.contents ?? d).map((o: any) => ({
+    name: str(o?.groupName ?? o?.name ?? o?.consumerGroup),
+    enabled: typeof o?.enabled === 'boolean' ? o.enabled : null,
+    targetTenant: str(o?.mappingRule ?? o?.rule),
+    comment: str(o?.comment ?? o?.description)
   }))
 }
 
@@ -996,6 +1232,10 @@ export interface StandbyTenantInput {
 /**
  * 创建备租户：POST /clusters/{cid}/tenants/createStandbyTenant（在**备集群**下调用）
  * 依赖主租户的日志归档/日志传输，未开归档时后端会拒绝。
+ *
+ * zones 的形状与建主租户一致：规格和 Unit 数必须嵌在 `resourcePool` 里。
+ * 平铺成 zones[].unitSpecName 会被服务端直接 NPE（实测 500 Unhandled exception），
+ * 而嵌套写法会正确报「指定的规格名=xx 不存在」，说明解析路径对得上。
  */
 export async function ocpCreateStandbyTenant(client: OcpClient, clusterId: number, input: StandbyTenantInput): Promise<{ taskId?: number; tenantId?: number }> {
   if (!input.name.trim()) throw new OcpError('请填写备租户名')
@@ -1008,8 +1248,10 @@ export async function ocpCreateStandbyTenant(client: OcpClient, clusterId: numbe
     zones: input.zones.map((z) => ({
       name: z.name,
       replicaType: z.replicaType || 'FULL',
-      unitSpecName: z.unitSpecName,
-      unitCount: Math.max(1, Number(z.unitCount) || 1)
+      resourcePool: {
+        unitSpecName: z.unitSpecName,
+        unitCount: Math.max(1, Number(z.unitCount) || 1)
+      }
     }))
   }
   if (input.logTransportMode) body.logTransportMode = input.logTransportMode

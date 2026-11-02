@@ -28,6 +28,9 @@ export const directTenant = reactive({
   adminScopeClusterId: 0
 })
 
+/** 跨 contextBridge 之前必须去掉 Vue 的 reactive Proxy（否则报 An object could not be cloned） */
+const plain = <T>(v: T): T => (v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T))
+
 /** clusterId → 直连平台 id（cloud.directOf 由 loadDirect 填充） */
 export function platformOfCluster(clusterId: number): string {
   return cloud.directOf[clusterId] || ''
@@ -245,7 +248,7 @@ export async function tenantTables(
 }
 
 export async function createDbAs(platformId: string, tenant: string, input: { name: string; charset?: string }) {
-  const r = await window.sqlpilot.cloudDirectCreateDb(platformId, tenant, input)
+  const r = await window.sqlpilot.cloudDirectCreateDb(platformId, tenant, plain(input))
   return r.ok ? { ok: true, message: r.data?.message } : { ok: false, error: r.error || '创建失败' }
 }
 
@@ -274,7 +277,7 @@ export async function createUserAs(
   tenant: string,
   input: { name: string; host?: string; password: string; mode: 'MYSQL' | 'ORACLE' }
 ) {
-  const r = await window.sqlpilot.cloudDirectCreateUser(platformId, tenant, input)
+  const r = await window.sqlpilot.cloudDirectCreateUser(platformId, tenant, plain(input))
   return r.ok ? { ok: true, message: r.data?.message } : { ok: false, error: r.error || '创建失败' }
 }
 
@@ -283,7 +286,7 @@ export async function dropUserAs(
   tenant: string,
   input: { name: string; host?: string; mode: 'MYSQL' | 'ORACLE' }
 ) {
-  const r = await window.sqlpilot.cloudDirectDropUser(platformId, tenant, input)
+  const r = await window.sqlpilot.cloudDirectDropUser(platformId, tenant, plain(input))
   return r.ok ? { ok: true } : { ok: false, error: r.error || '删除失败' }
 }
 
@@ -300,7 +303,7 @@ export async function grantAs(
     mode: 'MYSQL' | 'ORACLE'
   }
 ) {
-  const r = await window.sqlpilot.cloudDirectGrant(platformId, tenant, input)
+  const r = await window.sqlpilot.cloudDirectGrant(platformId, tenant, plain(input))
   return r.ok
     ? { ok: true, message: r.data?.message, steps: (r.data as any)?.steps as string[] | undefined }
     : { ok: false, error: r.error || '授权失败', steps: (r as any).steps as string[] | undefined }
@@ -320,7 +323,7 @@ export async function revokeAs(
     table?: string
   }
 ) {
-  const r = await window.sqlpilot.cloudDirectRevoke(platformId, tenant, input)
+  const r = await window.sqlpilot.cloudDirectRevoke(platformId, tenant, plain(input))
   return r.ok
     ? { ok: true, message: r.data?.message, steps: (r.data as any)?.steps as string[] | undefined }
     : { ok: false, error: r.error || '回收失败', steps: (r as any).steps as string[] | undefined }

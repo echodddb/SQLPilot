@@ -6,6 +6,7 @@
 
 import { reactive } from 'vue'
 import { appMode } from '../app-mode'
+import { pushNotice } from '../store'
 import { METRIC_SETS, type MonitorScope } from './metrics'
 import type { EngineId } from './engines'
 
@@ -145,6 +146,10 @@ export const cloud = reactive({
   taskStats: [] as { status: string; count: number }[],
   taskCreators: [] as string[],
   taskUpdatedAt: 0,
+  /** 任务多选（批量重试）：只存 id，渲染时再按当前页过滤 */
+  taskSel: [] as number[],
+  /** 正在提交的操作标识：`task:1000117:retry` / `sub:1000117:1000227:skip` / `batch` */
+  taskOpBusy: '',
 
   /** 下钻：集群详情 */
   clusterId: null as number | null,
@@ -280,13 +285,28 @@ let seq = 0
 export const activePlatform = (): CloudPlatformView | undefined =>
   cloud.platforms.find((p) => p.id === cloud.activeId)
 
-/** 某个厂商下的所有平台：OCP 通常一个，Oracle 可能有多套环境；直连可能有多套集群 */
+/** 同一条实例的身份键：host:port:username（直连平台可能被重复添加，见 platformsOf） */
+export const directInstanceKey = (p: CloudPlatformView): string =>
+  [String(p.host || '').toLowerCase(), String(p.port || ''), String(p.username || '').toLowerCase()].join(':')
+
+/**
+ * 某个厂商下的所有平台：OCP 通常一个，Oracle 可能有多套环境；直连可能有多套集群。
+ *
+ * 直连要按「实例」去重：同一台 observer 被添加两次时，两个平台的 clusterId 完全一样，
+ * 合并展示会出现重复租户，而且 cloud.directOf 后写的会覆盖先写的 → 租户被算到另一条平台上，
+ * 凭据（按平台 id 存）就查不到了，表现是「明明录过管理员密码，进用户页还要你再录一遍」。
+ */
 export const platformsOf = (vendor: CloudVendor): CloudPlatformView[] => {
   if (vendor === 'oracle') return cloud.platforms.filter((p) => p.type === 'oracle')
-  // OceanBase 按二级接入方式分流
-  return cloud.access === 'direct'
-    ? cloud.platforms.filter((p) => p.type === 'obdirect')
-    : cloud.platforms.filter((p) => p.type === 'ocp')
+  if (cloud.access !== 'direct') return cloud.platforms.filter((p) => p.type === 'ocp')
+  const seen = new Set<string>()
+  return cloud.platforms.filter((p) => {
+    if (p.type !== 'obdirect') return false
+    const key = directInstanceKey(p)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** 当前接入方式下选中的平台集合（直连是全部平台一起展示） */
@@ -360,8 +380,24 @@ export async function setVendor(vendor: CloudVendor): Promise<void> {
  * 切换 OceanBase 的二级接入方式（OCP 托管 / 直连集群）。
  * 直连模式会把配置里的**所有**直连平台一起加载并合并展示。
  */
+const ACCESS_KEY = 'sp.cloud.access'
+
+function saveAccess(access: 'ocp' | 'direct'): void {
+  try { localStorage.setItem(ACCESS_KEY, access) } catch { /* 隐私模式/无 storage 时忽略 */ }
+}
+
+function savedAccess(): 'ocp' | 'direct' | null {
+  try {
+    const v = localStorage.getItem(ACCESS_KEY)
+    return v === 'direct' || v === 'ocp' ? v : null
+  } catch {
+    return null
+  }
+}
+
 export async function setAccess(access: 'ocp' | 'direct'): Promise<void> {
   if (cloud.access === access) return
+  saveAccess(access)
   cloud.access = access
   cloud.view = 'overview'
   resetOcpData()
@@ -385,6 +421,17 @@ export async function setAccess(access: 'ocp' | 'direct'): Promise<void> {
   if (cur?.type === 'oracle') cloud.vendor = 'oracle'
   // 上次停在直连平台的，直接回到 OB 的直连分支
   if (cur?.type === 'obdirect') { cloud.vendor = 'ocp'; cloud.access = 'direct' }
+  // 更可靠的是"上次手动选的接入方式"：否则每次重启/重进模块都会被第一条平台（往往是 OCP）抢走，
+  // 用户看到的就是"切几次模块自己跳回 OCP 了"
+  const remembered = savedAccess()
+  const hasDirect = cloud.platforms.some((p) => p.type === 'obdirect')
+  if (remembered === 'direct' && hasDirect && cloud.vendor === 'ocp') {
+    cloud.access = 'direct'
+    const list = platformsOf('ocp')
+    if (!list.some((p) => p.id === cloud.activeId)) cloud.activeId = list[0]?.id || ''
+  } else if (remembered === 'ocp' && cloud.access === 'direct' && !hasDirect) {
+    cloud.access = 'ocp'
+  }
   if (!cloud.activeId) {
     // 没有任何平台时：哪个入口有平台就进哪个，都没有则停在 OceanBase 的空态
     const hasOcp = cloud.platforms.some((p) => p.type === 'ocp')
@@ -663,7 +710,8 @@ async function loadDirect(my: number): Promise<void> {
     if (!ok.length) { cloud.error = failures.join('；') || '获取直连集群概览失败'; return }
     cloud.overview = mergeOverviews(ok, multi)
     const map: Record<number, string> = {}
-    for (const it of ok) for (const c of it.data.clusters) map[c.id] = it.platform.id
+    // 先写先赢：同一 clusterId 出现在多条平台时，以先加载的那条为准（与 platformsOf 去重顺序一致）
+    for (const it of ok) for (const c of it.data.clusters) if (!map[c.id]) map[c.id] = it.platform.id
     cloud.directOf = map
     cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
     return
@@ -794,9 +842,13 @@ export async function load(): Promise<void> {
       await loadSqlDiag()
     } else if (cloud.view === 'tasks') {
       const f = cloud.taskFilter
-      // 「执行中 / 暂停中」在 OCP 里是多个状态，服务端不支持多值，交给主进程本地过滤
+      // 「执行中 / 已放弃」在 OCP 里是多个状态，服务端不支持多值，交给主进程本地过滤
       const statusKey = cloud.tasks.status
-      const statusIn = statusKey === 'RUNNING' ? ['RUNNING', 'PENDING', 'EXECUTING'] : statusKey === 'PAUSED' ? ['PAUSED', 'CANCELED', 'CANCELLED'] : undefined
+      const statusIn = statusKey === 'RUNNING'
+        ? ['RUNNING', 'PENDING', 'EXECUTING', 'READY']
+        : statusKey === 'ABORTED'
+          ? ['ABORTED', 'CANCELED', 'CANCELLED']
+          : undefined
       const r = await window.sqlpilot.cloudTasks(cloud.activeId, {
         page: cloud.tasks.page,
         size: cloud.tasks.size,
@@ -970,17 +1022,20 @@ export async function setAlarmHours(hours: number): Promise<void> {
 export async function setTaskStatus(status: string): Promise<void> {
   cloud.tasks.status = status
   cloud.tasks.page = 1
+  cloud.taskSel = [] // 勾选是「当前页」语义，换筛选就清空，免得批量重试打到看不见的行
   await load()
 }
 
 export async function setTaskName(name: string): Promise<void> {
   cloud.tasks.name = name
   cloud.tasks.page = 1
+  cloud.taskSel = []
   await load()
 }
 
 export async function setTaskPage(page: number): Promise<void> {
   cloud.tasks.page = Math.max(1, page)
+  cloud.taskSel = []
   await load()
 }
 
@@ -988,6 +1043,7 @@ export async function setTaskPage(page: number): Promise<void> {
 export async function setTaskFilter(patch: Partial<{ clusterId: number; creator: string; objType: string; type: '' | 'MANUAL' | 'AUTO'; hours: number; sort: 'start_desc' | 'start_asc' | 'duration_desc' }>): Promise<void> {
   Object.assign(cloud.taskFilter, patch)
   cloud.tasks.page = 1
+  cloud.taskSel = []
   await load()
 }
 
@@ -1001,7 +1057,98 @@ export async function resetTaskFilters(): Promise<void> {
   cloud.taskFilter.type = ''
   cloud.taskFilter.hours = 0
   cloud.taskFilter.sort = 'start_desc'
+  cloud.taskSel = []
   await load()
+}
+
+// ---------------------------------------------------------------- 任务操作（写）
+// 规则对齐 OCP 任务页（4.3 前端常量表）：
+//   任务：FAILED → 重试 / 回滚；执行中或卡住 → 放弃（终止）；任意 → 下载日志
+//   子任务：SUCCESSFUL/DISREGARDED → 看日志；RUNNING → 看日志 + 终止；FAILED → 看日志 + 重试 + 跳过；其余 → 看日志
+// 写操作成功一律刷新列表与（打开中的）详情抽屉，因为 OCP 会新生成一个任务实例。
+
+export function toggleTaskSel(id: number): void {
+  const i = cloud.taskSel.indexOf(id)
+  if (i >= 0) cloud.taskSel.splice(i, 1)
+  else cloud.taskSel.push(id)
+}
+
+export function clearTaskSel(): void {
+  cloud.taskSel = []
+}
+
+/** 只勾选当前页里失败的任务（批量重试的唯一合法对象） */
+export function selectFailedTasks(): void {
+  cloud.taskSel = cloud.tasks.items.filter((t) => t.status === 'FAILED').map((t) => t.id)
+}
+
+async function refreshAfterOp(taskId: number): Promise<void> {
+  if (cloud.view === 'tasks') await load()
+  if (cloud.taskDetail && cloud.taskDetail.id === taskId) await openTask(taskId)
+}
+
+export async function runTaskAction(taskId: number, action: 'retry' | 'rollback' | 'abort'): Promise<{ ok: boolean; error?: string }> {
+  const key = `task:${taskId}:${action}`
+  if (cloud.taskOpBusy) return { ok: false, error: '上一操作还在提交中' }
+  cloud.taskOpBusy = key
+  const r = await window.sqlpilot.cloudTaskAction(cloud.activeId, taskId, action).catch((e) => ({ ok: false as const, error: String(e?.message || e) }))
+  cloud.taskOpBusy = ''
+  if (!r.ok) return { ok: false, error: r.error || '操作失败' }
+  pushNotice(r.data?.message || '操作已提交')
+  await refreshAfterOp(taskId)
+  return { ok: true }
+}
+
+export async function runSubtaskAction(
+  taskId: number,
+  subtaskId: number,
+  action: 'retry' | 'skip' | 'cancel'
+): Promise<{ ok: boolean; error?: string }> {
+  const key = `sub:${taskId}:${subtaskId}:${action}`
+  if (cloud.taskOpBusy) return { ok: false, error: '上一操作还在提交中' }
+  cloud.taskOpBusy = key
+  const r = await window.sqlpilot
+    .cloudSubtaskAction(cloud.activeId, taskId, subtaskId, action)
+    .catch((e) => ({ ok: false as const, error: String(e?.message || e) }))
+  cloud.taskOpBusy = ''
+  if (!r.ok) return { ok: false, error: r.error || '操作失败' }
+  pushNotice(r.data?.message || '操作已提交')
+  await refreshAfterOp(taskId)
+  return { ok: true }
+}
+
+export async function retrySelectedTasks(): Promise<{ ok: boolean; error?: string; count?: number }> {
+  const ids = cloud.taskSel.slice()
+  if (!ids.length) return { ok: false, error: '请先勾选任务' }
+  if (cloud.taskOpBusy) return { ok: false, error: '上一操作还在提交中' }
+  cloud.taskOpBusy = 'batch'
+  const r = await window.sqlpilot.cloudTaskBatchRetry(cloud.activeId, ids).catch((e) => ({ ok: false as const, error: String(e?.message || e) }))
+  cloud.taskOpBusy = ''
+  if (!r.ok) return { ok: false, error: r.error || '批量重试失败' }
+  cloud.taskSel = []
+  pushNotice(`已提交 ${r.data?.count || ids.length} 个任务的重试`)
+  await refreshAfterOp(0)
+  return { ok: true, count: r.data?.count || ids.length }
+}
+
+/** 下载整任务日志（全部子任务拼接，主进程弹保存框） */
+export async function downloadTaskLog(taskId: number, name: string): Promise<{ ok: boolean; error?: string; canceled?: boolean; path?: string; count?: number; empty?: number }> {
+  const r = await window.sqlpilot.cloudTaskLogSave(cloud.activeId, taskId, name).catch((e) => ({ ok: false as const, error: String(e?.message || e) }))
+  if (r.ok) pushNotice(`日志已保存${r.count ? `（${r.count} 个子任务）` : ''}：${r.path}`)
+  return r
+}
+
+/** 下载任务诊断包（zip） */
+export async function downloadTaskDiagnosis(taskId: number): Promise<{ ok: boolean; error?: string; canceled?: boolean; path?: string; bytes?: number }> {
+  const r = await window.sqlpilot.cloudTaskDiagnosis(cloud.activeId, taskId).catch((e) => ({ ok: false as const, error: String(e?.message || e) }))
+  if (r.ok) pushNotice(`诊断包已保存：${r.path}`)
+  return r
+}
+
+export async function loadSubtaskLog(taskId: number, subtaskId: number): Promise<{ ok: boolean; text?: string; error?: string }> {
+  const r = await window.sqlpilot.cloudSubtaskLog(cloud.activeId, taskId, subtaskId).catch((e) => ({ ok: false as const, error: String(e?.message || e) }))
+  if (!r.ok) return { ok: false, error: r.error || '读取日志失败' }
+  return { ok: true, text: r.data?.text || '' }
 }
 
 /** 保存/新增平台（密码留空 = 沿用已存密码） */
@@ -1143,7 +1290,7 @@ export async function runClusterAction(clusterId: number, action: string): Promi
 }
 
 /** 创建租户：clusterId 不传时用当前打开的集群（集群详情页入口），租户页入口显式传入 */
-export async function createTenant(input: CloudCreateTenantInput, clusterId?: number): Promise<{ ok: boolean; error?: string; taskId?: number }> {
+export async function createTenant(input: CloudCreateTenantInput, clusterId?: number): Promise<{ ok: boolean; error?: string; taskId?: number; tenantId?: number }> {
   const cid = clusterId ?? cloud.clusterId
   if (cid === null) return { ok: false, error: '未选择集群' }
   const r = await window.sqlpilot.cloudCreateTenant(cloud.activeId, cid, input)
@@ -1151,7 +1298,7 @@ export async function createTenant(input: CloudCreateTenantInput, clusterId?: nu
   void load()
   // 若正在看该集群的详情，顺带刷新它的租户列表
   if (cloud.clusterId === cid && cloud.cluster) await openCluster(cid)
-  return { ok: true, taskId: r.data?.taskId }
+  return { ok: true, taskId: r.data?.taskId, tenantId: r.data?.tenantId }
 }
 
 export async function deleteTenant(clusterId: number, tenantId: number): Promise<{ ok: boolean; error?: string; taskId?: number }> {

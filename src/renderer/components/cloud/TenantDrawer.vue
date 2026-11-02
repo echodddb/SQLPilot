@@ -28,7 +28,7 @@
       </header>
 
       <nav class="td-tabs">
-        <button v-for="t in TABS" :key="t.key" class="td-tab" :class="{ on: tab === t.key }" @click="tab = t.key">
+        <button v-for="t in tabs" :key="t.key" class="td-tab" :class="{ on: tab === t.key }" @click="tab = t.key">
           {{ t.label }}
         </button>
       </nav>
@@ -52,10 +52,11 @@
  *
  * 危险动作（改密 / 白名单 / TDE）收进「安全」面板；头部只留锁定与删除的快捷入口。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
 import { cloud, closeTenant, deleteTenant } from '../../cloud/state'
 import { pushNotice } from '../../store'
 import { tenantStatus } from '../../cloud/parts'
+import { tabsFor } from '../../cloud/tenantMode'
 import TenantOverview from './tenant/TenantOverview.vue'
 import TenantResource from './tenant/TenantResource.vue'
 import TenantTopo from './tenant/TenantTopo.vue'
@@ -68,30 +69,50 @@ import TenantCompaction from './tenant/TenantCompaction.vue'
 import TenantGather from './tenant/TenantGather.vue'
 import TenantBackup from './tenant/TenantBackup.vue'
 import TenantUsers from './tenant/TenantUsers.vue'
+import TenantUsage from './tenant/TenantUsage.vue'
+import TenantMonitor from './tenant/TenantMonitor.vue'
+import TenantResourceManager from './tenant/TenantResourceManager.vue'
 import TenantSecurity from './tenant/TenantSecurity.vue'
 import TenantClone from './tenant/TenantClone.vue'
 
 const d = computed(() => cloud.tenant as CloudTenantDetail)
 
-const TABS = [
-  { key: 'overview', label: '概览', comp: TenantOverview },
-  { key: 'resource', label: '副本与资源', comp: TenantResource },
-  { key: 'topo', label: '拓扑', comp: TenantTopo },
-  { key: 'database', label: '库表', comp: TenantDatabases },
-  { key: 'session', label: '会话', comp: TenantSessions },
-  { key: 'txn', label: '事务', comp: TenantTxns },
-  { key: 'sql', label: 'SQL 诊断', comp: TenantSql },
-  { key: 'params', label: '参数', comp: TenantParams },
-  { key: 'compaction', label: '合并', comp: TenantCompaction },
-  { key: 'gather', label: '统计信息', comp: TenantGather },
-  { key: 'backup', label: '备份', comp: TenantBackup },
-  { key: 'users', label: '用户', comp: TenantUsers },
-  { key: 'security', label: '安全', comp: TenantSecurity }
-] as const
+/**
+ * tab 清单的唯一来源是 `cloud/tenantMode.ts` 的 TENANT_TABS（含模式可用性），
+ * 这里只做「key → 组件」映射；还没实现的 tab 不渲染按钮，避免点进去空白。
+ */
+const COMPONENTS: Record<string, Component> = {
+  overview: TenantOverview,
+  usage: TenantUsage,
+  monitor: TenantMonitor,
+  rsrc: TenantResourceManager,
+  resource: TenantResource,
+  topo: TenantTopo,
+  database: TenantDatabases,
+  gather: TenantGather,
+  session: TenantSessions,
+  txn: TenantTxns,
+  sql: TenantSql,
+  params: TenantParams,
+  compaction: TenantCompaction,
+  backup: TenantBackup,
+  users: TenantUsers,
+  security: TenantSecurity
+}
 
-type TabKey = (typeof TABS)[number]['key']
-const tab = ref<TabKey>('overview')
-const activeComp = computed(() => TABS.find((t) => t.key === tab.value)!.comp)
+const tabs = computed(() =>
+  tabsFor(d.value?.tenant?.mode)
+    .filter((t) => COMPONENTS[t.key])
+    .map((t) => ({ ...t, comp: COMPONENTS[t.key] }))
+)
+
+const tab = ref('overview')
+const activeComp = computed(() => tabs.value.find((t) => t.key === tab.value)?.comp || TenantOverview)
+
+// 模式切换 / 面板数据刷新后，当前 tab 可能已不存在（例如 Oracle 下某些 tab），回落到概览
+watch(tabs, (list) => {
+  if (list.length && !list.some((t) => t.key === tab.value)) tab.value = list[0].key
+})
 
 const busy = ref(false)
 /** 克隆租户弹窗 */
