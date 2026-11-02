@@ -136,6 +136,22 @@ const api = {
   oblogProbe: (serverId: string, logDir?: string) => ipcRenderer.invoke('oblog:probe', { serverId, logDir }),
   oblogAnalyze: (serverId: string, opts: { scope?: string; sinceMinutes?: number; logDir?: string; maxBytes?: number }) =>
     ipcRenderer.invoke('oblog:analyze', { serverId, ...plain(opts || {}) }),
+  // OB 故障排查 Agent：命令卡片与正文走 obagent:event（流式），确认/停止走单独 invoke
+  obagentAsk: (input: {
+    id: string
+    serverId: string
+    question: string
+    context?: any
+    history?: { role: string; text: string }[]
+    mode?: string
+  }) => ipcRenderer.invoke('obagent:ask', plain({ ...input, history: [...(input?.history || [])] })),
+  obagentApprove: (cmdId: string, decision: string) => ipcRenderer.invoke('obagent:approve', { cmdId, decision }),
+  obagentStop: (id: string) => ipcRenderer.invoke('obagent:stop', { id }),
+  onObAgentEvent: (cb: (ev: any) => void) => {
+    const l = (_e: any, ev: any) => cb(ev)
+    ipcRenderer.on('obagent:event', l)
+    return () => ipcRenderer.removeListener('obagent:event', l)
+  },
   onSftpProgress: (cb: (p: any) => void) => {
     const l = (_e: any, p: any) => cb(p)
     ipcRenderer.on('sftp:progress', l)

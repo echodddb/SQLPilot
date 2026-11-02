@@ -1,5 +1,5 @@
 <template>
-  <div ref="rootEl" class="sp" :class="{ boot: booted, ready: seqDone, leaving }">
+  <div ref="rootEl" class="sp" :class="{ boot: booted, ready: seqDone, leaving, lock: isLock }" @click="onStageClick">
     <div class="sp-bg"></div>
     <div class="sp-grid"></div>
     <div class="sp-glow"></div>
@@ -72,7 +72,7 @@
           :class="{ ready: seqDone }"
           type="button"
           :disabled="phase === 'wait'"
-          @click="requestEnter"
+          @click.stop="requestEnter"
         >
           <span>{{ enterLabel }}</span>
           <span class="arw">→</span>
@@ -89,7 +89,7 @@
       type="button"
       title="关闭 SQLPilot"
       aria-label="关闭 SQLPilot"
-      @click="quit"
+      @click.stop="quit"
     >
       <svg viewBox="0 0 10 10"><path d="M0.5 0.5 L9.5 9.5 M9.5 0.5 L0.5 9.5" /></svg>
     </button>
@@ -248,10 +248,24 @@ function start(): void {
       phase.value = 'hold'
       status.value = isLock.value
         ? `LOCKED · 空闲 ${props.idleMin || 3} 分钟已自动锁定，点右下角进入`
-        : 'SYSTEM READY · ' + DB.length + ' ENGINES ONLINE'
+        : 'SYSTEM READY · ' + DB.length + ' ENGINES ONLINE · 点任意位置进入'
       if (t.auto && !isLock.value) requestEnter()
     })
   }, 30)
+}
+
+/**
+ * 点画面任意位置 = 跳过动画 / 进入。
+ *
+ * 理由：这段动画只是过场，用户已经连着看了几十次，每次都要挪到右下角点那颗小按钮
+ * 是纯粹的摩擦。锁屏态不接管 —— 锁屏的意义就是要人主动点「解锁进入」，
+ * 随手一点就放行等于没锁。
+ */
+function onStageClick(e: MouseEvent): void {
+  if (isLock.value) return
+  // 右上角关闭、右下角进入各有自己的语义，别让冒泡把「关闭」变成「进入」
+  if ((e.target as HTMLElement)?.closest('.sp-quit, .sp-enter')) return
+  requestEnter()
 }
 
 function requestEnter(): void {
@@ -469,6 +483,11 @@ html[data-theme='light'] .sp {
   --scan: rgba(13, 13, 13, 0.12);
   --scan-dim: rgba(13, 13, 13, 0.025);
   --flash: rgba(13, 13, 13, 0.14);
+}
+
+/* 整屏可点：手型光标是「点哪都能进」的唯一暗示；锁屏态不接管，光标保持默认 */
+.sp:not(.leaving):not(.lock) {
+  cursor: pointer;
 }
 
 /* 退场：260ms 内淡出并轻微推近，比主界面淡入快一拍，避免两层文字长时间叠在一起 */

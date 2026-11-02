@@ -16,6 +16,10 @@ declare type LocalEntryView = { name: string; path: string; isDir: boolean; hidd
 declare type SshConfigEntryView = import('../main/ssh-config').SshConfigEntry & { duplicate: boolean }
 declare type ObLogProbeView = import('../main/oblog').ObLogProbe
 declare type ObLogResultView = import('../main/oblog').ObLogResult
+// OB 故障排查 Agent（命令分档 / 事件流类型都在主进程定义，渲染层不重复写一遍）
+declare type ObAgentContextView = import('../main/obagent').ObAgentContext
+declare type ObAgentEventView = import('../main/obagent').ObAgentEvent
+declare type ObAgentAskInputView = import('../main/obagent').ObAgentAskInput
 declare type SftpProgress = {
   jobId: string
   /** 上传还是下载（渲染层队列被清空后也能正确归类） */
@@ -350,6 +354,10 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       sftpCancel(jobId: string): Promise<{ ok: boolean; found: boolean }>
       oblogProbe(serverId: string, logDir?: string): Promise<ObLogProbeView>
       oblogAnalyze(serverId: string, opts: { scope?: string; sinceMinutes?: number; logDir?: string; maxBytes?: number }): Promise<ObLogResultView>
+      obagentAsk(input: Omit<ObAgentAskInputView, 'serverId'> & { serverId: string }): Promise<{ ok: boolean; error?: string }>
+      obagentApprove(cmdId: string, decision: 'run' | 'skip' | 'always'): Promise<{ ok: boolean }>
+      obagentStop(id: string): Promise<{ ok: boolean }>
+      onObAgentEvent(cb: (ev: ObAgentEventView) => void): () => void
       onSftpProgress(cb: (p: SftpProgress) => void): () => void
       localRoots(): Promise<{ ok: boolean; roots: { name: string; path: string }[]; home: string; quick: { name: string; path: string }[] }>
       localLs(dir: string): Promise<{ ok: boolean; dir?: string; parent?: string; truncated?: boolean; entries?: LocalEntryView[]; error?: string }>

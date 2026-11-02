@@ -226,6 +226,7 @@ import {
   stopOraAi
 } from './cloud/oracle/ai'
 import { askEditorAi, bindEditorAiEmitter, deleteEditorAiSession, getEditorAiSession, listEditorAiSessions, stopEditorAi } from './editor-ai'
+import { askObAgent, bindObAgentEmitter, resolveObAgentApproval, stopObAgent } from './obagent'
 import {
   askCloudAi,
   bindCloudAiEmitter,
@@ -373,6 +374,12 @@ export function registerIpc(): void {
   bindEditorAiEmitter((ev) => {
     if (win && !win.isDestroyed()) {
       try { win.webContents.send('editor:ai:event', ev) } catch { /* 窗口关闭中 */ }
+    }
+  })
+  // OB 故障排查 Agent：命令卡片 / 正文 / 确认请求都走这条通道
+  bindObAgentEmitter((ev) => {
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('obagent:event', ev) } catch { /* 窗口关闭中 */ }
     }
   })
 
@@ -1171,6 +1178,25 @@ export function registerIpc(): void {
     return analyzeObLog(server, { scope: scope as any, sinceMinutes, logDir, maxBytes })
       .catch((e: any) => ({ ok: false, error: String(e?.message || e) }))
   })
+
+  // ---------- OB 故障排查 Agent ----------
+  // 会真的在目标机跑命令，所以每条命令都要过 obagent/policy 分级；确认请求走 obagent:approve。
+
+  ipcMain.handle('obagent:ask', (_e, input: any) => askObAgent({
+    id: String(input?.id || ''),
+    serverId: String(input?.serverId || ''),
+    question: String(input?.question || ''),
+    context: input?.context && typeof input.context === 'object' ? input.context : undefined,
+    history: Array.isArray(input?.history)
+      ? input.history.map((m: any) => ({ role: m?.role === 'assistant' ? 'assistant' as const : 'user' as const, text: String(m?.text || '') }))
+      : [],
+    mode: input?.mode === 'confirm' ? 'confirm' : 'auto'
+  }))
+
+  ipcMain.handle('obagent:approve', (_e, { cmdId, decision }: { cmdId: string; decision: string }) =>
+    resolveObAgentApproval(String(cmdId || ''), String(decision || '')))
+
+  ipcMain.handle('obagent:stop', (_e, { id }: { id: string }) => stopObAgent(String(id || '')))
 
   // ---------- 交互式 SSH 终端 ----------
 

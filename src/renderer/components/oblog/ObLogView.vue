@@ -16,6 +16,9 @@
         <select v-model="scope" class="ol-inp ol-scope" title="日志类型">
           <option v-for="s in scopes" :key="s.v" :value="s.v">{{ s.t }}</option>
         </select>
+        <button class="ol-agent" :disabled="!serverId" title="开一个浮窗，让 AI 连到这台机器上跑只读命令查根因" @click="openAgent()">
+          ✦ AI 排查
+        </button>
         <button class="ol-run" :disabled="!serverId || busy" @click="run">{{ busy ? '分析中…' : '分析' }}</button>
       </div>
     </div>
@@ -129,6 +132,7 @@
                 <p v-if="h.what" class="ol-what">{{ h.what }}</p>
                 <p v-if="h.advice" class="ol-advice">→ {{ h.advice }}</p>
                 <pre v-if="h.sample" class="ol-sample">{{ h.sample }}</pre>
+                <button class="ol-ask" @click="askAboutHot(h)">✦ 让 AI 到机器上查这条</button>
               </div>
             </template>
             <div v-if="!res.hotSpots.length" class="ol-none">无</div>
@@ -157,6 +161,7 @@
                 <p v-if="e.advice" class="ol-advice">→ {{ e.advice }}</p>
                 <pre v-if="e.sample" class="ol-sample">{{ e.sample }}
 {{ e.first }} → {{ e.last }}</pre>
+                <button class="ol-ask" @click="askAboutErr(e)">✦ 让 AI 到机器上查这条</button>
               </div>
             </template>
             <div v-if="!res.errCodes.length" class="ol-none">无 errcode 记录</div>
@@ -164,12 +169,16 @@
         </section>
       </div>
     </div>
+
+    <ObAgentPanel v-if="obAgent.open" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { store } from '../../store'
+import { obAgent, openObAgent, askObAgent, clearObAgent } from '../../oblog/agent'
+import ObAgentPanel from './ObAgentPanel.vue'
 
 /** 与 main/oblog.ts 的返回结构对齐（渲染层不跨进程 import 主进程模块） */
 interface ObLogRowView {
@@ -268,6 +277,15 @@ watch(serverId, (v) => {
   res.value = null
   probe.value = null
   err.value = ''
+  // 换了服务器：浮窗不能还指着旧机器继续跑命令 —— 停掉、清空、跟着切到新目标
+  if (obAgent.open && v !== obAgent.serverId) {
+    clearObAgent()
+    const s = servers.value.find((x) => x.id === v)
+    obAgent.serverId = v
+    obAgent.serverName = s?.name || ''
+    obAgent.host = s ? `${s.user}@${s.host}` : ''
+    obAgent.context = null
+  }
 })
 
 async function run(): Promise<void> {
@@ -303,6 +321,85 @@ const diskText = computed(() => {
   if (!d) return '—'
   return `${d.usePct}%（可用 ${bytes(d.avail)} / ${bytes(d.size)}）`
 })
+
+// ---------------------------------------------------------------- AI 故障排查
+
+const curServer = computed(() => servers.value.find((s) => s.id === serverId.value) || null)
+
+/**
+ * 交给 Agent 的现场证据：只带页面上已经看到的东西（结论 + TOP 热点/错误码 + 样例），
+ * 不带整份日志，也不在主进程重扫一遍。
+ */
+function agentContext(): any {
+  const r = res.value
+  return {
+    serverName: curServer.value?.name || '',
+    host: curServer.value?.host || '',
+    logDir: r?.logDir || probe.value?.logDir || '',
+    scope: scope.value,
+    windowStart: r?.windowStart || '',
+    windowEnd: r?.windowEnd || '',
+    total: r?.total,
+    linesPerHour: r?.linesPerHour,
+    filesScanned: r?.filesScanned,
+    bytesScanned: r?.bytesScanned,
+    truncated: r?.truncated,
+    disk: probe.value?.disk
+      ? { usePct: probe.value.disk.usePct, avail: probe.value.disk.avail, mount: probe.value.disk.mount }
+      : null,
+    levels: (r?.levels || []).map((l) => ({ key: l.key, count: l.count })),
+    summary: r?.summary
+      ? { level: r.summary.level, headline: r.summary.headline, points: r.summary.points }
+      : undefined,
+    hotSpots: (r?.hotSpots || []).slice(0, 8).map((h) => ({
+      key: h.key,
+      count: h.count,
+      verdict: h.verdict,
+      what: h.what,
+      advice: h.advice,
+      sample: h.sample
+    })),
+    errCodes: (r?.errCodes || []).slice(0, 8).map((e) => ({
+      key: e.key,
+      count: e.count,
+      msg: e.msg,
+      verdict: e.verdict,
+      what: e.what,
+      advice: e.advice,
+      sample: e.sample
+    }))
+  }
+}
+
+function openAgent(preset?: string): void {
+  const s = curServer.value
+  if (!s) {
+    err.value = '先选一台服务器，再让 AI 连过去排查'
+    return
+  }
+  openObAgent({
+    serverId: s.id,
+    serverName: s.name,
+    host: `${s.user}@${s.host}`,
+    context: agentContext(),
+    preset
+  })
+}
+
+function askAboutHot(h: ObLogRowView): void {
+  openAgent(
+    `「${h.key}」在窗口内出现了 ${h.count} 次，到机器上查清它在做什么、为什么会反复打印，再给处理建议。`
+  )
+  // 已经打开浮窗时 openObAgent 只填草稿，这里直接发出去省一次点击
+  void askObAgent()
+}
+
+function askAboutErr(e: ObLogRowView): void {
+  openAgent(
+    `错误码 ${e.key}（${e.msg || '含义未知'}）在窗口内出现 ${e.count} 次，到机器上确认它是不是在持续发生、影响什么，再给处理建议。`
+  )
+  void askObAgent()
+}
 
 /** 结论档位的标签：不用「正常/异常」，用 DBA 的话 */
 const VERDICT_LABEL = { ok: '健康', watch: '需留意', bad: '有问题' } as const
@@ -378,6 +475,23 @@ function levelColor(lv: string): string {
 }
 .ol-run:hover:not(:disabled) { background: var(--accent-dim); }
 .ol-run:disabled { opacity: 0.45; cursor: default; }
+
+/* AI 排查：不是主操作，用描边按钮，跟「分析」拉开层次 */
+.ol-agent {
+  height: 28px; padding: 0 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  background: transparent; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  font-family: inherit;
+}
+.ol-agent:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: var(--accent); }
+.ol-agent:disabled { opacity: 0.45; cursor: default; }
+
+/* 详情里「让 AI 查这条」：跟正文同一行流，不抢结论的注意力 */
+.ol-ask {
+  margin-top: 8px; padding: 3px 10px; border-radius: 6px; font-size: 11.5px; cursor: pointer;
+  background: transparent; color: var(--accent); font-family: inherit;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.ol-ask:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); border-style: solid; }
 
 .ol-err {
   margin: 14px 18px 0; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
