@@ -14,6 +14,8 @@ declare type SftpEntryView = import('../main/sftp').SftpEntry
 declare type SftpStatView = import('../main/sftp').SftpEntry & { exists: boolean }
 declare type LocalEntryView = { name: string; path: string; isDir: boolean; hidden: boolean; size: number; mtime: number }
 declare type SshConfigEntryView = import('../main/ssh-config').SshConfigEntry & { duplicate: boolean }
+declare type ObLogProbeView = import('../main/oblog').ObLogProbe
+declare type ObLogResultView = import('../main/oblog').ObLogResult
 declare type SftpProgress = {
   jobId: string
   /** 上传还是下载（渲染层队列被清空后也能正确归类） */
@@ -346,6 +348,8 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       sftpUploadPaths(serverId: string, localPaths: string[], remoteDir: string, jobId: string): Promise<{ ok: boolean; files?: number; bytes?: number; error?: string }>
       sftpDownloadPaths(serverId: string, remotePaths: string[], localDir: string, jobId: string): Promise<{ ok: boolean; files?: number; bytes?: number; dir?: string; error?: string }>
       sftpCancel(jobId: string): Promise<{ ok: boolean; found: boolean }>
+      oblogProbe(serverId: string, logDir?: string): Promise<ObLogProbeView>
+      oblogAnalyze(serverId: string, opts: { scope?: string; sinceMinutes?: number; logDir?: string; maxBytes?: number }): Promise<ObLogResultView>
       onSftpProgress(cb: (p: SftpProgress) => void): () => void
       localRoots(): Promise<{ ok: boolean; roots: { name: string; path: string }[]; home: string; quick: { name: string; path: string }[] }>
       localLs(dir: string): Promise<{ ok: boolean; dir?: string; parent?: string; truncated?: boolean; entries?: LocalEntryView[]; error?: string }>

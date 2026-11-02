@@ -185,6 +185,7 @@
           <MaskingView v-else-if="store.module === 'masking'" style="flex: 1; min-height: 0" />
           <CloudView v-else-if="store.module === 'cloud'" style="flex: 1; min-height: 0" />
           <CmdbView v-else-if="store.module === 'cmdb'" style="flex: 1; min-height: 0" />
+          <ObLogView v-else-if="store.module === 'oblog'" style="flex: 1; min-height: 0" />
 
           <!-- 数据库控制台（独立一级模块）：v-show 保活——切到别的模块处理完再回来，
                查询标签页 / 结果集 / 未提交事务全部还在；只有 ✕ 关闭控制台才销毁 -->
@@ -252,6 +253,7 @@ import TextEditorView from './components/TextEditorView.vue'
 import SettingsView from './components/SettingsView.vue'
 import DbWorkbenchView from './components/DbWorkbenchView.vue'
 import ServerView from './components/server/ServerView.vue'
+import ObLogView from './components/oblog/ObLogView.vue'
 import { srv as srvState } from './server/state'
 import CloudView from './components/cloud/CloudView.vue'
 import CmdbView from './components/cmdb/CmdbView.vue'

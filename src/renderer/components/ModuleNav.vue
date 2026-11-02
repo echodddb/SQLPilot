@@ -66,6 +66,7 @@ const modules = [
   // 客户与机房是两个正交维度（一个机房可服务多个客户），关系图与 3D 拓扑都在这里
   { key: 'cmdb', icon: '⛁', label: '资产', desc: 'CMDB 资产台账：客户 / 机房 / 机柜 / 服务器 / 交换机 / 数据库实例，关系图谱与 3D 拓扑' },
   { key: 'cloud', icon: '☁', label: '云管平台', desc: '云管平台：OceanBase（OCP 接口）+ Oracle（直连查 v$ 视图）' },
+  { key: 'oblog', icon: '☰', label: 'OB 日志', desc: 'OB 日志中心：远端聚合 observer/rootservice/election/trace 日志，看级别分布、刷屏热点与错误码，不整文件回传' },
   { key: 'editor', icon: '✎', label: '文本编辑', desc: 'Notepad++ 式多标签文本编辑器：大文件秒开 / 语法高亮 / 正则替换 / 编码转换' },
   { key: 'masking', icon: '⛨', label: '脱敏工具', desc: '本地脱敏 Oracle AWR 等运维文件，规则按文件类型独立配置' },
   { key: 'report', icon: '▤', label: '巡检报告', desc: '基于模板的数据库巡检报告生成（规划中，与 AI 无关）' }

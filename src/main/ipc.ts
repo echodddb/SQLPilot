@@ -10,6 +10,7 @@ import { getAdapter, dropAdapter, closeAll } from './db/manager'
 import { testServer, probeServer, openShell, shellInput, shellResize, closeShell, closeAll as sshCloseAll, dropServer, forgetHostKey, sftpList, sftpDownload, sftpUpload, execCommand } from './ssh'
 import * as sftpOps from './sftp'
 import { readSshConfig } from './ssh-config'
+import { analyzeObLog, probeObLog } from './oblog'
 import { UNGROUPED, deleteGroup, ensureGroup, groupNames, moveServers, normalizeGroupName, renameGroup, validateGroupName } from './server-groups'
 import {
   deleteConnGroup, ensureConnGroup, connGroupNames, moveConnections, renameConnGroup
@@ -1151,6 +1152,24 @@ export function registerIpc(): void {
         duplicate: existing.has(`${e.host}:${e.port}:${e.user || ''}`)
       }))
     }
+  })
+
+  // ---------- OB 日志中心（observer/rootservice/election/trace） ----------
+  // 传 serverId 而不是连接串：凭据走 DPAPI（server:<id>），且复用 SSH 连接池。
+
+  ipcMain.handle('oblog:probe', (_e, { serverId, logDir }: { serverId: string; logDir?: string }) => {
+    const server = loadConfig().servers.find((s) => s.id === serverId)
+    if (!server) return { ok: false, error: '服务器不存在（可能已删除）' }
+    return probeObLog(server, logDir).catch((e: any) => ({ ok: false, error: String(e?.message || e) }))
+  })
+
+  ipcMain.handle('oblog:analyze', (_e, { serverId, scope, sinceMinutes, logDir, maxBytes }: {
+    serverId: string; scope?: string; sinceMinutes?: number; logDir?: string; maxBytes?: number
+  }) => {
+    const server = loadConfig().servers.find((s) => s.id === serverId)
+    if (!server) return { ok: false, error: '服务器不存在（可能已删除）' }
+    return analyzeObLog(server, { scope: scope as any, sinceMinutes, logDir, maxBytes })
+      .catch((e: any) => ({ ok: false, error: String(e?.message || e) }))
   })
 
   // ---------- 交互式 SSH 终端 ----------

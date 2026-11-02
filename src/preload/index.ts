@@ -133,6 +133,9 @@ const api = {
   sftpDownloadPaths: (serverId: string, remotePaths: string[], localDir: string, jobId: string) =>
     ipcRenderer.invoke('sftp:downloadPaths', { serverId, remotePaths: plain(remotePaths), localDir, jobId }),
   sftpCancel: (jobId: string) => ipcRenderer.invoke('sftp:cancel', { jobId }),
+  oblogProbe: (serverId: string, logDir?: string) => ipcRenderer.invoke('oblog:probe', { serverId, logDir }),
+  oblogAnalyze: (serverId: string, opts: { scope?: string; sinceMinutes?: number; logDir?: string; maxBytes?: number }) =>
+    ipcRenderer.invoke('oblog:analyze', { serverId, ...plain(opts || {}) }),
   onSftpProgress: (cb: (p: any) => void) => {
     const l = (_e: any, p: any) => cb(p)
     ipcRenderer.on('sftp:progress', l)
