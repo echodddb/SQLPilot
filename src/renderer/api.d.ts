@@ -530,7 +530,7 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       cloudDirectGrant(id: string, tenant: string, input: { name: string; host?: string; database?: string; databases?: string[]; privileges: string | string[]; mode: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<{ message: string }>>
       cloudDirectGrants(id: string, tenant: string, input: { name: string; host?: string; mode?: 'MYSQL' | 'ORACLE' }): Promise<CloudApi<CloudDirectGrantRow[]>>
       cloudDirectRevoke(id: string, tenant: string, input: { name: string; host?: string; database?: string; databases?: string[]; privileges: string | string[]; mode: 'MYSQL' | 'ORACLE'; table?: string }): Promise<CloudApi<{ message: string }>>
-      cloudDirectTenantSelfCheck(id: string, tenant: string, mode: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ user: string; login: string; version: string; grants: string[]; canGrant: boolean; note: string }>>
+      cloudDirectTenantSelfCheck(id: string, tenant: string, mode: 'MYSQL' | 'ORACLE'): Promise<CloudApi<{ user: string; login: string; account: string; client: string; version: string; grants: string[]; canGrant: boolean; note: string }>>
       /** 云管主机的 SSH 凭据状态（ip → 账号信息，不含口令） */
       cloudHostSshStatus(platformId: string): Promise<CloudApi<Record<string, { serverId: string; user: string; port: number; auth: 'password' | 'key'; keyPath: string; hasPassword: boolean }>>>
       cloudHostSshForget(platformId: string, ip: string): Promise<CloudApi<Record<string, never>>>

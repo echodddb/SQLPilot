@@ -22,6 +22,7 @@ import {
   ORACLE_PRIVILEGES,
   privilegesOf,
   normalizeCharset,
+  normalizeGrantTarget,
   normalizePrimaryZone,
   parseSize,
   parseZoneList,
@@ -329,6 +330,22 @@ eq(buildConnectionStrings({ host: '', cluster: 'c', tenant: 't', mode: 'MYSQL' }
     '任务日志/界面里 MySQL 密码被掩码'
   )
   eq(maskPasswordInSql('ALTER TENANT t LOCK'), 'ALTER TENANT t LOCK', '非改密语句原样返回')
+}
+
+// ---------- SHOW GRANTS 的展示文本 ----------
+{
+  // OB 4.x 的 SHOW GRANTS 不带 @host（GRANT SELECT ON *.* TO 'u'），
+  // 界面上必须补成完整语句，否则看着像残缺 SQL、也复制不了
+  eq(normalizeGrantTarget("GRANT SELECT ON *.* TO 'ocp_monitor'", '%'), "GRANT SELECT ON *.* TO 'ocp_monitor'@'%'", '补齐 @host')
+  eq(
+    normalizeGrantTarget("GRANT ALL PRIVILEGES ON *.* TO 'root' WITH GRANT OPTION", '%'),
+    "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION",
+    'WITH GRANT OPTION 前面也能补'
+  )
+  eq(normalizeGrantTarget("GRANT SELECT ON *.* TO 'u'@'%'", '%'), "GRANT SELECT ON *.* TO 'u'@'%'", '已带 host 不重复补')
+  eq(normalizeGrantTarget('GRANT ALL ON `db`.* TO `u`', '10.%'), 'GRANT ALL ON `db`.* TO `u`@\'10.%\'', '反引号账号也能补')
+  eq(normalizeGrantTarget('', '%'), '', '空串原样返回')
+  eq(normalizeGrantTarget('SHOW GRANTS', '%'), 'SHOW GRANTS', '非 GRANT ... TO 文本不动')
 }
 
 // ---------- 勾选式授权：白名单归一化 ----------

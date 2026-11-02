@@ -181,6 +181,23 @@ export function sqlString(value: string): string {
   return `'${String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
+/**
+ * 补齐 SHOW GRANTS 里缺的 @host。
+ *
+ * OB 4.x 的 SHOW GRANTS 输出是 `GRANT SELECT ON *.* TO 'user01'` —— 不带 host，
+ * 界面上看着像一条残缺的语句，也没法直接复制去执行。查询时用的 host 是权威值，补回去：
+ *   GRANT SELECT ON *.* TO 'user01'@'%'
+ * 已经带 @host 的行（MySQL 语义下也可能）原样保留；不是 GRANT ... TO 形状的文本不动。
+ */
+export function normalizeGrantTarget(text: string, host: string): string {
+  const t = String(text ?? '')
+  if (!t) return t
+  return t.replace(
+    /(\bTO\s+)(`[^`]*`|'[^']*')(?!\s*@)/i,
+    (_m, head: string, who: string) => `${head}${who}@${sqlString(host || '%')}`
+  )
+}
+
 /** 字节数 → '4G' / '512M' 这类 OB 认的写法（整数 GB/MB 才省略小数） */
 export function formatBytes(bytes: number): string {
   const n = Math.max(0, Math.floor(Number(bytes) || 0))

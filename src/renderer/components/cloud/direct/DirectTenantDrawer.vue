@@ -321,7 +321,11 @@
                   当前权限
                   <span class="dim">{{ grantLoading ? '读取中…' : `${grantRows.length} 条` }}</span>
                   <button class="ghost sm" :disabled="userBusy" @click="loadGrants">刷新</button>
-                  <button class="ghost sm" :disabled="userBusy" title="查看当前的连接身份与授权能力（授权失败时先看这个）" @click="runSelfCheck">连接自检</button>
+                  <button class="ghost sm" :disabled="userBusy" title="查看当前连接身份与它自己的授权能力（授权失败时先看这个）" @click="runSelfCheck">连接自检</button>
+                  <span class="spacer"></span>
+                  <span class="conn-who" :title="`查询与授权都走这条连接（凭据在「概览」页录入），不是 ${grant.name} 自己的身份`">
+                    连接身份 <b class="mono">{{ connLabel }}</b>
+                  </span>
                 </div>
 
                 <!-- 自检结果：把"谁在连、能不能授权"直接摊开 -->
@@ -332,38 +336,49 @@
                   <template v-else>
                     <div class="selfchk-row">
                       连接身份 <b class="mono">{{ selfCheck.login }}</b>
+                      <span v-if="selfCheck.account" class="dim">· 账号 {{ selfCheck.account }}</span>
+                      <span v-if="selfCheck.client" class="dim">· 客户端 {{ selfCheck.client }}</span>
                       <span v-if="selfCheck.version" class="dim">· OB {{ selfCheck.version }}</span>
                       <span class="spacer"></span>
                       <span class="chip" :class="selfCheck.canGrant ? 'ok' : 'warn'">{{ selfCheck.canGrant ? '可授权' : '不可授权' }}</span>
                     </div>
+                    <!-- 自检查的是「连接账号」自己：它只回答"这条连接能不能授权"，与上面那个账号的权限无关 -->
+                    <div class="selfchk-tip">
+                      自检对象是<b>连接账号</b>，不是上方的 <b class="mono">{{ grant.name }}{{ isOracle ? '' : '@' + (grant.host || '%') }}</b>；
+                      它只用来判断这条连接有没有授权能力。
+                    </div>
                     <div class="selfchk-note">{{ selfCheck.note }}</div>
                     <details v-if="selfCheck.grants.length" class="selfchk-grants">
-                      <summary>当前账号自身的授权（{{ selfCheck.grants.length }} 条）</summary>
+                      <summary>连接账号自身的授权（{{ selfCheck.grants.length }} 条 · 非 {{ grant.name }} 的授权）</summary>
                       <code v-for="(g, i) in selfCheck.grants" :key="i" class="mono">{{ g }}</code>
                     </details>
                   </template>
                 </div>
 
-                <table class="tbl compact">
-                  <thead><tr><th>授权</th><th>类型</th><th class="r">操作</th></tr></thead>
-                  <tbody>
-                    <tr v-for="(g, i) in grantRows" :key="i">
-                      <td class="mono ellipsis" :title="g.text">{{ g.text }}</td>
-                      <td class="dim">{{ g.kind }}</td>
-                      <td class="r">
-                        <button
-                          class="op danger"
-                          :disabled="userBusy || !g.revocable"
-                          :title="g.revocable ? '回收这条授权' : (g.note || '不可在界面回收')"
-                          @click="doRevoke(g)"
-                        >回收</button>
-                      </td>
-                    </tr>
-                    <tr v-if="!grantRows.length && !grantLoading">
-                      <td colspan="3" class="empty">{{ grantErr || '该账号当前没有可展示的授权' }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                <div class="grant-list">
+                  <table class="tbl compact grant-tbl">
+                    <colgroup><col /><col class="c-kind" /><col class="c-op" /></colgroup>
+                    <thead><tr><th>授权语句</th><th>类型</th><th class="r">操作</th></tr></thead>
+                    <tbody>
+                      <tr v-for="(g, i) in grantRows" :key="i">
+                        <!-- 不能在 td 上用 .ellipsis：inline-block 会让 td 脱离表格、列宽塌陷，且长语句被截掉 -->
+                        <td class="mono grant-sql" :title="g.text">{{ g.text }}</td>
+                        <td class="dim kind">{{ g.kind }}</td>
+                        <td class="r">
+                          <button
+                            class="op danger"
+                            :disabled="userBusy || !g.revocable"
+                            :title="g.revocable ? '回收这条授权' : (g.note || '不可在界面回收')"
+                            @click="doRevoke(g)"
+                          >回收</button>
+                        </td>
+                      </tr>
+                      <tr v-if="!grantRows.length && !grantLoading">
+                        <td colspan="3" class="empty">{{ grantErr || '该账号当前没有可展示的授权' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
 
                 <div class="grant-label">新增授权</div>
                 <template v-if="!isOracle">
@@ -613,7 +628,15 @@ const grantErr = ref('')
 /** 上次授权/回收实际执行的 SQL（失败时用来定位断点） */
 const lastSteps = ref<string[]>([])
 /** 连接自检结果 */
-const selfCheck = ref<{ ok: boolean; login?: string; version?: string; canGrant?: boolean; note?: string; grants?: string[]; error?: string } | null>(null)
+const selfCheck = ref<{ ok: boolean; login?: string; account?: string; client?: string; version?: string; canGrant?: boolean; note?: string; grants?: string[]; error?: string } | null>(null)
+/**
+ * 当前连接的登录身份（用户页 / 概览页录入的租户凭据）。
+ * 授权、查用户、查授权全走这条连接，和"正在管理的账号"是两个身份，界面上要一直标出来。
+ */
+const connLabel = computed(() => {
+  const user = (cred.value.user || (isOracle.value ? 'sys' : 'root')).trim()
+  return `${user}@${t.value.tenant.name}`
+})
 /** 授权时可勾选的库（MySQL 模式；系统库不参与授权） */
 const grantDbs = ref<{ name: string }[]>([])
 const privOptions = computed(() => privOptionsOf(isOracle.value ? 'ORACLE' : 'MYSQL'))
@@ -1015,7 +1038,7 @@ async function runSelfCheck(): Promise<void> {
   try {
     const r = await tenantSelfCheck(platformId.value, t.value.tenant.name, isOracle.value ? 'ORACLE' : 'MYSQL')
     selfCheck.value = r.ok
-      ? { ok: true, login: r.login, version: r.version, canGrant: r.canGrant, note: r.note, grants: r.grants }
+      ? { ok: true, login: r.login, account: r.account, client: r.client, version: r.version, canGrant: r.canGrant, note: r.note, grants: r.grants }
       : { ok: false, error: r.error }
   } finally {
     userBusy.value = false
@@ -1225,6 +1248,20 @@ input:focus, select:focus { border-color: var(--accent); }
 /* 授权列表用紧凑表：条目多时也不把面板撑开 */
 .tbl.compact th, .tbl.compact td { padding: 4px 8px; }
 .tbl.compact tbody tr:last-child td { border-bottom: none; }
+/* 授权语句必须整条可读：定宽布局 + 折行（td 不能用 .ellipsis，见模板注释） */
+.grant-list {
+  max-height: 236px; overflow: auto;
+  border: 1px solid var(--border); border-radius: 7px;
+}
+.grant-list .grant-tbl thead th { position: sticky; top: 0; z-index: 1; }
+.grant-tbl { table-layout: fixed; }
+.grant-tbl .c-kind { width: 74px; }
+.grant-tbl .c-op { width: 62px; }
+.grant-tbl td.kind { white-space: nowrap; }
+.grant-sql { white-space: pre-wrap; word-break: break-word; line-height: 1.55; user-select: text; }
+/* 「当前权限」右侧常显的连接身份：说明查询/授权用的是这条连接 */
+.conn-who { color: var(--text-faint); font-size: 10.5px; white-space: nowrap; }
+.conn-who b { color: var(--text-dim); font-weight: 500; }
 /* 表清单区块：与上方库列表区分开，避免看成一整张表 */
 .tblbox { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border); }
 .tblbox .bar b { font-size: 12px; }
@@ -1238,6 +1275,9 @@ input:focus, select:focus { border-color: var(--accent); }
 .selfchk-row .chip.ok { color: var(--green); }
 .selfchk-row .chip.warn { color: var(--yellow); }
 .selfchk-note { color: var(--text-dim); line-height: 1.55; }
+/* 自检对象提示：把"查的是连接账号，不是被管理账号"说清楚 */
+.selfchk-tip { color: var(--text-faint); line-height: 1.55; }
+.selfchk-tip b { color: var(--text-dim); font-weight: 500; }
 .selfchk-grants { display: flex; flex-direction: column; gap: 2px; }
 .selfchk-grants summary { cursor: pointer; color: var(--text-faint); font-size: 10.5px; }
 .selfchk-grants code { font-size: 10px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; }

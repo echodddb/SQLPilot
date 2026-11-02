@@ -8,7 +8,7 @@
  */
 
 import { qAs, execAs, type ObDirectPlatform, type TenantLogin } from './conn'
-import { normalizePrivileges, privilegesOf } from './tenantSql'
+import { normalizeGrantTarget, normalizePrivileges, privilegesOf } from './tenantSql'
 import { obVersionOf } from './tenancy'
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -492,8 +492,9 @@ function oracleIdent(name: string): string {
  * 只保留白名单内的权限——出现未知权限（如 GRANT OPTION 组合）时整行标记为不可回收，
  * 避免 REVOKE 拼出我们没校验过的东西。
  */
-function parseMysqlGrantLine(line: string): GrantRow {
-  const text = String(line || '').trim()
+function parseMysqlGrantLine(line: string, host = '%'): GrantRow {
+  // OB 的 SHOW GRANTS 不带 @host，先补齐再去解析（见 tenantSql.normalizeGrantTarget）
+  const text = normalizeGrantTarget(String(line || '').trim(), host)
   const m = /^GRANT\s+(.+?)\s+ON\s+(.+?)\s+TO\s+/i.exec(text)
   if (!m) return { text, kind: '—', privileges: [], revocable: false, note: '无法解析' }
   const rawPrivs = m[1].split(',').map((x) => x.trim().toUpperCase())
@@ -586,7 +587,7 @@ export async function grantsAs(
 
   const host = String(input.host || '%').trim() || '%'
   const rows = await qAs(p, login, `SHOW GRANTS FOR ${lit(name)}@${lit(host)}`)
-  return rows.map((r) => parseMysqlGrantLine(str(Object.values(r)[0])))
+  return rows.map((r) => parseMysqlGrantLine(str(Object.values(r)[0]), host))
 }
 
 /** Oracle 可回收的角色 / 系统权限（与 ORACLE_PRIVILEGES 一致） */
@@ -706,38 +707,63 @@ export async function selfCheckAs(
   p: ObDirectPlatform,
   login: TenantLogin,
   mode: 'MYSQL' | 'ORACLE'
-): Promise<{ user: string; login: string; version: string; grants: string[]; canGrant: boolean; note: string }> {
+): Promise<{
+  /** CURRENT_USER()：租户内真正的账号（OB 返回 root@%） */
+  user: string
+  /** 逻辑登录身份 user@tenant（与用户录入的凭据一致，界面上用它） */
+  login: string
+  /** 服务端认定的账号 user@host */
+  account: string
+  /** USER() 里的客户端地址（root@192.168.10.123） */
+  client: string
+  version: string
+  grants: string[]
+  canGrant: boolean
+  note: string
+}> {
   if (mode === 'ORACLE') {
     const rows = await qAs(p, login, 'SELECT USER AS U, SYS_CONTEXT(\'USERENV\', \'SESSION_USER\') AS S FROM DUAL')
     const r0 = rows[0] || {}
     const roles = await qAs(p, login, 'SELECT GRANTED_ROLE FROM USER_ROLE_PRIVS').catch(() => [])
     const names = roles.map((r) => str(r.GRANTED_ROLE))
     const isDba = names.some((x) => x.toUpperCase() === 'DBA')
+    const user = str(r0.U) || login.user
     return {
-      user: str(r0.U),
-      login: login.user + '@' + login.tenant,
+      user,
+      account: str(r0.S) || user,
+      client: '',
+      login: `${login.user}@${login.tenant}`,
       version: '',
       grants: names,
       // Oracle 模式的授权能力来自 DBA 角色 / GRANT ANY PRIVILEGE
       canGrant: isDba || names.some((x) => /GRANT ANY/i.test(x)),
-      note: isDba ? '当前账号具备 DBA 角色，可以授权' : '当前账号没有 DBA 角色，授权可能被拒绝'
+      note: isDba ? '这条连接用的账号具备 DBA 角色，可以授权' : '这条连接用的账号没有 DBA 角色，授权可能被拒绝（改用 sys 或带 DBA 角色的账号连接）'
     }
   }
 
   const rows = await qAs(p, login, 'SELECT CURRENT_USER() AS U, USER() AS L, VERSION() AS V')
   const r0 = rows[0] || {}
   const grantRows = await qAs(p, login, 'SHOW GRANTS').catch(() => [])
-  const grants = grantRows.map((r) => str(Object.values(r)[0]))
+  const account = str(r0.U) || `${login.user}@%`
+  // 当前账号的 host 从 CURRENT_USER() 拿（root@%），用它把 SHOW GRANTS 缺的 @host 补齐
+  const at = account.indexOf('@')
+  const acctHost = at >= 0 ? account.slice(at + 1) : '%'
+  const grants = grantRows.map((r) => normalizeGrantTarget(str(Object.values(r)[0]), acctHost))
   // MySQL 语义：只有带 WITH GRANT OPTION 的权限才能继续授给别人
   const canGrant = grants.some((g) => /WITH\s+GRANT\s+OPTION/i.test(g))
+  const cli = str(r0.L)
+  // USER() 的 @ 后面是客户端地址，不是 host 通配，单独展示否则会被当成"连到了另一台机器"
+  const client = cli.includes('@') ? cli.slice(cli.indexOf('@') + 1) : ''
   return {
-    user: str(r0.U),
-    login: str(r0.L) || `${login.user}@${login.tenant}`,
+    user: account,
+    account,
+    client,
+    login: `${login.user}@${login.tenant}`,
     version: obVersionOf(str(r0.V)),
     grants,
     canGrant,
     note: canGrant
-      ? '当前账号带 GRANT OPTION，可以给其它账号授权'
-      : '当前账号没有 GRANT OPTION：只能做无授权的操作（OB 里通常是因为用业务账号而非 root/sys 连接）'
+      ? '这条连接用的账号带 WITH GRANT OPTION，可以给其它账号授权'
+      : '这条连接用的账号不带 WITH GRANT OPTION：只能做只读或自身范围内的操作（OB 里常见于用业务账号而非 root/sys 连接）'
   }
 }
