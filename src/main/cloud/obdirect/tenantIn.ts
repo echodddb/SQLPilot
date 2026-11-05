@@ -526,9 +526,28 @@ function parseMysqlGrantLine(line: string, host = '%'): GrantRow {
 const MYSQL_REVOKABLE = privilegesOf('MYSQL')
 
 /**
+ * 依次尝试多条 SQL，第一条成功就返回；全失败时把最后的错误带出来。
+ *
+ * Oracle 模式下 DBA_* 视图需要 DBA 角色，普通账号查会直接报错（不是返回空）。
+ * 旧代码 `.catch(() => [])` 把「没权限查」吞成「没有授权」——两个结论完全相反，
+ * 运维看到空的授权列表会误判权限已清理干净，然后重复授权或漏掉风险项。
+ */
+async function firstOk(p: ObDirectPlatform, login: TenantLogin, sqls: string[]): Promise<{ rows: any[]; err: string }> {
+  let err = ''
+  for (const sql of sqls) {
+    try {
+      return { rows: await qAs(p, login, sql), err: '' }
+    } catch (e: any) {
+      err = String(e?.message || e)
+    }
+  }
+  return { rows: [], err }
+}
+
+/**
  * 查看某个账号的授权。
  * MySQL 用 SHOW GRANTS（一行一条授权）；Oracle 模式没有 SHOW GRANTS，
- * 分别读 DBA_ROLE_PRIVS（角色）、DBA_SYS_PRIVS（系统权限）、DBA_TAB_PRIVS（对象权限）。
+ * 分别读角色 / 系统权限 / 对象权限三张视图（DBA_* 优先，没权限时降级到 USER_*）。
  */
 export async function grantsAs(
   p: ObDirectPlatform,
@@ -539,9 +558,15 @@ export async function grantsAs(
   if (input.mode === 'ORACLE') {
     const user = lit(name.toUpperCase())
     const out: GrantRow[] = []
+    const errs: string[] = []
     // GRANTEE 大小写按实际对象名匹配：Oracle 模式默认大写，但引号创建的账号会保留小写
-    const roles = await qAs(p, login, `SELECT GRANTED_ROLE FROM DBA_ROLE_PRIVS WHERE UPPER(GRANTEE) = UPPER(${user})`).catch(() => [])
-    for (const r of roles) {
+    const roles = await firstOk(p, login, [
+      `SELECT GRANTED_ROLE FROM DBA_ROLE_PRIVS WHERE UPPER(GRANTEE) = UPPER(${user})`,
+      // USER_* 视图只有「当前登录账号自己」的数据，列是 USERNAME 不是 GRANTEE
+      `SELECT GRANTED_ROLE FROM USER_ROLE_PRIVS`
+    ])
+    if (roles.err) errs.push(roles.err)
+    for (const r of roles.rows) {
       const role = str(r.GRANTED_ROLE)
       const revocable = ORACLE_REVOKABLE.includes(role.toUpperCase())
       out.push({
@@ -552,8 +577,12 @@ export async function grantsAs(
         note: revocable ? undefined : '不在可回收白名单内'
       })
     }
-    const sys = await qAs(p, login, `SELECT PRIVILEGE FROM DBA_SYS_PRIVS WHERE UPPER(GRANTEE) = UPPER(${user})`).catch(() => [])
-    for (const r of sys) {
+    const sys = await firstOk(p, login, [
+      `SELECT PRIVILEGE FROM DBA_SYS_PRIVS WHERE UPPER(GRANTEE) = UPPER(${user})`,
+      `SELECT PRIVILEGE FROM USER_SYS_PRIVS`
+    ])
+    if (sys.err) errs.push(sys.err)
+    for (const r of sys.rows) {
       const priv = str(r.PRIVILEGE).toUpperCase()
       const revocable = ORACLE_REVOKABLE.includes(priv)
       out.push({
@@ -564,11 +593,12 @@ export async function grantsAs(
         note: revocable ? undefined : '不在可回收白名单内'
       })
     }
-    const tab = await qAs(
-      p, login,
-      `SELECT OWNER, TABLE_NAME, PRIVILEGE FROM DBA_TAB_PRIVS WHERE UPPER(GRANTEE) = UPPER(${user}) AND ROWNUM <= 200`
-    ).catch(() => [])
-    for (const r of tab) {
+    const tab = await firstOk(p, login, [
+      `SELECT OWNER, TABLE_NAME, PRIVILEGE FROM DBA_TAB_PRIVS WHERE UPPER(GRANTEE) = UPPER(${user}) AND ROWNUM <= 200`,
+      `SELECT OWNER, TABLE_NAME, PRIVILEGE FROM USER_TAB_PRIVS WHERE ROWNUM <= 200`
+    ])
+    if (tab.err) errs.push(tab.err)
+    for (const r of tab.rows) {
       const owner = str(r.OWNER)
       const tableName = str(r.TABLE_NAME)
       const priv = str(r.PRIVILEGE).toUpperCase()
@@ -580,6 +610,16 @@ export async function grantsAs(
         table: `${owner}.${tableName}`,
         revocable,
         note: revocable ? undefined : '不在可回收白名单内'
+      })
+    }
+    // 三张视图全查不到（不是「没有授权」，是读不到）时，必须说出来
+    if (errs.length === 3) {
+      out.push({
+        text: '（无法读取该账号的授权）',
+        kind: '—',
+        privileges: [],
+        revocable: false,
+        note: `查询 Oracle 权限视图失败：${errs[0]}（需要 DBA 角色，或改用 sys 账号连接）`
       })
     }
     return out

@@ -346,6 +346,37 @@ eq(buildConnectionStrings({ host: '', cluster: 'c', tenant: 't', mode: 'MYSQL' }
   eq(normalizeGrantTarget('GRANT ALL ON `db`.* TO `u`', '10.%'), 'GRANT ALL ON `db`.* TO `u`@\'10.%\'', '反引号账号也能补')
   eq(normalizeGrantTarget('', '%'), '', '空串原样返回')
   eq(normalizeGrantTarget('SHOW GRANTS', '%'), 'SHOW GRANTS', '非 GRANT ... TO 文本不动')
+
+  // 下面这些是旧正则真出过错的地方：账号名里的 '' 转义、库名里的 TO、多行
+  eq(
+    normalizeGrantTarget("GRANT SELECT ON *.* TO 'o''brien'@'%'", '%'),
+    "GRANT SELECT ON *.* TO 'o''brien'@'%'",
+    "账号名含转义单引号且已带 host，不能再插一次"
+  )
+  eq(
+    normalizeGrantTarget("GRANT SELECT ON *.* TO 'o''brien'", '%'),
+    "GRANT SELECT ON *.* TO 'o''brien'@'%'",
+    "账号名含转义单引号时也要补在名字之后，不能插进名字中间"
+  )
+  eq(
+    normalizeGrantTarget("GRANT SELECT ON `db TO 'x'`.* TO 'u'@'%'", '%'),
+    "GRANT SELECT ON `db TO 'x'`.* TO 'u'@'%'",
+    '库名里含 TO 时不能把 host 插进标识符'
+  )
+  eq(
+    normalizeGrantTarget("GRANT SELECT ON *.* TO 'a'\nGRANT INSERT ON *.* TO 'b'", '%'),
+    "GRANT SELECT ON *.* TO 'a'@'%'\nGRANT INSERT ON *.* TO 'b'@'%'",
+    '多行要逐行补，不能只补第一行'
+  )
+  // 幂等：界面上会反复拿同一段文本渲染，补过的不能再变
+  for (const g of [
+    "GRANT SELECT ON *.* TO 'u'",
+    "GRANT SELECT ON *.* TO 'o''brien'@'%'",
+    'GRANT ALL ON `db`.* TO `u` WITH GRANT OPTION'
+  ]) {
+    const once = normalizeGrantTarget(g, '%')
+    eq(normalizeGrantTarget(once, '%'), once, `补齐必须幂等：${g}`)
+  }
 }
 
 // ---------- 勾选式授权：白名单归一化 ----------

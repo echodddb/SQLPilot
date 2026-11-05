@@ -149,8 +149,10 @@ const FALLBACK_DIRS = [
 
 /** 定位日志目录：优先按 observer 进程的真实二进制路径推，再退到常见路径 */
 export async function probeObLog(server: SshServer, logDir?: string): Promise<ObLogProbe> {
+  // 用 echo 而不是 printf 一次吐多行：每个哨兵独立成段，解析时不用靠行号猜。
+  // 关键命令的退出码单独回传（@@FINDE），否则「命令失败」会和「没有文件」分不开。
   const probeScript = [
-    'BIN=$(ps -eo args 2>/dev/null | awk \'/[o]bserver/{print $1; exit}\')',
+    'BIN=$(ps -eo args 2>/dev/null | LC_ALL=C awk \'/[o]bserver/{print $1; exit}\')',
     'HINT=""',
     'if [ -n "$BIN" ]; then HINT=$(dirname "$(dirname "$BIN")")/log; fi',
     'FOUND=""',
@@ -161,54 +163,91 @@ export async function probeObLog(server: SshServer, logDir?: string): Promise<Ob
     '    if [ -f "$p/observer.log" ]; then FOUND="$p"; BY="常见路径"; break; fi',
     '  done',
     'fi',
-    'printf "@@DIR\\n%s\\n@@BY\\n%s\\n@@BIN\\n%s\\n@@END\\n" "$FOUND" "$BY" "$BIN"'
+    'echo "@@DIR"',
+    'echo "$FOUND"',
+    'echo "@@BY"',
+    'echo "$BY"',
+    'echo "@@BIN"',
+    'echo "$BIN"'
   ].join('\n')
 
   const want = logDir || ''
-  const r = await execCapture(server, want ? `ls -d ${q(want)} 2>/dev/null && echo "@@DIR" && echo ${q(want)} && echo "@@BY" && echo "指定目录" && echo "@@END"` : probeScript, 30_000)
+  // 指定目录时把失败原因带回来：原来 ls 失败会被兜底文案说成「已尝试 6 个常见路径」，
+  // 实际上一个都没试，用户据此会去查错地方
+  const wantScript = [
+    `if [ -d ${q(want)} ]; then`,
+    '  echo "@@DIR"',
+    `  echo ${q(want)}`,
+    '  echo "@@BY"',
+    '  echo "指定目录"',
+    'else',
+    '  echo "@@ERR"',
+    `  echo ${q('指定的日志目录不存在或不可访问：' + want)}`,
+    'fi'
+  ].join('\n')
+
+  const r = await execCapture(server, want ? wantScript : probeScript, 30_000)
 
   let dir = ''
   let by = ''
-  const lines = r.out.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i] === '@@DIR') dir = (lines[i + 1] || '').trim()
-    else if (lines[i] === '@@BY') by = (lines[i + 1] || '').trim()
+  let probeErr = ''
+  let section = ''
+  for (const raw of r.out.split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    if (line.startsWith('@@')) { section = line.slice(2).trim(); continue }
+    if (section === 'DIR' && line.trim()) dir = line.trim()
+    else if (section === 'BY' && line.trim()) by = line.trim()
+    else if (section === 'ERR' && line.trim()) probeErr = line.trim()
   }
   if (!dir) {
+    if (probeErr) return { ok: false, error: probeErr }
+    if (r.err) return { ok: false, error: `定位日志目录失败：${r.err}` }
     return { ok: false, error: `未找到日志目录（已尝试 ${FALLBACK_DIRS.length} 个常见路径，且未能从 observer 进程路径推断）` }
   }
 
   const script = [
-    'printf "@@FILES\\n"',
+    'echo "@@ISDIR"',
+    `test -d ${q(dir)} && echo 1 || echo 0`,
+    'echo "@@READABLE"',
+    `test -r ${q(dir)} && echo 1 || echo 0`,
+    'echo "@@FILES"',
     `find ${q(dir)} -maxdepth 1 -type f \\( -name 'observer.log*' -o -name 'rootservice.log*' -o -name 'election.log*' -o -name 'trace.log*' \\) -printf '%f\\t%s\\t%T@\\n' 2>/dev/null`,
-    'printf "@@DISK\\n"',
+    // 必须先存再 echo：`echo "@@FINDE"` 本身会把 $? 重置成 0
+    'RC=$?',
+    'echo "@@FINDE"',
+    'echo "$RC"',
+    'echo "@@DISK"',
     `df -P ${q(dir)} 2>/dev/null | tail -1`,
-    'printf "@@USIZE\\n"',
-    `du -sb ${q(dir)} 2>/dev/null | awk '{print $1}'`,
-    'printf "@@END\\n"'
+    'echo "@@USIZE"',
+    `du -sb ${q(dir)} 2>/dev/null | cut -f1`,
+    'echo "@@END"'
   ].join('\n')
 
   const r2 = await execCapture(server, script, 60_000)
-  if (r2.code !== 0 && !r2.out.includes('@@FILES')) {
-    return { ok: false, error: `读取日志目录失败：${r2.err || '未知错误'}` }
-  }
+  if (r2.timedOut) return { ok: false, error: `读取日志目录超时（${dir}）` }
 
   const files: ObLogFile[] = []
   let totalBytes = 0
   let disk: ObLogProbe['disk'] = null
-  let section = ''
+  let isDir = true
+  let readable = true
+  let findCode = 0
   let dirSize = 0
+  let sec = ''
   for (const raw of r2.out.split('\n')) {
     const line = raw.replace(/\r$/, '')
-    if (line.startsWith('@@')) { section = line.slice(2); continue }
+    if (line.startsWith('@@')) { sec = line.slice(2).trim(); continue }
     if (!line.trim()) continue
-    if (section === 'FILES') {
+    if (sec === 'ISDIR') { isDir = line.trim() === '1'; continue }
+    if (sec === 'READABLE') { readable = line.trim() === '1'; continue }
+    if (sec === 'FINDE') { findCode = Number(line.trim()) || 0; continue }
+    if (sec === 'FILES') {
       const p = line.split('\t')
       if (p.length < 3) continue
       const size = Number(p[1]) || 0
-      files.push({ name: p[0], size, mtime: Math.round(Number(p[2]) || 0) })
+      files.push({ name: p[0], size, mtime: Math.floor(Number(p[2]) || 0) })
       totalBytes += size
-    } else if (section === 'DISK') {
+    } else if (sec === 'DISK') {
       const p = line.trim().split(/\s+/)
       if (p.length >= 6) {
         disk = {
@@ -219,10 +258,19 @@ export async function probeObLog(server: SshServer, logDir?: string): Promise<Ob
           usePct: Number(String(p[4]).replace('%', '')) || 0
         }
       }
-    } else if (section === 'USIZE') {
+    } else if (sec === 'USIZE') {
       dirSize = Number(line.trim()) || 0
     }
   }
+
+  // 「目录不存在」「没有读权限」「目录可读但一个日志都没有」必须分得开：
+  // 三者都表现为 files: []，但只有第三种是真的没有日志
+  if (!isDir) return { ok: false, error: `日志路径不是目录：${dir}` }
+  if (!readable) return { ok: false, error: `没有读取权限：${dir}（换有权限的账号，或让 DBA 临时放开权限）` }
+  if (findCode !== 0) {
+    return { ok: false, error: `扫描日志目录失败（find 退出码 ${findCode}）：${r2.err || dir}` }
+  }
+
   files.sort((a, b) => b.mtime - a.mtime)
   return { ok: true, logDir: dir, detectedBy: by || '指定目录', files, totalBytes: dirSize || totalBytes, disk }
 }
@@ -237,6 +285,9 @@ function site_of(s,   n, i, p, parts, one, fn) {
       # 函数名取「(」前那段里最后一个词：[STORAGE] get_kept_multi_version_start
       #   → get_kept_multi_version_start。解释库按函数名匹配，比 文件:行 稳。
       fn = parts[i - 1]
+      # 先削掉尾部分隔符再取最后一个词：parts[i-1] 结尾是空格（"INFO [STORAGE] get_xxx "），
+      # 直接 sub(/.*[ \t]/) 贪婪匹配会连整段一起吃掉，FN 永远是空串
+      sub(/[ \t]+$/, "", fn)
       sub(/.*[ \t]/, "", fn)
       FUNC = fn
       return substr(one, 1, p - 1)
@@ -269,7 +320,9 @@ function site_of(s,   n, i, p, parts, one, fn) {
     if (q2 > 1) {
       c = substr(r, 1, q2 - 1)
       E_[c]++
-      if (!(c in EF)) { EF[c] = ts; ES[c] = substr($0, 1, 220) }
+      # 样例从 errcode 位置开始截：从行首截 220 字符的话，正文本常常已经被切掉，
+      # 而「No space left」这类文案正是判定要靠的东西
+      if (!(c in EF)) { EF[c] = ts; ES[c] = substr($0, ei, 220) }
       EL[c] = ts
     }
   }
@@ -340,89 +393,110 @@ export interface ObLogOpts {
   maxBytes?: number
 }
 
+/**
+ * 失败结果：必须是 ok:false。
+ * 这里单独开一个函数而不是 `{ ...empty, error }` —— empty 的 ok 是 true，
+ * 展开后 error 会被渲染层整个丢掉（它只认 !ok），界面就变成绿色「一切正常」。
+ */
+function failedObLog(logDir: string, scope: ObLogScope, error: string): ObLogResult {
+  return {
+    ok: false,
+    error,
+    logDir,
+    scope,
+    windowStart: '',
+    windowEnd: '',
+    filesScanned: 0,
+    bytesScanned: 0,
+    truncated: false,
+    total: 0,
+    continuations: 0,
+    linesPerHour: 0,
+    levels: [],
+    hotSpots: [],
+    errCodes: []
+  }
+}
+
 export async function analyzeObLog(server: SshServer, opts: ObLogOpts = {}): Promise<ObLogResult> {
   const scope: ObLogScope = opts.scope || 'observer'
   const since = Math.max(1, Math.min(Number(opts.sinceMinutes) || 10, 7 * 24 * 60))
   const base: ObLogProbe = await probeObLog(server, opts.logDir)
   if (!base.ok || !base.logDir) {
-    return {
-      ok: false,
-      error: base.error || '未找到日志目录',
-      logDir: base.logDir || '',
-      scope,
-      windowStart: '',
-      windowEnd: '',
-      filesScanned: 0,
-      bytesScanned: 0,
-      truncated: false,
-      total: 0,
-      continuations: 0,
-      linesPerHour: 0,
-      levels: [],
-      hotSpots: [],
-      errCodes: []
-    }
+    return failedObLog(base.logDir || '', scope, base.error || '未找到日志目录')
   }
   const logDir = base.logDir
 
-  // 时间窗在远端算：客户端时钟/时区不可信
+  // 时间窗在远端算：客户端时钟/时区不可信。
+  // 每个哨兵都要能独立判定 —— 原来的 `code !== 0 && !includes('@@END')` 恒为假
+  // （@@END 是最后一句无条件 echo，退出码也是它自己的 0），等于完全没有错误检测。
   const winScript = [
-    `date -d '-${since} minutes' '+%s|%Y-%m-%d %H:%M:%S'`,
-    `date '+%s|%Y-%m-%d %H:%M:%S'`,
+    'echo "@@START"',
+    `date -d '-${since} minutes' '+%s|%Y-%m-%d %H:%M:%S' 2>/dev/null`,
+    'echo "@@NOW"',
+    `date '+%s|%Y-%m-%d %H:%M:%S' 2>/dev/null`,
+    'echo "@@FILES"',
     `find ${q(logDir)} -maxdepth 1 -type f -name ${q(scope + '.log*')} -printf '%f\\t%s\\t%T@\\n' 2>/dev/null`,
-    'echo @@END'
+    'RC=$?',
+    'echo "@@FINDE"',
+    'echo "$RC"',
+    'echo "@@END"'
   ].join('\n')
   const win = await execCapture(server, winScript, 60_000)
-  if (win.code !== 0 && !win.out.includes('@@END')) {
-    return {
-      ok: false,
-      error: `读取时间窗/文件清单失败：${win.err || '未知错误'}`,
-      logDir,
-      scope,
-      windowStart: '',
-      windowEnd: '',
-      filesScanned: 0,
-      bytesScanned: 0,
-      truncated: false,
-      total: 0,
-      continuations: 0,
-      linesPerHour: 0,
-      levels: [],
-      hotSpots: [],
-      errCodes: []
+  if (win.timedOut) return failedObLog(logDir, scope, '读取时间窗/文件清单超时')
+
+  let startEpoch = 0
+  let endEpoch = 0
+  let startText = ''
+  let endText = ''
+  let findCode = 0
+  const all: { name: string; size: number; mtime: number }[] = []
+  let widx = ''
+  for (const raw of win.out.split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    if (line.startsWith('@@')) { widx = line.slice(2).trim(); continue }
+    if (!line.trim()) continue
+    if (widx === 'START') {
+      const p = line.split('|')
+      startEpoch = Number(p[0]) || 0
+      startText = p[1] || ''
+    } else if (widx === 'NOW') {
+      const p = line.split('|')
+      endEpoch = Number(p[0]) || 0
+      endText = p[1] || ''
+    } else if (widx === 'FINDE') {
+      findCode = Number(line.trim()) || 0
+    } else if (widx === 'FILES') {
+      const p = line.split('\t')
+      if (p.length < 3) continue
+      // .wf 是同一批 WARN/FATAL 的副本，与 observer.log 内容重复，一起扫会重复计数
+      if (p[0].includes('.wf')) continue
+      all.push({ name: p[0], size: Number(p[1]) || 0, mtime: Math.floor(Number(p[2]) || 0) })
     }
   }
 
-  const rows = win.out.split('\n').map((s) => s.replace(/\r$/, ''))
-  let startEpoch = 0
-  let startText = ''
-  let endText = ''
-  const all: { name: string; size: number; mtime: number }[] = []
-  let idx = 0
-  if (rows[0] && rows[0].includes('|')) {
-    const p = rows[0].split('|')
-    startEpoch = Number(p[0]) || 0
-    startText = p[1] || ''
+  // 时间窗算不出来就直接失败。原来会静默退化成「客户端时钟」，还可能是零长度窗口，
+  // 两条路都会让界面显示「0 行 = 集群很干净」，比报错危险得多。
+  if (!startText || !startEpoch || !endText || !endEpoch) {
+    return failedObLog(
+      logDir,
+      scope,
+      `远端没能算出时间窗（date -d '-${since} minutes' 失败）。OB 主机一般是 GNU date，若为 BusyBox 请手动指定时间范围`
+    )
   }
-  if (rows[1] && rows[1].includes('|')) endText = (rows[1].split('|')[1] || '')
-  for (let i = 2; i < rows.length; i++) {
-    const line = rows[i]
-    if (!line || line === '@@END') continue
-    const p = line.split('\t')
-    if (p.length < 3) continue
-    // .wf 是同一批 WARN/FATAL 的副本，与 observer.log 内容重复，一起扫会重复计数
-    if (p[0].includes('.wf')) continue
-    all.push({ name: p[0], size: Number(p[1]) || 0, mtime: Math.round(Number(p[2]) || 0) })
+  if (endEpoch <= startEpoch) {
+    return failedObLog(logDir, scope, `远端时间窗异常：开始 ${startEpoch} ≥ 结束 ${endEpoch}`)
   }
-  if (!startText) {
-    // 极端情况：date 不可用，退化成本机时间（可能与服务端有偏差）
-    const now = Date.now()
-    const d = new Date(now - since * 60_000)
-    const f = (n: number) => String(n).padStart(2, '0')
-    startText = `${d.getFullYear()}-${f(d.getMonth() + 1)}-${f(d.getDate())} ${f(d.getHours())}:${f(d.getMinutes())}:${f(d.getSeconds())}`
-    const e = new Date(now)
-    endText = `${e.getFullYear()}-${f(e.getMonth() + 1)}-${f(e.getDate())} ${f(e.getHours())}:${f(e.getMinutes())}:${f(e.getSeconds())}`
-    startEpoch = Math.floor((now - since * 60_000) / 1000)
+  const spanMin = (endEpoch - startEpoch) / 60
+  if (Math.abs(spanMin - since) > Math.max(2, since * 0.1)) {
+    return failedObLog(
+      logDir,
+      scope,
+      `远端时间窗与请求不符：请求 ${since} 分钟，实际 ${Math.round(spanMin)} 分钟（${startText} → ${endText}）`
+    )
+  }
+  if (findCode !== 0) {
+    return failedObLog(logDir, scope, `扫描日志文件失败（find 退出码 ${findCode}）：${win.err || logDir}`)
   }
 
   // 只扫与窗口有交集的文件：文件 mtime 早于窗口起点说明它整段都在窗口之前
@@ -462,9 +536,18 @@ export async function analyzeObLog(server: SshServer, opts: ObLogOpts = {}): Pro
   // "Invalid multibyte data detected"；按字节解析反而更快也更稳定（我们只切 ASCII 前缀）
   const cmd = `LC_ALL=C awk -v S=${q(startText)} -v E=${q(endText)} ${q(AWK)} ${fileArgs}`
   const r = await execCapture(server, cmd, 300_000, 32 * 1024 * 1024)
-  if (r.timedOut) return { ...empty, error: `扫描超时（已选中 ${picked.length} 个文件，建议缩短时间窗）` }
-  if (r.code !== 0 && !r.out.includes('\t')) {
-    return { ...empty, error: `awk 聚合失败：${r.err || '无输出'}` }
+  if (r.timedOut) return failedObLog(logDir, scope, `扫描超时（已选中 ${picked.length} 个文件，建议缩短时间窗或指定 logDir）`)
+  const gotTotal = /(^|\n)T\t\d+/.test(r.out)
+  if (!gotTotal) {
+    return failedObLog(logDir, scope, `awk 聚合失败：${r.err || '没有输出'}（选中 ${picked.length} 个文件）`)
+  }
+  // 有 T 行说明统计跑起来了，但退出码非 0 = 有文件没读成功（权限/被删/EOF 中途），
+  // 这时的数字是「部分文件」的结果，必须让用户看见
+  const partial: string[] = []
+  if (r.code !== 0) partial.push(`退出码 ${r.code ?? 'null'}，部分文件可能没读到：${r.err || '无 stderr'}`)
+  // 远端输出超过 32MB 被截断时，排在后半段的低频高危错误码会被整段丢掉
+  if (r.out.includes('@@TRUNCATED@@')) {
+    partial.push('远端输出超过 32MB 已截断，热点与错误码统计不完整')
   }
 
   const levels: ObLogRow[] = []
@@ -494,26 +577,33 @@ export async function analyzeObLog(server: SshServer, opts: ObLogOpts = {}): Pro
   // 可读短标签放 msg：sample 要原样留到点开时看，不能被覆盖
   for (const e of errCodes.slice(0, 60)) e.msg = errMessage(e.sample, e.key)
 
-  // 挂人话解释：DBA 真正要的是「这要不要管」，不是错误码数字
-  const hot = hotSpots.slice(0, 40)
-  const errs = errCodes.slice(0, 40)
-  for (const h of hot) {
+  // 挂人话解释：DBA 真正要的是「这要不要管」，不是错误码数字。
+  // 注意这里挂的是**全量**：summary 的 bad 判定必须看到所有条目，
+  // 先 slice(0,40) 再判会让第 41 名之后的低频高危错误悄悄消失。
+  for (const h of hotSpots) {
     const ex = explainHotSpot(h.key, h.sample)
     h.what = ex.what
     h.verdict = ex.verdict
     h.advice = ex.advice
     h.rule = ex.rule
   }
-  for (const e of errs) {
+  for (const e of errCodes) {
     const ex = explainErrCode(e.key, e.sample)
     e.what = ex.what
     e.verdict = ex.verdict
     e.advice = ex.advice
     e.rule = ex.rule
   }
+  // 展示只取 Top40（界面本来也只渲染这么多），判定用全量
+  const hot = hotSpots.slice(0, 40)
+  const errs = errCodes.slice(0, 40)
+
+  if (partial.length) truncated = true
 
   return {
     ok: true,
+    // ok:true + error = 「数据拿到了但不完整」，渲染层会显示红色横幅而不是当成成功
+    error: partial.length ? partial.join('；') : undefined,
     logDir,
     scope,
     windowStart: startText,
@@ -527,7 +617,7 @@ export async function analyzeObLog(server: SshServer, opts: ObLogOpts = {}): Pro
     levels,
     hotSpots: hot,
     errCodes: errs,
-    summary: buildSummary(total, levels, hot, Math.round((total / since) * 60), errs)
+    summary: buildSummary(total, levels, hotSpots, Math.round((total / since) * 60), errCodes)
   }
 }
 

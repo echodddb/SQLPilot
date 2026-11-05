@@ -187,15 +187,41 @@ export function sqlString(value: string): string {
  * OB 4.x 的 SHOW GRANTS 输出是 `GRANT SELECT ON *.* TO 'user01'` —— 不带 host，
  * 界面上看着像一条残缺的语句，也没法直接复制去执行。查询时用的 host 是权威值，补回去：
  *   GRANT SELECT ON *.* TO 'user01'@'%'
- * 已经带 @host 的行（MySQL 语义下也可能）原样保留；不是 GRANT ... TO 形状的文本不动。
+ * 已经带 @host 的行原样保留；不是 GRANT ... TO 形状的文本不动。
+ *
+ * 三个必须守住的点（旧版正则会在这里出错）：
+ *   1. 账号名里的引号是成对转义的（`TO 'o''brien'@'%'`），`'[^']*'` 会在第一个 `'` 收尾；
+ *   2. 库名里也可能出现 ` TO 'x' `（`` ON `db TO 'x'`.* ``），不能从第一个 TO 开始找；
+ *   3. 一次可能传多行，要逐行处理。
  */
 export function normalizeGrantTarget(text: string, host: string): string {
-  const t = String(text ?? '')
-  if (!t) return t
-  return t.replace(
-    /(\bTO\s+)(`[^`]*`|'[^']*')(?!\s*@)/i,
-    (_m, head: string, who: string) => `${head}${who}@${sqlString(host || '%')}`
-  )
+  const raw = String(text ?? '')
+  if (!raw) return raw
+  return raw
+    .split('\n')
+    .map((line) => normalizeGrantLine(line, host))
+    .join('\n')
+}
+
+/** 单行：定位语句末尾那个 TO 的目标账号，缺 @host 才补 */
+function normalizeGrantLine(line: string, host: string): string {
+  const t = line.trim()
+  // 只动 GRANT 语句；REVOKE / 空行 / 其它文本原样返回
+  if (!/^GRANT\b/i.test(t)) return line
+  // 取最后一个 TO：库名、表名里都可能出现 TO 这个词
+  const toRe = /\s+TO\s+/gi
+  let m: RegExpExecArray | null
+  let last: RegExpExecArray | null = null
+  while ((m = toRe.exec(t))) last = m
+  if (!last) return line
+  const start = (last.index ?? 0) + last[0].length
+  // 目标 token：带引号的账号名（允许 '' 转义）或反引号标识符，后面可跟 @host
+  const tokRe = /^(`(?:[^`]|``)*`|'(?:[^']|'')*')(\s*@\s*(?:`(?:[^`]|``)*`|'(?:[^']|'')*'|%|[A-Za-z0-9_.:-]+))?/
+  const tm = tokRe.exec(t.slice(start))
+  if (!tm) return line
+  if (tm[2]) return t // 已经带 @host
+  const at = start + tm[1].length
+  return t.slice(0, at) + `@${sqlString(host || '%')}` + t.slice(at)
 }
 
 /** 字节数 → '4G' / '512M' 这类 OB 认的写法（整数 GB/MB 才省略小数） */

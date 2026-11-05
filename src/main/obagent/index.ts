@@ -17,7 +17,7 @@ import { loadConfig } from '../config'
 import { callLlm } from '../agent/llm'
 import { execCommand } from '../ssh'
 import { appendAudit } from '../audit'
-import { classifyCommand, splitCommands } from './policy'
+import { autoMemoAllowed, classifyCommand, splitCommands } from './policy'
 import { clipMiddle, obAgentSystemPrompt, obAgentUserMessage } from './prompt'
 import type { ObAgentAskInput, ObAgentEvent, ObAgentStatus } from './types'
 import type { ChatMsg, ProviderConfig, SshServer, ToolCall } from '../types'
@@ -36,13 +36,19 @@ const running = new Map<string, AbortController>()
 
 type ApprovalDecision = 'run' | 'skip' | 'always'
 
-/** 等用户点「执行 / 跳过 / 以后同类都执行」的命令 */
-const approvals = new Map<string, (d: ApprovalDecision) => void>()
+/**
+ * 等用户点「执行 / 跳过 / 以后同类都执行」的命令。
+ *
+ * 必须带 owner（会话 id）：两个窗口/两条对话可以并行，A 结束时只该放掉 A 自己
+ * 挂着的确认，不能把 B 正在等的那条也按 skip 处理 —— 否则 B 的模型会收到
+ * 「用户跳过」的假结果，然后基于这个假前提编结论。
+ */
+const approvals = new Map<string, { owner: string; fn: (d: ApprovalDecision) => void }>()
 
 export function resolveObAgentApproval(cmdId: string, decision: string): { ok: boolean } {
   const w = approvals.get(String(cmdId || ''))
   if (!w) return { ok: false }
-  w(decision === 'run' ? 'run' : decision === 'always' ? 'always' : 'skip')
+  w.fn(decision === 'run' ? 'run' : decision === 'always' ? 'always' : 'skip')
   return { ok: true }
 }
 
@@ -68,7 +74,9 @@ const MODEL_OUTPUT_CAP = 6000
 /** 界面展示上限 */
 const UI_OUTPUT_CAP = 20_000
 /** 等人点确认的最长时间，超时按跳过处理（免得整条链路一直挂着） */
-const APPROVAL_TIMEOUT_MS = 300_000
+const APPROVAL_TIMEOUT_MS = 120_000
+/** 一次排查的总墙钟预算：6 轮 × 审批 + 执行最坏能拖到几个小时，必须封顶 */
+const MAX_WALL_MS = 10 * 60_000
 
 // ---------------------------------------------------------------- 工具
 
@@ -106,27 +114,28 @@ const RUN_CMD: ToolDef = {
   }
 }
 
-/** 兼容两种工具名：单条 / 批量 */
-function parseCalls(tc: ToolCall): { command: string; why: string }[] {
+/** 兼容两种工具名：单条 / 批量。dropped = 超出单轮上限被丢弃的条数（要告诉模型） */
+function parseCalls(tc: ToolCall): { list: { command: string; why: string }[]; dropped: number } {
   let args: any = {}
   try {
     args = JSON.parse(tc.args || '{}')
   } catch {
-    return []
+    return { list: [], dropped: 0 }
   }
   if (Array.isArray(args?.commands)) {
-    return args.commands
-      .filter((c: any) => c && typeof c.command === 'string')
-      .slice(0, MAX_CMDS_PER_ROUND)
-      .map((c: any) => ({ command: String(c.command), why: String(c.why || '') }))
+    const valid = args.commands.filter((c: any) => c && typeof c.command === 'string')
+    return {
+      list: valid.slice(0, MAX_CMDS_PER_ROUND).map((c: any) => ({ command: String(c.command), why: String(c.why || '') })),
+      dropped: Math.max(0, valid.length - MAX_CMDS_PER_ROUND)
+    }
   }
-  if (typeof args?.command === 'string') return [{ command: String(args.command), why: String(args.why || '') }]
-  return []
+  if (typeof args?.command === 'string') return { list: [{ command: String(args.command), why: String(args.why || '') }], dropped: 0 }
+  return { list: [], dropped: 0 }
 }
 
 // ---------------------------------------------------------------- 执行
 
-function waitApproval(cmdId: string, signal: AbortSignal): Promise<ApprovalDecision> {
+function waitApproval(owner: string, cmdId: string, signal: AbortSignal): Promise<ApprovalDecision> {
   return new Promise<ApprovalDecision>((resolve) => {
     let done = false
     const finish = (d: ApprovalDecision) => {
@@ -139,7 +148,7 @@ function waitApproval(cmdId: string, signal: AbortSignal): Promise<ApprovalDecis
     }
     const timer = setTimeout(() => finish('skip'), APPROVAL_TIMEOUT_MS)
     const onAbort = () => finish('skip')
-    approvals.set(cmdId, finish)
+    approvals.set(cmdId, { owner, fn: finish })
     signal.addEventListener('abort', onAbort, { once: true })
   })
 }
@@ -188,12 +197,15 @@ async function runOne(o: RunOneOpts): Promise<RanCmd> {
   // 2) 需要人点
   if (!o.autoRun) {
     send({ type: 'cmd', id, cmdId, command: shown, why: o.why, risk: verdict.risk, rule: verdict.rule, reason: verdict.reason, status: 'waiting' })
-    const decision = await waitApproval(cmdId, signal)
+    const decision = await waitApproval(id, cmdId, signal)
     if (decision === 'skip') {
       send({ type: 'cmd-update', id, cmdId, status: 'skipped', note: signal.aborted ? '已停止' : '用户跳过' })
+      appendAudit({ ...auditBase, mode: 'confirm', approved: false, detail: signal.aborted ? '用户停止排查，命令未执行' : '用户跳过命令' })
       return { status: 'skipped', output: `$ ${shown}\n[用户跳过] 这条命令没有被执行，请换别的手段或直接说明结论。` }
     }
-    if (decision === 'always') o.markAuto(verdict.rule)
+    // 只有「一条规则只覆盖一条命令」的键才允许被记忆：否则点一次
+    // 「以后同类都执行」就等于给 too-many / unknown:* 这一整类开了后门
+    if (decision === 'always' && autoMemoAllowed(verdict.rule)) o.markAuto(verdict.rule)
     send({ type: 'cmd-update', id, cmdId, status: 'running' })
   } else {
     send({ type: 'cmd', id, cmdId, command: shown, why: o.why, risk: verdict.risk, rule: verdict.rule, reason: verdict.reason, status: 'running' })
@@ -241,12 +253,20 @@ async function runOne(o: RunOneOpts): Promise<RanCmd> {
  * 命令本身照原样执行与展示，只有落盘的审计要脱敏。
  */
 export function maskCmdSecrets(cmd: string): string {
-  return String(cmd || '')
+  let s = String(cmd || '')
     .replace(/(--password[= ])(\S+)/gi, '$1***')
-    .replace(/(-p)\s*'[^']*'/g, '$1***')
-    .replace(/(\s-p)\s*"[^"]*"/g, '$1***')
-    // 只抹「-p 后面紧跟一串非数字」的形态，别把 `ps -p 12345` 也抹了
-    .replace(/(\s-p)(?=[^\s\d])\S+/g, '$1***')
+    .replace(/(MYSQL_PWD=)(\S+)/gi, '$1***')
+    .replace(/(-p)\s*'(?:[^'\\]|\\.)*'/g, '$1***')
+    .replace(/(\s-p)\s*"(?:[^"\\]|\\.)*"/g, '$1***')
+  // `-p` 的口令形态只在 obclient/mysql 里有意义；ps -p 12345 的 12345 是 PID
+  if (/\b(obclient|mysql)\b/.test(s)) {
+    s = s
+      // -p123456（口令可以是纯数字，不能再像以前那样靠「非数字」豁免）
+      .replace(/(\s-p)(?!\s)(\S+)/g, '$1***')
+      // -p 123456
+      .replace(/(\s-p)\s+(\S+)/g, '$1 ***')
+  }
+  return s
 }
 
 function pickProvider(): ProviderConfig | { error: string } {
@@ -295,9 +315,15 @@ export async function askObAgent(input: ObAgentAskInput): Promise<{ ok: boolean;
 
     try {
       send({ type: 'start', id })
+      const deadline = Date.now() + MAX_WALL_MS
 
       while (step < MAX_STEPS) {
         if (ctrl.signal.aborted) throw new Error('已停止')
+        // 墙钟封顶：轮数上限挡不住「6 轮 × (模型 300s + 3 条 × 审批 120s)」这种长尾
+        if (Date.now() > deadline) {
+          send({ type: 'delta', id, text: '\n\n（本次排查已到 10 分钟预算，基于现有证据收尾）\n' })
+          break
+        }
         step++
 
         let pending = ''
@@ -371,12 +397,16 @@ export async function askObAgent(input: ObAgentAskInput): Promise<{ ok: boolean;
             messages.push({ role: 'tool', toolCallId: tc.id, toolName: tc.name, content: '[工具不存在] 只能用 run_commands 提命令。' })
             continue
           }
-          const list = parseCalls(tc)
+          const parsed = parseCalls(tc)
+          const list = parsed.list
           if (!list.length) {
             messages.push({ role: 'tool', toolCallId: tc.id, toolName: tc.name, content: '[参数为空] 没有可执行的命令。' })
             continue
           }
           const results: string[] = []
+          if (parsed.dropped > 0) {
+            results.push(`[未执行] 单轮最多 ${MAX_CMDS_PER_ROUND} 条，你多提的 ${parsed.dropped} 条这轮没有跑，需要的话下一轮再提。`)
+          }
           for (const item of list) {
             if (totalCmds >= MAX_TOTAL_CMDS) {
               results.push('[已达本次排查的命令上限，请基于现有证据给结论]')
@@ -390,8 +420,11 @@ export async function askObAgent(input: ObAgentAskInput): Promise<{ ok: boolean;
             totalCmds++
             const cmdId = `${id}_c${++cmdSeq}`
             const verdict = classifyCommand(item.command)
-            // 直接跑的条件：安全的只读命令（auto 模式）或用户点过「以后同类都执行」
-            const autoRun = verdict.risk !== 'deny' && (autoRules.has(verdict.rule) || (mode === 'auto' && verdict.risk === 'safe'))
+            // 直接跑的条件：安全的只读命令（auto 模式），或用户点过「以后同类都执行」
+            // —— 且那个规则确实可以被记忆（unknown/too-many 这类整类规则不算）
+            const autoRun =
+              verdict.risk !== 'deny' &&
+              ((autoMemoAllowed(verdict.rule) && autoRules.has(verdict.rule)) || (mode === 'auto' && verdict.risk === 'safe'))
             const r = await runOne({
               id,
               cmdId,
@@ -428,10 +461,16 @@ export async function askObAgent(input: ObAgentAskInput): Promise<{ ok: boolean;
       const msg = String(e?.message || e)
       send({ type: 'error', id, error: /abort|取消/i.test(msg) ? '已停止' : msg })
     } finally {
-      running.delete(id)
-      // 收尾：把还挂着的确认请求放掉，避免 Promise 泄漏
-      for (const [, fn] of approvals) fn('skip')
-      approvals.clear()
+      // 只删自己注册的那条：stopObAgent 之后立刻用同一个 id 重开会话时，
+      // 旧会话的 finally 不能把新会话的 controller 一起删掉
+      if (running.get(id) === ctrl) running.delete(id)
+      // 收尾：只放掉本会话还挂着的确认请求（别的窗口在等的不能动）
+      for (const [cid, a] of approvals) {
+        if (a.owner === id) {
+          a.fn('skip')
+          approvals.delete(cid)
+        }
+      }
     }
   })()
 

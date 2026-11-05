@@ -1068,13 +1068,18 @@ export function buildSummary(
   // 热点覆盖全部日志行，错误码是热点的子集 —— 严重度以热点为准，避免重复计数
   const badCount = sum(hot, 'bad')
   const watchCount = sum(hot, 'watch')
-  const normalPct = total > 0 ? Math.max(0, Math.min(100, (1 - (badCount + watchCount) / total) * 100)) : 100
+  // 统计到了行、却一行代码位置都解析不出来：多半是 OB 换了日志格式（或不是 OB 日志），
+  // 这时候 hot 为空、badCount 为 0，如果按公式算就是「100% 正常」—— 典型的解析失败伪装成健康
+  const noHot = total > 0 && hot.length === 0
+  const normalPct = noHot ? 0 : total > 0 ? Math.max(0, Math.min(100, (1 - (badCount + watchCount) / total) * 100)) : 100
 
   const points: string[] = []
   const warnPlus = levels.filter((l) => ['WARN', 'EDIAG', 'ERROR'].includes(l.key)).reduce((a, l) => a + l.count, 0)
   const wdiag = levels.find((l) => l.key === 'WDIAG')?.count || 0
 
-  if (total > 0) {
+  if (noHot) {
+    points.push(`窗口内 ${fmt(total)} 行日志，但没有一行能解析出 \`文件:行\` 位置 —— 可能是 OB 版本/日志格式变了，结论不可信`)
+  } else if (total > 0) {
     points.push(`窗口内 ${fmt(total)} 行日志，其中 ${normalPct.toFixed(1)}% 是正常后台任务打点，不必逐行看`)
   }
 
@@ -1091,8 +1096,13 @@ export function buildSummary(
     points.push(`主要问题：${topBad.func || topBad.key}（${fmt(topBad.count)} 次）—— ${topBad.what}`)
     if (topBad.advice) points.push(`处理建议：${topBad.advice}`)
   }
-  if (warnPlus === 0 && total > 0) {
+  // 「WARN 及以上 0 条」不等于「没有报错」：standby 时间戳服务刷的 -4076 是 WDIAG，
+  // 会经 explainErrCode 升级成 bad，两句同时出现就是自相矛盾
+  const hasHardIssue = badCount > 0 || badErrs.length > 0
+  if (warnPlus === 0 && total > 0 && !hasHardIssue) {
     points.push('WARN 及以上级别一条都没有 —— 集群当前没有报错，日志量来自正常刷屏')
+  } else if (warnPlus === 0 && hasHardIssue) {
+    points.push('WARN 及以上 0 条，但 WDIAG/错误码里仍有需要处理的内容（OB 有些故障只打 WDIAG）')
   } else if (warnPlus > 0) {
     points.push(`WARN 及以上共 ${fmt(warnPlus)} 条，逐个看下面的错误码表`)
   }
@@ -1117,16 +1127,18 @@ export function buildSummary(
     points.push(`有 ${notOurs.length} 个位置的解释库里没有，已标成"注意"，点开看正文再判断`)
   }
 
-  const level: ObLogSummary['level'] = badCount > 0 || badErrs.length > 0 ? 'bad' : watchCount > 0 ? 'watch' : 'ok'
+  const level: ObLogSummary['level'] = hasHardIssue ? 'bad' : watchCount > 0 || noHot ? 'watch' : 'ok'
   const headline = topBad
     ? `发现 ${fmt(badCount)} 行需要处理的日志，源头是 ${topBad.func || topBad.key}`
     : badErrs.length
       ? `发现 ${badErrs.length} 个必须处理的错误码（低频但严重），首要的是 ${badErrs[0].key}：${badErrs[0].what || ''}`
       : topWatch
         ? `没有硬错误；但 ${fmt(watchCount)} 行值得留意（${topWatch.func || topWatch.key} 最集中）`
-        : total > 0
-          ? '没发现问题：窗口内全部是正常后台任务日志'
-          : '窗口内没有可解析的日志，换个时间范围或日志类型试试'
+        : noHot
+          ? `统计到 ${fmt(total)} 行，但没有一行能解析出代码位置 —— 可能日志格式变了，请人工抽查`
+          : total > 0
+            ? '没发现问题：窗口内全部是正常后台任务日志'
+            : '窗口内没有可解析的日志，换个时间范围或日志类型试试'
 
   return { level, headline, points, normalPct, badCount, watchCount }
 }

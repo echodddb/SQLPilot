@@ -64,7 +64,27 @@ const SAFE = [
   'timedatectl',
   'journalctl -u oceanbase --since "10 min ago" | tail -50',
   'obclient -h127.0.0.1 -uroot@sys -e "explain select 1 from dual"',
-  'grep -n "errcode=-4076" observer.log | head -3'
+  'grep -n "errcode=-4076" observer.log | head -3',
+  // 以下都是「review 实测被判成 safe 的绕过」修完之后，必须仍然保持可用的正常写法
+  'ps -ef 2>&1 | grep [o]bserver',
+  'ls -l > /dev/null',
+  'ls -l 2> /dev/null',
+  'awk \'$3 > 100 {print}\' a.log',
+  'sed -n \'1,20p\' observer.log',
+  'sed -n "/ERROR/p" observer.log',
+  'sort -k2 -n f',
+  'xxd observer.log',
+  'ping -c 4 127.0.0.1',
+  'vmstat 1 3',
+  'ifconfig -a',
+  'route -n',
+  'arp -a',
+  'hostname',
+  'dmesg | tail -20',
+  'ip route list',
+  'obclient -h127.0.0.1 -uroot@sys -e "select * from v$ob_units"',
+  'obclient -h127.0.0.1 -uroot@sys -e "show create table t1"',
+  'obclient -e "select * from t where update_time > now()"'
 ]
 for (const c of SAFE) {
   const v = P.classifyCommand(c)
@@ -125,7 +145,71 @@ const DENY = [
   'fallocate -l 1G /data/big',
   'unlink observer.log',
   'echo x | tee /home/admin/oceanbase/log/observer.log',
-  'printf "a" | tee -a server.conf'
+  'printf "a" | tee -a server.conf',
+
+  // ---- 包装器：argv[0] 是 env/time/nice/timeout，真正的命令在参数里 ----
+  'env rm -rf /tmp/x',
+  'env -i sh -c "rm -rf /tmp/x"',
+  'time rm -rf /tmp/x',
+  'nice -n 19 rm -rf /tmp/x',
+  'timeout 5 rm -rf /tmp/x',
+  'nohup rm -rf /tmp/x',
+  'xargs rm -rf',
+
+  // ---- 解释器内执行：命令名是只读的 awk/sed，危险在脚本里 ----
+  'awk \'BEGIN{system("rm -rf /tmp/x")}\'',
+  'awk \'BEGIN{while(("id"|getline l)>0) print l}\'',
+  'awk \'BEGIN{print "x" > "/tmp/x"}\'',
+  'awk -f /tmp/evil.awk observer.log',
+  'sed \'1e rm -rf /tmp/x\' a.log',
+  'sed \'s/a/rm -rf \\/tmp\\/x/e\' a.log',
+  'sed -n \'w /tmp/x\' a.log',
+  'sed -f /tmp/evil.sed a.log',
+
+  // ---- 命令只读、参数能写 ----
+  'sort -o /etc/passwd f',
+  'sort --compress-program=/tmp/x f',
+  'uniq /etc/passwd /tmp/out',
+  'xxd -r a b',
+
+  // ---- 进程替换 / 变量展开：静态看不到真实命令 ----
+  'cat <(rm -rf /tmp/x)',
+  'diff <(rm -rf /tmp/x) /dev/null',
+  'rm${IFS}-rf${IFS}/tmp/x',
+  'a=rm; $a -rf /tmp/x',
+  '(rm -rf /tmp/x)',
+  '! rm -rf /tmp/x',
+
+  // ---- 只读命令的写参数 / 改网络 / 销毁现场 ----
+  'ifconfig eth0 down',
+  'ifconfig eth0 10.0.0.1 netmask 255.255.255.0',
+  'route del default',
+  'arp -d 10.0.0.1',
+  'ip netns exec foo rm -rf /tmp/x',
+  'ip -batch /tmp/x',
+  'hostname ob-new',
+  'dmesg -c',
+  'dmesg --clear',
+
+  // ---- 长命令串不能靠「段数太多」蒙混过关 ----
+  'ls;ls;ls;ls;ls;ls;ls;ls;rm -rf /tmp/x',
+
+  // ---- SQL：只看第一个 -e、服务端读写文件 ----
+  'obclient -e "select 1" -e "delete from t"',
+  'obclient -e "select 1" --execute="drop table t"',
+  'obclient -e "select * from t into outfile \'/tmp/x\'"',
+  'obclient -e "select load_file(\'/etc/passwd\')"',
+  'obclient -e "select 1; delete from t"',
+
+  // ---- 敏感路径的等价写法 ----
+  'cat /etc/./shadow',
+  'cat /etc//shadow',
+  'cat ~/.ssh/id_ecdsa',
+  'cat /root/.ssh/id_dsa',
+  'cat /home/admin/.my.cnf',
+  'cat /etc/sudoers',
+  'cat /proc/1/environ',
+  'cat /etc/security/opasswd'
 ]
 for (const c of DENY) {
   const v = P.classifyCommand(c)
@@ -133,19 +217,32 @@ for (const c of DENY) {
   ok(!!v.reason, `拦截必须给出原因：${c}`)
 }
 
-// ---------- 需确认：不在白名单、或只读但会挂住连接 ----------
+// ---------- 需确认：只读但会挂住连接，或只读但重 ----
 const CONFIRM = [
   'top',
+  'top -b',
   'tail -f observer.log',
+  'tail -fn 10 observer.log',
   'journalctl -u oceanbase -f',
+  'journalctl -fu oceanbase',
+  'dmesg -w',
+  'ping 1.1.1.1',
+  'vmstat 1',
   'obdiag check run',
-  'somenewtool --inspect',
   'curl https://example.com/health'
 ]
 for (const c of CONFIRM) {
   const v = P.classifyCommand(c)
   ok(v.risk === 'confirm', `应判为需确认但判成 ${v.risk}：${c}（${v.rule}）`)
   ok(!!v.reason, `确认级也要给原因：${c}`)
+}
+
+// ---------- 判不准就是 deny：不在白名单的命令不许只差一次点击 ----------
+{
+  const unknown = P.classifyCommand('somenewtool --inspect')
+  ok(unknown.risk === 'deny', `未知命令必须 deny，不能给确认入口：判成 ${unknown.risk}`)
+  ok(/unknown:/.test(unknown.rule), '未知命令的规则键要标出来，便于审计')
+  ok(!!unknown.reason, '拦截必须说明原因，并告诉模型能用什么')
 }
 
 // ---------- 拆分与边界 ----------
@@ -159,6 +256,18 @@ for (const c of CONFIRM) {
   ok(P.classifyCommand(many).risk === 'confirm', '子命令过多应收紧为确认')
   ok(P.classifyCommand('ls -l').segments.length === 1, 'segments 应回传拆分结果')
   ok(P.RISK_LABEL.deny === '已拦截', '分档标签供界面直接用')
+}
+
+// ---------- 「以后同类都执行」不能记住整类规则 ----------
+{
+  for (const r of ['too-many', 'follow', 'journal-follow', 'sql-other', 'obdiag', 'top-interactive', 'interval-missing', 'unknown:somenewtool', 'cmd:rm', 'wrapper:env']) {
+    ok(!P.autoMemoAllowed(r), `规则 ${r} 覆盖一整类命令，不能被记住`)
+  }
+  // 记住 safe:xxx 只是省一次确认：runOne 每次仍会重新过 classifyCommand，
+  // 参数级的写动作照样被拦，不存在「记一次就永久放行」
+  for (const r of ['safe:df', 'safe:grep', 'sed', 'awk', 'ip-read']) {
+    ok(P.autoMemoAllowed(r), `单条命令级的规则 ${r} 应允许记忆`)
+  }
 }
 
 // ---------- 提示词：现场证据不能漏 ----------

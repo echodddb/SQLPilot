@@ -133,6 +133,23 @@ const LINE_LIB = '[2026-11-02 15:29:00.255249] INFO [LIB] stat (utility.h:1167) 
   // WDIAG 要被单独点名（它比 INFO 重、比 WARN 轻，最容易被忽略）
   const w = buildSummary(1000, [{ key: 'WDIAG', count: 800 }], [{ key: 'a.cpp:1', count: 800, verdict: 'normal', what: 'x' }], 6000)
   ok(w.points.some((p) => p.includes('WDIAG')), 'WDIAG 应单独提示')
+
+  // 统计到行、但一行都解析不出代码位置 = 日志格式变了，不能报"没发现问题"
+  const noHot = buildSummary(5000, [{ key: 'INFO', count: 5000 }], [], 30000)
+  ok(noHot.level === 'watch', '解析不出热点时不能判 ok，实际：' + noHot.level)
+  ok(noHot.normalPct === 0, '解析不出热点时不能说 100% 正常')
+  ok(noHot.headline.includes('解析'), '结论要说明是解析问题而不是健康：' + noHot.headline)
+
+  // WARN 及以上 0 条，但 WDIAG 里的错误码被判 bad —— 不能同时说"集群没有报错"
+  const wdiagBad = buildSummary(
+    1000,
+    [{ key: 'WDIAG', count: 900 }],
+    [{ key: 'ob_standby_timestamp_service.cpp:147', count: 900, verdict: 'bad', what: '备租户等待主库' }],
+    6000,
+    [{ key: '-4076', count: 900, verdict: 'bad', what: '需要等待' }]
+  )
+  ok(wdiagBad.level === 'bad', 'WDIAG 里的 bad 也要拉起级别')
+  ok(!wdiagBad.points.some((p) => p.includes('集群当前没有报错')), '已经判 bad 时不能再写"集群没有报错"')
 }
 
 // ---------- 低频高危不能被漏报 ----------

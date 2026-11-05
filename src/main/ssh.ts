@@ -332,19 +332,39 @@ export async function execCommand(
   // stderr 也要用有状态解码器：远端错误信息往往正是中文，分包还会把字符切断
   const decErr = iconv.getDecoder(iconvName(encoding))
   return new Promise<ExecResult>((resolve, reject) => {
-    let out = ''
-    let er = ''
+    // 头尾各留一半：只留尾巴会把「第一条权限错误 / 第一行 grep: No such file」丢掉，
+    // 而排查时最该看的往往就是头部那句失败原因。
+    const HEAD_CAP = 32_000
+    const TAIL_CAP = 32_000
+    const buf = (): { h: string; t: string; skip: number } => ({ h: '', t: '', skip: 0 })
+    const outBuf = buf()
+    const errBuf = buf()
+    const push = (acc: { h: string; t: string; skip: number }, chunk: string): void => {
+      let rest = chunk
+      if (acc.h.length < HEAD_CAP) {
+        const need = HEAD_CAP - acc.h.length
+        acc.h += rest.slice(0, need)
+        rest = rest.slice(need)
+      }
+      if (!rest) return
+      acc.t += rest
+      if (acc.t.length > TAIL_CAP) {
+        acc.skip += acc.t.length - TAIL_CAP
+        acc.t = acc.t.slice(-TAIL_CAP)
+      }
+    }
+    const joined = (acc: { h: string; t: string; skip: number }): string =>
+      acc.skip > 0 ? `${acc.h}\n…（中间省略 ${acc.skip} 字符）…\n${acc.t}` : acc.h + acc.t
     let timedOut = false
     let aborted = false
     let stream: any = null
     let settled = false
-    const cap = (s: string, chunk: string) => (s + chunk).slice(-64_000)
     const finish = (code: number | null) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
-      resolve({ exitCode: code, stdout: clipHeadTail(out), stderr: clipHeadTail(er), timedOut, aborted })
+      resolve({ exitCode: code, stdout: clipHeadTail(joined(outBuf)), stderr: clipHeadTail(joined(errBuf)), timedOut, aborted })
     }
     const onAbort = () => {
       aborted = true
@@ -374,9 +394,16 @@ export async function execCommand(
         reject(err)
         return
       }
+      // abort / 超时可能抢在 channel 打开之前：此时 Promise 已 settle，
+      // 但 channel 刚刚才建好 —— 不在这里关掉，它和远端进程会一直挂着，
+      // 攒够 MaxSessions 之后后续所有 exec 都建不了 channel
+      if (settled) {
+        try { s.close() } catch { /* 已关闭 */ }
+        return
+      }
       stream = s
-      s.on('data', (d: Buffer) => { out = cap(out, dec.write(d) as string) })
-      s.stderr.on('data', (d: Buffer) => { er = cap(er, decErr.write(d) as string) })
+      s.on('data', (d: Buffer) => { push(outBuf, dec.write(d) as string) })
+      s.stderr.on('data', (d: Buffer) => { push(errBuf, decErr.write(d) as string) })
       s.on('error', () => { /* 统一由 close 收尾 */ })
       s.on('close', (code: number | null) => finish(code))
     })

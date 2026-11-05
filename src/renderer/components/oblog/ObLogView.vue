@@ -25,7 +25,7 @@
 
     <div v-if="err" class="ol-err">{{ err }}</div>
 
-    <div v-if="!res" class="ol-empty">
+    <div v-if="!res && !err" class="ol-empty">
       <p class="ol-empty-t">选一台装了 OBServer 的服务器，点「分析」</p>
       <p class="ol-empty-d">
         会在远端一趟扫描出：日志级别分布 / 刷屏热点（按代码位置归并）/ 错误码计数，只回传几十 KB 统计结果。
@@ -252,6 +252,8 @@ const res = ref<ObLogResultView | null>(null)
 const probe = ref<ObLogProbeView | null>(null)
 const openHot = ref(-1)
 const openErr = ref(-1)
+/** 在途请求的序号：切服务器/重复点分析后，旧请求的结果直接丢弃 */
+let runSeq = 0
 
 const windows = [
   { v: 10, t: '10 分' },
@@ -274,9 +276,11 @@ else if (servers.value.length === 1) serverId.value = servers.value[0].id
 
 watch(serverId, (v) => {
   if (v) localStorage.setItem(LAST, v)
+  runSeq++ // 作废在途请求，避免旧机器的结果写进新机器面板
   res.value = null
   probe.value = null
   err.value = ''
+  busy.value = false
   // 换了服务器：浮窗不能还指着旧机器继续跑命令 —— 停掉、清空、跟着切到新目标
   if (obAgent.open && v !== obAgent.serverId) {
     clearObAgent()
@@ -290,28 +294,36 @@ watch(serverId, (v) => {
 
 async function run(): Promise<void> {
   if (!serverId.value || busy.value) return
+  // 每次分析发一个序号：切服务器/切 scope 后，旧请求回来不能写进新机器的面板
+  const token = ++runSeq
   busy.value = true
   err.value = ''
   res.value = null
   openHot.value = -1
   openErr.value = -1
   try {
-    const p = await window.sqlpilot.oblogProbe(serverId.value)
+    const sid = serverId.value
+    const p = await window.sqlpilot.oblogProbe(sid)
+    if (token !== runSeq) return
     probe.value = p
     if (!p.ok) {
       err.value = p.error || '探测日志目录失败'
       return
     }
-    const r = await window.sqlpilot.oblogAnalyze(serverId.value, { scope: scope.value, sinceMinutes: since.value })
+    const r = await window.sqlpilot.oblogAnalyze(sid, { scope: scope.value, sinceMinutes: since.value })
+    if (token !== runSeq) return
+    // ok:true + error = 数据拿到了但不完整（部分文件没读到 / 输出被截断），
+    // 必须把横幅显示出来，否则「统计不全」会被当成「集群干净」
+    if (r.error) err.value = r.error
     if (!r.ok) {
       err.value = r.error || '分析失败'
       return
     }
     res.value = r
   } catch (e: any) {
-    err.value = String(e?.message || e)
+    if (token === runSeq) err.value = String(e?.message || e)
   } finally {
-    busy.value = false
+    if (token === runSeq) busy.value = false
   }
 }
 

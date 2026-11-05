@@ -348,7 +348,7 @@
                       它只用来判断这条连接有没有授权能力。
                     </div>
                     <div class="selfchk-note">{{ selfCheck.note }}</div>
-                    <details v-if="selfCheck.grants.length" class="selfchk-grants">
+                    <details v-if="selfCheck.grants?.length" class="selfchk-grants">
                       <summary>连接账号自身的授权（{{ selfCheck.grants.length }} 条 · 非 {{ grant.name }} 的授权）</summary>
                       <code v-for="(g, i) in selfCheck.grants" :key="i" class="mono">{{ g }}</code>
                     </details>
@@ -1047,11 +1047,16 @@ async function runSelfCheck(): Promise<void> {
 
 async function doRevoke(g: CloudDirectGrantRow): Promise<void> {
   if (!platformId.value || !g.privileges.length) return
+  const scope = g.database ? `\`${g.database}\`.*` : '*.*'
+  const all = g.privileges.some((p) => /^ALL(\s+PRIVILEGES)?$/i.test(p))
+  const detail = isOracle.value
+    ? '收回后该账号立即失去这些角色 / 系统权限，已建立的会话不受影响；此操作不可回滚。'
+    : `将执行 REVOKE ${g.privileges.join(', ')} ON ${scope} FROM '${grant.value.name}'@'${grant.value.host || '%'}'。` +
+      (all ? `⚠ 这是 ALL PRIVILEGES：该账号在 ${scope} 上的全部权限都会被收回。` : '') +
+      '同时会收回这条授权附带的 WITH GRANT OPTION（该账号不能再把权限转授给别人）；此操作不可回滚。'
   const ok = await window.sqlpilot.uiConfirm(
-    `回收 ${grant.value.name} 的 ${g.privileges.join(', ')}？`,
-    isOracle.value
-      ? '收回后该账号立即失去这些角色 / 系统权限，已建立的会话不受影响。'
-      : `收回后该账号在${g.database ? `库 ${g.database}` : '所有库'}上的这些权限立即失效。`,
+    `回收 ${grant.value.name} 的 ${g.privileges.join(', ')}（${scope}）？`,
+    detail,
     true
   )
   if (!ok) return
@@ -1069,6 +1074,11 @@ async function doRevoke(g: CloudDirectGrantRow): Promise<void> {
     userMsg.value = r.ok ? r.message || '已回收' : r.error || '回收失败'
     lastSteps.value = r.steps || []
     await loadGrants()
+  } catch (e: any) {
+    // IPC 层 reject（主进程崩了 / 通道关了）时 finally 只会复位 busy，
+    // 不接住就是一个没人看的 Promise 拒绝，界面上什么都不显示
+    userOk.value = false
+    userMsg.value = `回收失败：${String(e?.message || e)}`
   } finally {
     userBusy.value = false
   }
@@ -1095,6 +1105,9 @@ async function doGrant(): Promise<void> {
     lastSteps.value = r.steps || []
     // 成功后不收起：留在面板里可以直接看到刚授上的条目，也方便接着追加另一组
     if (r.ok) await loadGrants()
+  } catch (e: any) {
+    userOk.value = false
+    userMsg.value = `授权失败：${String(e?.message || e)}`
   } finally {
     userBusy.value = false
   }
