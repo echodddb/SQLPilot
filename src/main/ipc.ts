@@ -228,6 +228,9 @@ import {
 import { askEditorAi, bindEditorAiEmitter, deleteEditorAiSession, getEditorAiSession, listEditorAiSessions, stopEditorAi } from './editor-ai'
 import { askObAgent, bindObAgentEmitter, resolveObAgentApproval, stopObAgent } from './obagent'
 import {
+  clearPanelGone, closePanelWindow, hasPanelWindow, isPanelPinned, movePanelBy, nudgePanelSize, onPanelGone, openPanelWindow, panelWindow, setPanelPinned
+} from './obagent/panel'
+import {
   askCloudAi,
   bindCloudAiEmitter,
   deleteCloudAiSession,
@@ -264,6 +267,31 @@ import {
   listRecents as editorListRecents,
   clearRecents as editorClearRecents
 } from './editor'
+
+// ---------------------------------------------------------------- OB 排障浮窗（主窗口 + 独立窗口）
+/**
+ * 事件序号：两个窗口各自折叠同一份事件流，交接（脱离/停靠）时用序号对齐，
+ * 交出去的快照落后于本窗口已折叠的位置时，把差的那几条补上（见 renderer/oblog/agent.ts）。
+ */
+let obEventSeq = 0
+/** 独立浮窗最后一次收到的会话快照（页面加载完后由渲染层 hello 取走） */
+let obPanelSnapshot: any = null
+
+/** 广播给所有应用窗口：主窗口 + 独立浮窗 */
+function broadcastObAgent(channel: string, payload: unknown): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue
+    try { w.webContents.send(channel, payload) } catch { /* 窗口正在销毁 */ }
+  }
+}
+
+/** 只发给「除了发起者以外」的窗口：用户自己那条消息不发回自己，免得重复 */
+function broadcastObAgentExcept(senderId: number, channel: string, payload: unknown): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed() || w.webContents.id === senderId) continue
+    try { w.webContents.send(channel, payload) } catch { /* 窗口正在销毁 */ }
+  }
+}
 
 let win: BrowserWindow | null = null
 const pendingApprovals = new Map<string, { resolve: (o: ApprovalOutcome) => void; sessionId: string }>()
@@ -307,6 +335,9 @@ function previewLlmRequest(url: string, body: any, sessionId: string): Promise<b
 
 export function bindWindow(w: BrowserWindow): void {
   win = w
+  // 主窗口关掉时把独立浮窗一起收掉：它是 HUD，没有主窗口就没有意义，
+  // 而且留着一个窗口会让 window-all-closed 永不触发、应用退不出去。
+  w.on('closed', () => { closePanelWindow() })
   // 最大化状态变化广播给渲染层（自绘窗口按钮的 □ / ❐ 图标要跟着切）
   const sendMax = (): void => {
     if (win && !win.isDestroyed()) {
@@ -378,9 +409,9 @@ export function registerIpc(): void {
   })
   // OB 故障排查 Agent：命令卡片 / 正文 / 确认请求都走这条通道
   bindObAgentEmitter((ev) => {
-    if (win && !win.isDestroyed()) {
-      try { win.webContents.send('obagent:event', ev) } catch { /* 窗口关闭中 */ }
-    }
+    // 独立浮窗（obagent/panel.ts）和主窗口都各自折叠同一份事件流，
+    // 这样浮窗脱离了主窗口、或者重新停靠回来，界面上的对话都不会断。
+    broadcastObAgent('obagent:event', { ...ev, seq: ++obEventSeq })
   })
 
   // ---------- 窗口控制（自绘 - □ × 按钮，见 renderer/components/WindowControls.vue） ----------
@@ -1182,21 +1213,92 @@ export function registerIpc(): void {
   // ---------- OB 故障排查 Agent ----------
   // 会真的在目标机跑命令，所以每条命令都要过 obagent/policy 分级；确认请求走 obagent:approve。
 
-  ipcMain.handle('obagent:ask', (_e, input: any) => askObAgent({
-    id: String(input?.id || ''),
-    serverId: String(input?.serverId || ''),
-    question: String(input?.question || ''),
-    context: input?.context && typeof input.context === 'object' ? input.context : undefined,
-    history: Array.isArray(input?.history)
-      ? input.history.map((m: any) => ({ role: m?.role === 'assistant' ? 'assistant' as const : 'user' as const, text: String(m?.text || '') }))
-      : [],
-    mode: input?.mode === 'confirm' ? 'confirm' : 'auto'
-  }))
+  ipcMain.handle('obagent:ask', async (e, input: any) => {
+    const question = String(input?.question || '')
+    const r = await askObAgent({
+      id: String(input?.id || ''),
+      serverId: String(input?.serverId || ''),
+      question,
+      context: input?.context && typeof input.context === 'object' ? input.context : undefined,
+      history: Array.isArray(input?.history)
+        ? input.history.map((m: any) => ({ role: m?.role === 'assistant' ? 'assistant' as const : 'user' as const, text: String(m?.text || '') }))
+        : [],
+      mode: input?.mode === 'confirm' ? 'confirm' : 'auto'
+    })
+    // 另一侧（脱离出去的浮窗 / 主窗口）也要看到这句提问，否则两边对话对不上
+    if (r.ok && question.trim()) broadcastObAgentExcept(e.sender.id, 'obagent:ui', { kind: 'asked', text: question })
+    return r
+  })
 
   ipcMain.handle('obagent:approve', (_e, { cmdId, decision }: { cmdId: string; decision: string }) =>
     resolveObAgentApproval(String(cmdId || ''), String(decision || '')))
 
   ipcMain.handle('obagent:stop', (_e, { id }: { id: string }) => stopObAgent(String(id || '')))
+
+  // ---------- OB 排障浮窗：脱离主窗口 / 停靠 / 置顶 / 几何 ----------
+  ipcMain.handle('obagent:detach', async (_e, snapshot: any) => {
+    try {
+      const theme = loadConfig().theme === 'light' ? 'light' : 'dark'
+      const bounds = win && !win.isDestroyed() ? win.getBounds() : undefined
+      const existed = hasPanelWindow()
+      // 已经开着就只把它拎到前面：不能拿主窗口的快照盖掉浮窗里的最新状态
+      if (!existed) obPanelSnapshot = snapshot || null
+      await openPanelWindow({ theme, anchor: bounds })
+      onPanelGone(() => {
+        obPanelSnapshot = null
+        // 用户直接关掉浮窗：主窗口那边同步收起来，不留一个「以为还开着」的开关
+        if (win && !win.isDestroyed()) {
+          try { win.webContents.send('obagent:ui', { kind: 'panel-closed' }) } catch { /* 窗口关闭中 */ }
+        }
+      })
+      return { ok: true, pin: isPanelPinned() }
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message || err) }
+    }
+  })
+
+  // 独立浮窗加载完来取初始状态（不用靠时序碰运气）
+  ipcMain.handle('obagent:panel:hello', () => ({ ok: true, snapshot: obPanelSnapshot, pin: isPanelPinned() }))
+
+  ipcMain.handle('obagent:panel:focus', () => {
+    const w = panelWindow()
+    if (!w) return { ok: false }
+    if (!w.isVisible()) w.show()
+    w.focus()
+    return { ok: true }
+  })
+
+  ipcMain.handle('obagent:dock', (_e, snapshot: any) => {
+    const snap = snapshot || obPanelSnapshot
+    obPanelSnapshot = null
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('obagent:ui', { kind: 'hydrate', snapshot: snap, detached: false }) } catch { /* 窗口关闭中 */ }
+    }
+    // 停靠是有意的关闭：先摘掉「被关掉」的钩子，否则主窗口刚拿到对话就又被收起
+    clearPanelGone()
+    closePanelWindow()
+    return { ok: true }
+  })
+
+  ipcMain.handle('obagent:panel:pin', (_e, { pin }: { pin: boolean }) => ({ ok: true, pin: setPanelPinned(!!pin) }))
+  ipcMain.handle('obagent:panel:resize', (_e, { dx, dy }: { dx: number; dy: number }) => {
+    nudgePanelSize(Number(dx) || 0, Number(dy) || 0)
+    return { ok: true }
+  })
+  ipcMain.handle('obagent:panel:move', (_e, { dx, dy }: { dx: number; dy: number }) => {
+    movePanelBy(Number(dx) || 0, Number(dy) || 0)
+    return { ok: true }
+  })
+  // 主窗口关掉时浮窗不能独自留着（否则 window-all-closed 永远不触发）
+  ipcMain.handle('obagent:panel:close', () => {
+    closePanelWindow()
+    return { ok: true }
+  })
+  // 通用镜面消息：mode / clear 这类「两侧都该知道」的界面动作
+  ipcMain.handle('obagent:mirror', (e, payload: any) => {
+    if (payload && typeof payload === 'object') broadcastObAgentExcept(e.sender.id, 'obagent:ui', payload)
+    return { ok: true }
+  })
 
   // ---------- 交互式 SSH 终端 ----------
 

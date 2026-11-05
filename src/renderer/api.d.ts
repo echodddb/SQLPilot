@@ -358,6 +358,17 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       obagentApprove(cmdId: string, decision: 'run' | 'skip' | 'always'): Promise<{ ok: boolean }>
       obagentStop(id: string): Promise<{ ok: boolean }>
       onObAgentEvent(cb: (ev: ObAgentEventView) => void): () => void
+      // ---- 排障浮窗：脱离主窗口 / 停靠 / 置顶 / 几何 ----
+      obagentDetach(snapshot: any): Promise<{ ok: boolean; error?: string; pin?: boolean }>
+      obagentPanelHello(): Promise<{ ok: boolean; snapshot?: any; pin?: boolean }>
+      obagentPanelFocus(): Promise<{ ok: boolean }>
+      obagentDock(snapshot: any): Promise<{ ok: boolean }>
+      obagentPanelPin(pin: boolean): Promise<{ ok: boolean; pin: boolean }>
+      obagentPanelResize(dx: number, dy: number): Promise<{ ok: boolean }>
+      obagentPanelMove(dx: number, dy: number): Promise<{ ok: boolean }>
+      obagentPanelClose(): Promise<{ ok: boolean }>
+      obagentMirror(payload: any): Promise<{ ok: boolean }>
+      onObAgentUi(cb: (msg: any) => void): () => void
       onSftpProgress(cb: (p: SftpProgress) => void): () => void
       localRoots(): Promise<{ ok: boolean; roots: { name: string; path: string }[]; home: string; quick: { name: string; path: string }[] }>
       localLs(dir: string): Promise<{ ok: boolean; dir?: string; parent?: string; truncated?: boolean; entries?: LocalEntryView[]; error?: string }>

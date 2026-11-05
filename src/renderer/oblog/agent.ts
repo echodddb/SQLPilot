@@ -4,6 +4,13 @@
  * 浮窗只做三件事：把问题发出去、把命令卡片按顺序摆出来、把确认按钮的点击回传。
  * 真正的判断（能不能跑）全在主进程：这里不缓存任何「放行」状态，
  * 刷新界面也不会让一条被拦的命令变得可执行。
+ *
+ * 关于「脱离主窗口」：DOM 元素画不出窗口边界，所以脱离时主进程会开一个真正的
+ * 独立窗口，界面代码（ObAgentPanel）和这份状态机一模一样的搬过去。
+ * 两份状态靠「同一份事件流 + 交接快照」收敛：
+ *   · 主进程把 obagent:event 广播给所有窗口（带递增 seq）；
+ *   · 脱离/停靠时把整份状态序列化过去（snapshot / hydrate）；
+ *   · hydrate 之后用 seq 把「快照之后才到的事件」补上（recent 队列），不漏一条。
  */
 import { reactive } from 'vue'
 
@@ -64,6 +71,23 @@ export interface ObAgentContext {
   errCodes?: { key: string; count: number; msg?: string; verdict?: string; what?: string; advice?: string; sample?: string }[]
 }
 
+/** 交接快照：脱离/停靠时两边交换的全部状态 */
+export interface ObAgentSnapshot {
+  seq: number
+  runId: string
+  serverId: string
+  serverName: string
+  host: string
+  mode: 'auto' | 'confirm'
+  context: ObAgentContext | null
+  items: ObItem[]
+  busy: boolean
+  error: string
+  reasoningChars: number
+  cmdTotal: number
+  draft: string
+}
+
 const MODE_KEY = 'sqlpilot.obagent.mode'
 const LAYOUT_KEY = 'sqlpilot.obagent.layout'
 
@@ -98,6 +122,10 @@ const layout = readLayout()
 
 export const obAgent = reactive({
   open: false,
+  /** true = 界面已经搬到独立窗口，主窗口里不再画浮窗 */
+  detached: false,
+  /** 独立窗口是否置顶（只有脱离时有意义） */
+  pinned: true,
   serverId: '',
   serverName: '',
   host: '',
@@ -125,6 +153,13 @@ let streamItem: ObTextItem | null = null
 let reqSeq = 0
 let currentId = ''
 let unsubscribe: (() => void) | null = null
+let unsubscribeUi: (() => void) | null = null
+
+/** 已折叠到的最大事件序号（交接时用来对齐） */
+let lastSeq = 0
+/** 最近应用过的事件：hydrate 时补那些「比快照新」的（一场排查最多几百条） */
+const recent: any[] = []
+const RECENT_MAX = 160
 
 export function saveObAgentLayout(): void {
   try {
@@ -140,11 +175,17 @@ export function resetObAgentLayout(): void {
   saveObAgentLayout()
 }
 
-export function setObAgentMode(m: 'auto' | 'confirm'): void {
-  obAgent.mode = m
+function applyMode(m: 'auto' | 'confirm'): void {
+  obAgent.mode = m === 'confirm' ? 'confirm' : 'auto'
   try {
-    localStorage.setItem(MODE_KEY, m)
+    localStorage.setItem(MODE_KEY, obAgent.mode)
   } catch { /* 忽略 */ }
+}
+
+/** 切模式：另一侧窗口也要跟着切（否则两个窗口对同一条命令的处置不一致） */
+export function setObAgentMode(m: 'auto' | 'confirm'): void {
+  applyMode(m)
+  void window.sqlpilot.obagentMirror({ kind: 'mode', mode: obAgent.mode })
 }
 
 function pushText(role: 'user' | 'assistant', text: string): ObTextItem {
@@ -177,8 +218,12 @@ function upsertCmd(ev: { cmdId: string; command: string; why: string; risk: ObRi
   return cmd
 }
 
-function handleEvent(ev: any): void {
-  if (!ev || ev.id !== currentId) return
+/** 把一条事件折叠进状态（不含序号判断，交接补事件时也走这里） */
+function applyEvent(ev: any): void {
+  if (!ev) return
+  // 只认当前这场对话：别的会话（另一条提问）的事件不能混进来。
+  // currentId 为空时（刚脱离/还没提问）放行 —— 快照里带着 runId，正常不会为空。
+  if (currentId && ev.id && ev.id !== currentId) return
   switch (ev.type) {
     case 'start':
       obAgent.busy = true
@@ -197,7 +242,6 @@ function handleEvent(ev: any): void {
       break
     }
     case 'round-end': {
-      const t = String(ev.text || '').trim()
       if (streamItem) {
         streamItem.live = false
         if (!streamItem.text.trim()) {
@@ -207,7 +251,6 @@ function handleEvent(ev: any): void {
         }
       }
       streamItem = null
-      void t
       break
     }
     case 'cmd':
@@ -243,6 +286,17 @@ function handleEvent(ev: any): void {
   }
 }
 
+function handleEvent(ev: any): void {
+  if (!ev) return
+  if (typeof ev.seq === 'number') {
+    if (ev.seq <= lastSeq) return
+    lastSeq = ev.seq
+    recent.push(ev)
+    if (recent.length > RECENT_MAX) recent.shift()
+  }
+  applyEvent(ev)
+}
+
 /** 订阅主进程事件（浮窗挂载时调，卸载时撤销） */
 export function bindObAgentEvents(): void {
   if (unsubscribe) return
@@ -252,6 +306,130 @@ export function bindObAgentEvents(): void {
 export function unbindObAgentEvents(): void {
   if (unsubscribe) unsubscribe()
   unsubscribe = null
+}
+
+// ---------------------------------------------------------------- 交接（脱离 / 停靠）
+
+/** 把当前状态压成一份可序列化的快照（命令卡片里的引用会被 JSON 拍平，hydrate 时重建） */
+export function snapshotObAgent(): ObAgentSnapshot {
+  return JSON.parse(JSON.stringify({
+    seq: lastSeq,
+    runId: currentId,
+    serverId: obAgent.serverId,
+    serverName: obAgent.serverName,
+    host: obAgent.host,
+    mode: obAgent.mode,
+    context: obAgent.context,
+    items: obAgent.items,
+    busy: obAgent.busy,
+    error: obAgent.error,
+    reasoningChars: obAgent.reasoningChars,
+    cmdTotal: obAgent.cmdTotal,
+    draft: obAgent.draft
+  })) as ObAgentSnapshot
+}
+
+/** 用另一侧的快照接管：先整体替换，再把「比快照新」的事件补回来 */
+export function hydrateObAgent(snap: ObAgentSnapshot | null | undefined): void {
+  if (!snap || !Array.isArray(snap.items)) return
+  const items = snap.items as ObItem[]
+  // JSON 拍平后 items[i].cmd 与 cmds 表不再共享引用，这里按 cmdId 重新绑一次，
+  // 否则后续 cmd-update 只改到表里那份，卡片上永远不会变。
+  const cmds: Record<string, ObAgentCmd> = {}
+  for (const it of items) {
+    if (it && it.kind === 'cmd' && it.cmd) cmds[it.cmdId] = it.cmd
+  }
+  currentId = String(snap.runId || '')
+  obAgent.items = items
+  obAgent.cmds = cmds
+  obAgent.serverId = String(snap.serverId || '')
+  obAgent.serverName = String(snap.serverName || '')
+  obAgent.host = String(snap.host || '')
+  obAgent.context = snap.context || null
+  obAgent.busy = !!snap.busy
+  obAgent.error = String(snap.error || '')
+  obAgent.reasoningChars = Number(snap.reasoningChars) || 0
+  obAgent.cmdTotal = Number(snap.cmdTotal) || 0
+  obAgent.draft = String(snap.draft || '')
+  obAgent.open = true
+  applyMode(snap.mode === 'confirm' ? 'confirm' : 'auto')
+  streamItem = (items.filter((x) => x.kind === 'text' && x.live).pop() as ObTextItem | undefined) || null
+  lastSeq = Number(snap.seq) || 0
+  // 快照之后才到的事件：本窗口已经折叠过，直接补一层（seq 保证不重复）
+  for (const ev of recent) {
+    if (typeof ev.seq === 'number' && ev.seq > lastSeq) {
+      lastSeq = ev.seq
+      applyEvent(ev)
+    }
+  }
+}
+
+/** 订阅「另一侧窗口」的界面动作（脱离/停靠/清空/切模式/关窗） */
+export function bindObAgentUi(): void {
+  if (unsubscribeUi) return
+  unsubscribeUi = window.sqlpilot.onObAgentUi((msg: any) => {
+    if (!msg || typeof msg !== 'object') return
+    switch (msg.kind) {
+      case 'hydrate':
+        hydrateObAgent(msg.snapshot)
+        obAgent.detached = !!msg.detached
+        break
+      case 'asked':
+        // 另一侧发起的提问：这边补一条用户气泡，两边对话才一致
+        if (String(msg.text || '').trim()) pushText('user', String(msg.text).trim())
+        break
+      case 'clear':
+        clearLocal()
+        break
+      case 'mode':
+        applyMode(msg.mode === 'confirm' ? 'confirm' : 'auto')
+        break
+      case 'panel-closed':
+        // 独立窗口被关掉（✕ / 系统关闭）：主窗口这边也收起来，但保留对话内容
+        obAgent.detached = false
+        obAgent.open = false
+        break
+      default:
+        break
+    }
+  })
+}
+
+/** 脱离主窗口：换成一个真正能在桌面任意位置摆放的窗口 */
+export async function detachObAgent(): Promise<void> {
+  if (obAgent.detached) return
+  const snap = snapshotObAgent()
+  // 先把窗口内的浮窗收掉：两个界面同时显示同一场对话会让人不知道该点哪边
+  obAgent.detached = true
+  try {
+    const r = await window.sqlpilot.obagentDetach(snap)
+    if (!r?.ok) {
+      obAgent.detached = false
+      obAgent.error = r?.error || '无法打开独立窗口'
+    } else if (typeof (r as any).pin === 'boolean') {
+      obAgent.pinned = (r as any).pin
+    }
+  } catch (e: any) {
+    obAgent.detached = false
+    obAgent.error = String(e?.message || e)
+  }
+}
+
+/** 停靠回主窗口 */
+export async function dockObAgent(): Promise<void> {
+  const snap = snapshotObAgent()
+  try {
+    await window.sqlpilot.obagentDock(snap)
+  } catch { /* 窗口已经不在了 */ }
+}
+
+export async function setObAgentPinned(v: boolean): Promise<void> {
+  try {
+    const r = await window.sqlpilot.obagentPanelPin(v)
+    obAgent.pinned = !!r?.pin
+  } catch {
+    obAgent.pinned = v
+  }
 }
 
 export interface OpenObAgentOptions {
@@ -267,27 +445,42 @@ export function openObAgent(o: OpenObAgentOptions): void {
   // 浮窗是 v-if 挂载的，等 onMounted 再订阅会漏掉「点开就发问」时的前几帧流式文本，
   // 所以在打开这一刻就把订阅挂上（幂等）。
   bindObAgentEvents()
+  bindObAgentUi()
   obAgent.open = true
   obAgent.serverId = o.serverId
   obAgent.serverName = o.serverName
   obAgent.host = o.host
   obAgent.context = o.context || null
   if (o.preset) obAgent.draft = o.preset
+  // 已经脱离出去了：把人送到那个窗口去，别在主窗口里干等
+  if (obAgent.detached) void window.sqlpilot.obagentPanelFocus()
 }
 
 export function closeObAgent(): void {
   if (obAgent.busy) void stopObAgent()
+  if (obAgent.detached) {
+    obAgent.detached = false
+    obAgent.open = false
+    void window.sqlpilot.obagentPanelClose()
+    return
+  }
   obAgent.open = false
 }
 
-export function clearObAgent(): void {
-  if (obAgent.busy) void stopObAgent()
+function clearLocal(): void {
   obAgent.items = []
   obAgent.cmds = {}
   obAgent.error = ''
   obAgent.reasoningChars = 0
   obAgent.cmdTotal = 0
   streamItem = null
+  recent.length = 0
+}
+
+export function clearObAgent(): void {
+  if (obAgent.busy) void stopObAgent()
+  clearLocal()
+  void window.sqlpilot.obagentMirror({ kind: 'clear' })
 }
 
 /** 把当前对话里的纯文本收成历史（命令卡片与输出不进上下文，避免撑爆） */
@@ -315,6 +508,7 @@ export async function askObAgent(text?: string): Promise<void> {
     return
   }
   bindObAgentEvents()
+  bindObAgentUi()
   obAgent.draft = ''
   obAgent.error = ''
   obAgent.reasoningChars = 0
@@ -337,6 +531,10 @@ export async function askObAgent(text?: string): Promise<void> {
     if (!r.ok) {
       obAgent.busy = false
       obAgent.error = r.error || '启动失败'
+      // 没发出去就别把问题吞掉：放回输入框，人还能改一改再发
+      if (!obAgent.draft) obAgent.draft = q
+      const i = obAgent.items.findIndex((x) => x.kind === 'text' && x.role === 'user' && x.text === q)
+      if (i >= 0) obAgent.items.splice(i, 1)
     }
   } catch (e: any) {
     obAgent.busy = false

@@ -152,6 +152,22 @@ const api = {
     ipcRenderer.on('obagent:event', l)
     return () => ipcRenderer.removeListener('obagent:event', l)
   },
+  // 脱离主窗口 → 独立浮窗（DOM 出不了窗口边界，只能换窗口）
+  obagentDetach: (snapshot: any) => ipcRenderer.invoke('obagent:detach', plain(snapshot)),
+  obagentPanelHello: () => ipcRenderer.invoke('obagent:panel:hello'),
+  obagentPanelFocus: () => ipcRenderer.invoke('obagent:panel:focus'),
+  obagentDock: (snapshot: any) => ipcRenderer.invoke('obagent:dock', plain(snapshot)),
+  obagentPanelPin: (pin: boolean) => ipcRenderer.invoke('obagent:panel:pin', { pin: !!pin }),
+  obagentPanelResize: (dx: number, dy: number) => ipcRenderer.invoke('obagent:panel:resize', { dx, dy }),
+  obagentPanelMove: (dx: number, dy: number) => ipcRenderer.invoke('obagent:panel:move', { dx, dy }),
+  obagentPanelClose: () => ipcRenderer.invoke('obagent:panel:close'),
+  /** 两侧同步的界面动作（切换模式 / 清空对话） */
+  obagentMirror: (payload: any) => ipcRenderer.invoke('obagent:mirror', plain(payload)),
+  onObAgentUi: (cb: (msg: any) => void) => {
+    const l = (_e: any, msg: any) => cb(msg)
+    ipcRenderer.on('obagent:ui', l)
+    return () => ipcRenderer.removeListener('obagent:ui', l)
+  },
   onSftpProgress: (cb: (p: any) => void) => {
     const l = (_e: any, p: any) => cb(p)
     ipcRenderer.on('sftp:progress', l)

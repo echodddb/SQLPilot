@@ -170,7 +170,7 @@
       </div>
     </div>
 
-    <ObAgentPanel v-if="obAgent.open" />
+    <ObAgentPanel v-if="obAgent.open && !obAgent.detached" />
   </div>
 </template>
 
