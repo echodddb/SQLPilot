@@ -71,10 +71,29 @@ export interface ObAgentContext {
   errCodes?: { key: string; count: number; msg?: string; verdict?: string; what?: string; advice?: string; sample?: string }[]
 }
 
+/** 历史会话摘要（与 main/obagent/sessions.ts 的 ObSessionMeta 对齐） */
+export interface ObSessionMeta {
+  id: string
+  title: string
+  serverId: string
+  serverName: string
+  host: string
+  createdAt: number
+  updatedAt: number
+  cmdCount: number
+  blocked: number
+  status: 'running' | 'done' | 'error'
+  excerpt: string
+}
+
 /** 交接快照：脱离/停靠时两边交换的全部状态 */
 export interface ObAgentSnapshot {
   seq: number
   runId: string
+  /** 这一场对话的存档 id（两个窗口必须指向同一条历史） */
+  sessionId: string
+  /** 整场对话的创建时间（同一场在两个窗口里必须一致，否则历史排序会漂） */
+  createdAt: number
   serverId: string
   serverName: string
   host: string
@@ -90,6 +109,22 @@ export interface ObAgentSnapshot {
 
 const MODE_KEY = 'sqlpilot.obagent.mode'
 const LAYOUT_KEY = 'sqlpilot.obagent.layout'
+/** 上次是「独立窗口」还是「窗口内浮窗」：记住用户的用法，下次打开直接照做 */
+const DETACH_KEY = 'sqlpilot.obagent.detachedMode'
+
+function readDetachedPref(): boolean {
+  try {
+    return localStorage.getItem(DETACH_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function saveDetachedPref(v: boolean): void {
+  try {
+    localStorage.setItem(DETACH_KEY, v ? '1' : '0')
+  } catch { /* 记不住只是下次要点一下 */ }
+}
 
 function readMode(): 'auto' | 'confirm' {
   try {
@@ -120,8 +155,14 @@ function readLayout(): Layout {
 
 const layout = readLayout()
 
+function newSessionId(): string {
+  return `obs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+}
+
 export const obAgent = reactive({
   open: false,
+  /** 当前这场对话的历史 id：脱离/停靠、切窗口都不变，存档靠它覆盖同一场 */
+  sessionId: newSessionId(),
   /** true = 界面已经搬到独立窗口，主窗口里不再画浮窗 */
   detached: false,
   /** 独立窗口是否置顶（只有脱离时有意义） */
@@ -154,6 +195,10 @@ let reqSeq = 0
 let currentId = ''
 let unsubscribe: (() => void) | null = null
 let unsubscribeUi: (() => void) | null = null
+
+/** 本场对话的创建时间（存档用） */
+let sessionCreatedAt = Date.now()
+let saveTimer: ReturnType<typeof setTimeout> | null = null
 
 /** 已折叠到的最大事件序号（交接时用来对齐） */
 let lastSeq = 0
@@ -295,6 +340,8 @@ function handleEvent(ev: any): void {
     if (recent.length > RECENT_MAX) recent.shift()
   }
   applyEvent(ev)
+  // 开场先存一次（跑到一半崩了也有现场），收尾再存一次终态
+  if (ev.type === 'start' || ev.type === 'done' || ev.type === 'error') persistObAgentSession()
 }
 
 /** 订阅主进程事件（浮窗挂载时调，卸载时撤销） */
@@ -315,6 +362,8 @@ export function snapshotObAgent(): ObAgentSnapshot {
   return JSON.parse(JSON.stringify({
     seq: lastSeq,
     runId: currentId,
+    sessionId: obAgent.sessionId,
+    createdAt: sessionCreatedAt,
     serverId: obAgent.serverId,
     serverName: obAgent.serverName,
     host: obAgent.host,
@@ -340,6 +389,8 @@ export function hydrateObAgent(snap: ObAgentSnapshot | null | undefined): void {
     if (it && it.kind === 'cmd' && it.cmd) cmds[it.cmdId] = it.cmd
   }
   currentId = String(snap.runId || '')
+  if (snap.sessionId) obAgent.sessionId = String(snap.sessionId)
+  if (snap.createdAt) sessionCreatedAt = Number(snap.createdAt)
   obAgent.items = items
   obAgent.cmds = cmds
   obAgent.serverId = String(snap.serverId || '')
@@ -364,6 +415,198 @@ export function hydrateObAgent(snap: ObAgentSnapshot | null | undefined): void {
   }
 }
 
+
+// ---------------------------------------------------------------- 历史会话
+
+/** 当前这场对话的存档载荷；主进程负责裁剪（输出截断、条数上限）与落盘 */
+function sessionPayload(): any {
+  const firstAsk = obAgent.items.find((x) => x.kind === 'text' && x.role === 'user' && x.text.trim())
+  const ask = String(firstAsk && firstAsk.kind === 'text' ? firstAsk.text : '').replace(/\s+/g, ' ').trim()
+  return {
+    id: obAgent.sessionId,
+    title: ask.slice(0, 48),
+    excerpt: ask.slice(0, 120),
+    serverId: obAgent.serverId,
+    serverName: obAgent.serverName,
+    host: obAgent.host,
+    mode: obAgent.mode,
+    context: toPlain(obAgent.context),
+    createdAt: sessionCreatedAt,
+    updatedAt: Date.now(),
+    status: obAgent.busy ? 'running' : obAgent.error ? 'error' : 'done',
+    items: obAgent.items.map((x) =>
+      x.kind === 'text'
+        ? { kind: 'text', key: x.key, role: x.role, text: x.text }
+        : { kind: 'cmd', key: x.key, cmdId: x.cmdId, cmd: toPlain(x.cmd), open: x.cmd.open }
+    )
+  }
+}
+
+/** 存一场：默认合并 600ms 内的多次调用（流式收尾会连着来好几条事件） */
+export function persistObAgentSession(now = false): void {
+  if (!obAgent.items.length) return
+  const payload = sessionPayload()
+  const go = (): void => {
+    void window.sqlpilot.obagentSessionsSave(payload).catch(() => { /* 存不上不影响排查 */ })
+  }
+  if (now) {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    go()
+    return
+  }
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    go()
+  }, 600)
+}
+
+/** 历史列表（只拿摘要，整场的 items 点开才取） */
+export const obHistory = reactive({
+  open: false,
+  loading: false,
+  error: '',
+  list: [] as ObSessionMeta[]
+})
+
+export async function refreshObHistory(): Promise<void> {
+  obHistory.loading = true
+  obHistory.error = ''
+  try {
+    const r = await window.sqlpilot.obagentSessionsList()
+    obHistory.list = Array.isArray(r?.sessions) ? (r.sessions as ObSessionMeta[]) : []
+  } catch (e: any) {
+    obHistory.error = String(e?.message || e)
+  } finally {
+    obHistory.loading = false
+  }
+}
+
+export async function toggleObHistory(open?: boolean): Promise<void> {
+  const next = open === undefined ? !obHistory.open : open
+  obHistory.open = next
+  if (next) await refreshObHistory()
+}
+
+/** 打开某一场历史：整体接管当前对话（还能接着问，历史会续在同一条上） */
+export async function loadObSession(id: string): Promise<boolean> {
+  try {
+    const r = await window.sqlpilot.obagentSessionsGet(id)
+    if (!r?.ok || !r.session) {
+      obHistory.error = r?.error || '这条记录已经不在了'
+      return false
+    }
+    const s = r.session
+    const snap: ObAgentSnapshot = {
+      seq: lastSeq,
+      runId: '',
+      sessionId: s.id,
+      createdAt: Number(s.createdAt) || Date.now(),
+      serverId: s.serverId,
+      serverName: s.serverName,
+      host: s.host,
+      mode: s.mode,
+      context: s.context || null,
+      items: (s.items || []) as ObItem[],
+      busy: false,
+      error: '',
+      reasoningChars: 0,
+      cmdTotal: (s.items || []).filter((x: any) => x.kind === 'cmd').length,
+      draft: ''
+    }
+    hydrateObAgent(snap)
+    sessionCreatedAt = Number(s.createdAt) || Date.now()
+    // 历史里的命令是过去的事，不能再点「执行」——全部按终态展示
+    for (const it of obAgent.items) {
+      if (it.kind === 'cmd' && (it.cmd.status === 'waiting' || it.cmd.status === 'running')) it.cmd.status = 'skipped'
+    }
+    obHistory.open = false
+    obAgent.open = true
+    // 另一侧窗口跟着切（否则两边显示的不是同一场）
+    void window.sqlpilot.obagentMirror({ kind: 'session', snapshot: snapshotObAgent() })
+    return true
+  } catch (e: any) {
+    obHistory.error = String(e?.message || e)
+    return false
+  }
+}
+
+export async function deleteObSession(id: string): Promise<void> {
+  try {
+    await window.sqlpilot.obagentSessionsDelete(id)
+    if (id === obAgent.sessionId) {
+      // 删掉的正是当前这场：内容留在界面上，但之后再存会写回一条新记录
+      obAgent.sessionId = newSessionId()
+      sessionCreatedAt = Date.now()
+    }
+    await refreshObHistory()
+  } catch (e: any) {
+    obHistory.error = String(e?.message || e)
+  }
+}
+
+export async function clearObHistory(): Promise<void> {
+  try {
+    await window.sqlpilot.obagentSessionsClear()
+    await refreshObHistory()
+  } catch (e: any) {
+    obHistory.error = String(e?.message || e)
+  }
+}
+
+// ---------------------------------------------------------------- 复制（命令清单 / 排查记录）
+
+function stamp(ts = Date.now()): string {
+  const d = new Date(ts)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function whereLine(): string {
+  const s = [obAgent.serverName, obAgent.host].filter(Boolean).join(' ')
+  return s || '未选服务器'
+}
+
+/** 只出命令本身：粘到终端就能跑（被拦/被跳过的不算，它们没跑过） */
+export function commandsScript(): string {
+  const ran = obAgent.items.filter(
+    (x): x is ObCmdItem => x.kind === 'cmd' && (x.cmd.status === 'done' || x.cmd.status === 'failed')
+  )
+  if (!ran.length) return ''
+  const head = `# SQLPilot 排障命令 · ${whereLine()} · ${stamp(sessionCreatedAt)}`
+  const lines = ran.map((x) => {
+    const why = x.cmd.why ? `  # ${x.cmd.why.replace(/\s+/g, ' ').slice(0, 80)}` : ''
+    return `${x.cmd.command.replace(/\s+/g, ' ').trim()}${why}`
+  })
+  return [head, ...lines].join('\n')
+}
+
+/** 整场记录（Markdown）：贴工单/群里用的那种 */
+export function transcriptMd(): string {
+  const out: string[] = [`## 故障排查 · ${whereLine()}`, `时间：${stamp(sessionCreatedAt)} · ${obAgent.items.length} 条记录`]
+  let n = 0
+  for (const it of obAgent.items) {
+    if (it.kind === 'text') {
+      const who = it.role === 'user' ? '我' : 'Agent'
+      out.push('', `**${who}**：${it.text.trim()}`)
+      continue
+    }
+    n++
+    const c = it.cmd
+    const meta = [c.risk === 'deny' ? '已拦截' : c.risk === 'confirm' ? '需确认' : '只读', c.status, c.ms != null ? `${c.ms}ms` : '']
+      .filter(Boolean)
+      .join(' · ')
+    out.push('', `### 命令 ${n} · ${meta}`, '```sh', c.command, '```')
+    if (c.why) out.push(`意图：${c.why}`)
+    if (c.reason) out.push(`拦截原因：${c.reason}`)
+    if (c.output) out.push('```', c.output.trim(), '```')
+  }
+  return out.join('\n')
+}
+
+// ---------------------------------------------------------------- 另一侧窗口的镜面消息
+
 /** 订阅「另一侧窗口」的界面动作（脱离/停靠/清空/切模式/关窗） */
 export function bindObAgentUi(): void {
   if (unsubscribeUi) return
@@ -380,6 +623,14 @@ export function bindObAgentUi(): void {
         break
       case 'clear':
         clearLocal()
+        if (msg.sessionId) {
+          obAgent.sessionId = String(msg.sessionId)
+          sessionCreatedAt = Date.now()
+        }
+        break
+      case 'session':
+        // 另一侧打开了历史记录：跟着换，但保留本窗口的脱离/停靠状态
+        hydrateObAgent(msg.snapshot)
         break
       case 'mode':
         applyMode(msg.mode === 'confirm' ? 'confirm' : 'auto')
@@ -409,6 +660,7 @@ export async function detachObAgent(): Promise<void> {
     } else if (typeof (r as any).pin === 'boolean') {
       obAgent.pinned = (r as any).pin
     }
+    if (r?.ok) saveDetachedPref(true)
   } catch (e: any) {
     obAgent.detached = false
     obAgent.error = String(e?.message || e)
@@ -420,6 +672,7 @@ export async function dockObAgent(): Promise<void> {
   const snap = snapshotObAgent()
   try {
     await window.sqlpilot.obagentDock(snap)
+    saveDetachedPref(false)
   } catch { /* 窗口已经不在了 */ }
 }
 
@@ -452,12 +705,18 @@ export function openObAgent(o: OpenObAgentOptions): void {
   obAgent.host = o.host
   obAgent.context = o.context || null
   if (o.preset) obAgent.draft = o.preset
-  // 已经脱离出去了：把人送到那个窗口去，别在主窗口里干等
-  if (obAgent.detached) void window.sqlpilot.obagentPanelFocus()
+  if (obAgent.detached) {
+    // 已经脱离出去了：把人送到那个窗口去，别在主窗口里干等
+    void window.sqlpilot.obagentPanelFocus()
+  } else if (readDetachedPref()) {
+    // 上次用的是独立窗口：这次直接开在任务栏那一格里
+    void detachObAgent()
+  }
 }
 
 export function closeObAgent(): void {
   if (obAgent.busy) void stopObAgent()
+  persistObAgentSession(true)
   if (obAgent.detached) {
     obAgent.detached = false
     obAgent.open = false
@@ -479,8 +738,11 @@ function clearLocal(): void {
 
 export function clearObAgent(): void {
   if (obAgent.busy) void stopObAgent()
+  persistObAgentSession(true)
   clearLocal()
-  void window.sqlpilot.obagentMirror({ kind: 'clear' })
+  sessionCreatedAt = Date.now()
+  obAgent.sessionId = newSessionId()
+  void window.sqlpilot.obagentMirror({ kind: 'clear', sessionId: obAgent.sessionId })
 }
 
 /** 把当前对话里的纯文本收成历史（命令卡片与输出不进上下文，避免撑爆） */

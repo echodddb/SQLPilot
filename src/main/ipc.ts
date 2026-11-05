@@ -231,6 +231,10 @@ import {
   clearPanelGone, closePanelWindow, hasPanelWindow, isPanelPinned, movePanelBy, nudgePanelSize, onPanelGone, openPanelWindow, panelWindow, setPanelPinned
 } from './obagent/panel'
 import {
+  clearSessions as clearObSessions, deleteSession as deleteObSession, getSession as getObSession,
+  listSessions as listObSessions, saveSession as saveObSession
+} from './obagent/sessions'
+import {
   askCloudAi,
   bindCloudAiEmitter,
   deleteCloudAiSession,
@@ -1299,6 +1303,16 @@ export function registerIpc(): void {
     if (payload && typeof payload === 'object') broadcastObAgentExcept(e.sender.id, 'obagent:ui', payload)
     return { ok: true }
   })
+
+  // ---------- OB 排障历史会话（落 userData/obagent-sessions.json） ----------
+  ipcMain.handle('obagent:sessions:list', () => ({ ok: true, sessions: listObSessions() }))
+  ipcMain.handle('obagent:sessions:get', (_e, { id }: { id: string }) => {
+    const s = getObSession(String(id || ''))
+    return s ? { ok: true, session: s } : { ok: false, error: '这条记录已经不在了' }
+  })
+  ipcMain.handle('obagent:sessions:save', (_e, session: any) => saveObSession(session))
+  ipcMain.handle('obagent:sessions:delete', (_e, { id }: { id: string }) => deleteObSession(String(id || '')))
+  ipcMain.handle('obagent:sessions:clear', () => clearObSessions())
 
   // ---------- 交互式 SSH 终端 ----------
 

@@ -11,7 +11,19 @@
  * 只做两件事：铺一层透明留白（圆角与阴影才不会被窗口边缘切掉）、
  * 把 ObAgentPanel 以 detached 模式挂上去。状态由主窗口通过主进程交接过来。
  */
+import { watch } from 'vue'
+import { obAgent } from '../../oblog/agent'
 import ObAgentPanel from './ObAgentPanel.vue'
+
+// 任务栏按钮的标题就是页面标题：带上目标服务器，一眼看出这一格在排哪台机器
+watch(
+  () => [obAgent.serverName, obAgent.host],
+  () => {
+    const w = [obAgent.serverName, obAgent.host].filter(Boolean).join(' ')
+    document.title = w ? `故障排查 · ${w}` : '故障排查'
+  },
+  { immediate: true }
+)
 </script>
 
 <style>

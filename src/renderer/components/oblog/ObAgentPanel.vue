@@ -51,11 +51,21 @@
       </button>
       <button
         class="oa-ic"
-        title="新对话（清空当前记录）"
-        :disabled="obAgent.busy || !obAgent.items.length"
-        @click.stop="clearObAgent"
+        data-pop="history"
+        :class="{ on: obHistory.open }"
+        title="历史排查记录"
+        @click.stop="openPop('history')"
       >
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" /></svg>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" /><path d="M8 4.6V8l2.4 1.5" /></svg>
+      </button>
+      <button
+        class="oa-ic"
+        data-pop="more"
+        :class="{ on: menuMore }"
+        title="更多（新对话 / 复制命令清单 / 复制排查记录）"
+        @click.stop="openPop('more')"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 8h.01M8 8h.01M12.6 8h.01" /></svg>
       </button>
       <button class="oa-ic close" title="关闭 (Esc)" @click.stop="close">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
@@ -149,6 +159,23 @@
       <div v-if="obAgent.error" class="oa-err">{{ obAgent.error }}</div>
     </div>
 
+    <!-- 历史记录 / 更多操作：浮在正文之上，点外面或 Esc 收起 -->
+    <div v-if="obHistory.open || menuMore" class="oa-veil" :style="{ bottom: footH + 'px' }" @mousedown="closePops"></div>
+    <div v-if="obHistory.open" class="oa-pop oa-pop-his" @mousedown.stop>
+      <ObAgentHistory />
+    </div>
+    <div v-else-if="menuMore" class="oa-pop oa-pop-more" @mousedown.stop>
+      <button class="oa-mi" :disabled="!obAgent.items.length || obAgent.busy" @click="newChat">新对话</button>
+      <button class="oa-mi" :disabled="!canCopyCmds" title="把本次真正跑过的命令按顺序拼成一段，粘到终端就能复查" @click="copyCommands">
+        复制命令清单
+        <em v-if="ranCmdCount">{{ ranCmdCount }} 条</em>
+      </button>
+      <button class="oa-mi" :disabled="!obAgent.items.length" title="Markdown：问题、结论、每条命令与输出，适合贴工单" @click="copyTranscript">
+        复制排查记录
+      </button>
+    </div>
+    <div v-if="toast" class="oa-toast" :style="{ bottom: footH + 12 + 'px' }">{{ toast }}</div>
+
     <!-- 往回翻的时候别被流式输出拽回底部 -->
     <button v-if="!atBottom" class="oa-jump" :style="{ bottom: footH + 10 + 'px' }" title="回到最新" @click="toBottom(true)">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M4 8.5l4 4 4-4" /></svg>
@@ -206,11 +233,13 @@ import {
   bindObAgentUi,
   clearObAgent,
   closeObAgent,
+  commandsScript,
   copyText,
   detachObAgent,
   dockObAgent,
   hydrateObAgent,
   obAgent,
+  obHistory,
   quickPrompts,
   resetObAgentLayout,
   saveObAgentLayout,
@@ -218,9 +247,12 @@ import {
   setObAgentPinned,
   stopObAgent,
   toggleCmdOutput,
+  toggleObHistory,
+  transcriptMd,
   type ObAgentCmd,
   type ObRisk
 } from '../../oblog/agent'
+import ObAgentHistory from './ObAgentHistory.vue'
 
 const props = defineProps<{ detached?: boolean }>()
 const detached = computed(() => !!props.detached)
@@ -238,6 +270,11 @@ const expanded = reactive<Record<string, boolean>>({})
 /** 刚复制的目标（1.2s 后复位），点一下就有反馈，比 toast 轻 */
 const copied = ref('')
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
+/** 「更多」菜单 */
+const menuMore = ref(false)
+/** 轻提示（复制清单/记录后的反馈） */
+const toast = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 const RISK: Record<ObRisk, string> = { safe: '只读', confirm: '需确认', deny: '已拦截' }
 const STATUS: Record<ObAgentCmd['status'], string> = {
@@ -250,6 +287,10 @@ const STATUS: Record<ObAgentCmd['status'], string> = {
 }
 
 const streaming = computed(() => obAgent.items.some((x) => x.kind === 'text' && x.live))
+const ranCmdCount = computed(
+  () => obAgent.items.filter((x) => x.kind === 'cmd' && (x.cmd.status === 'done' || x.cmd.status === 'failed')).length
+)
+const canCopyCmds = computed(() => ranCmdCount.value > 0)
 const where = computed(() => {
   const s = [obAgent.serverName, obAgent.host].filter(Boolean).join(' / ')
   const extra = obAgent.context?.logDir ? ` · ${obAgent.context.logDir}` : ''
@@ -431,6 +472,57 @@ function close(): void {
   closeObAgent()
 }
 
+function showToast(msg: string): void {
+  toast.value = msg
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toast.value = '' }, 1500)
+}
+
+/** 两个浮层互斥：打开一个就收起另一个 */
+function openPop(kind: 'history' | 'more'): void {
+  if (kind === 'history') {
+    menuMore.value = false
+    void toggleObHistory()
+    return
+  }
+  if (obHistory.open) void toggleObHistory(false)
+  menuMore.value = !menuMore.value
+}
+
+function closePops(): void {
+  if (obHistory.open) void toggleObHistory(false)
+  menuMore.value = false
+}
+
+function onDocDown(e: MouseEvent): void {
+  if (!obHistory.open && !menuMore.value) return
+  const t = e.target as HTMLElement | null
+  if (t?.closest('.oa-pop, [data-pop]')) return
+  closePops()
+}
+
+function newChat(): void {
+  menuMore.value = false
+  clearObAgent()
+}
+
+function copyCommands(): void {
+  menuMore.value = false
+  const text = commandsScript()
+  if (!text) {
+    showToast('本次还没有跑过命令')
+    return
+  }
+  void copyText(text)
+  showToast(`已复制 ${ranCmdCount.value} 条命令`)
+}
+
+function copyTranscript(): void {
+  menuMore.value = false
+  void copyText(transcriptMd())
+  showToast('已复制排查记录')
+}
+
 function toggleDetach(): void {
   if (detached.value) void dockObAgent()
   else void detachObAgent()
@@ -498,10 +590,13 @@ watch(
 )
 
 function onWinKey(e: KeyboardEvent): void {
-  if (e.key === 'Escape' && !e.isComposing) {
-    e.stopPropagation()
-    close()
+  if (e.key !== 'Escape' || e.isComposing) return
+  e.stopPropagation()
+  if (obHistory.open || menuMore.value) {
+    closePops()
+    return
   }
+  close()
 }
 
 onMounted(async () => {
@@ -528,12 +623,15 @@ onMounted(async () => {
   })
   window.addEventListener('keydown', onWinKey)
   window.addEventListener('resize', clampIntoView)
+  document.addEventListener('mousedown', onDocDown)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onWinKey)
   window.removeEventListener('resize', clampIntoView)
+  document.removeEventListener('mousedown', onDocDown)
   if (copiedTimer) clearTimeout(copiedTimer)
+  if (toastTimer) clearTimeout(toastTimer)
   footRo?.disconnect()
   footRo = null
   // 订阅不解（由 openObAgent/askObAgent 保证幂等挂上）：浮窗是 v-if 挂载的，
@@ -658,6 +756,40 @@ onBeforeUnmount(() => {
 .oa-q-dot {
   width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%;
   background: var(--accent); opacity: 0.7;
+}
+
+/* ---------------------------------------------------------------- 浮层（历史 / 更多） */
+/* 浮层后面的正文压暗一点：不然空态文案从浮层下面露出来，看着像两个界面叠一起 */
+.oa-veil {
+  position: absolute; left: 0; right: 0; top: 40px; z-index: 5;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(2px);
+  animation: oa-in 0.14s ease;
+}
+.oa-pop { position: absolute; z-index: 6; top: 44px; animation: oa-in 0.14s ease; }
+.oa-pop-his { left: 8px; right: 8px; max-height: calc(100% - 148px); display: flex; }
+.oa-pop-his > * { flex: 1; min-height: 0; }
+.oa-pop-more {
+  right: 8px; width: 200px; padding: 4px;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--bg-card); border: 1px solid var(--border-strong); border-radius: 9px;
+  box-shadow: var(--shadow-lg);
+}
+.oa-mi {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  padding: 6px 8px; border: none; border-radius: 6px; background: transparent;
+  color: var(--text-dim); font-family: inherit; font-size: 11.5px; cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.oa-mi:hover:not(:disabled) { background: var(--bg-card-hover); color: var(--text); }
+.oa-mi:disabled { opacity: 0.4; cursor: default; }
+.oa-mi em { margin-left: auto; font-style: normal; font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+
+.oa-toast {
+  position: absolute; left: 50%; transform: translateX(-50%); z-index: 7; pointer-events: none;
+  padding: 4px 10px; border-radius: 999px; font-size: 10.5px;
+  color: var(--text); background: var(--bg-side); border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg); animation: oa-in 0.14s ease;
 }
 
 /* 问答气泡 */

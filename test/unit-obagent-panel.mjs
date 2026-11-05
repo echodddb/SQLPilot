@@ -27,6 +27,11 @@ let onEvent = null
 let onUi = null
 let detachReply = { ok: true, pin: true }
 let detachThrows = false
+/** 主进程那份历史（测试里用内存模拟） */
+const sessionStore = {}
+const savedSessions = []
+const storedSessionList = () =>
+  Object.values(sessionStore).map((s) => ({ ...s, cmdCount: s.items.filter((x) => x.kind === 'cmd').length, blocked: 0, status: 'done' }))
 
 const sqlpilot = {
   onObAgentEvent: (cb) => { onEvent = cb; return () => { onEvent = null } },
@@ -47,6 +52,11 @@ const sqlpilot = {
   obagentPanelClose: async () => { calls.push(['panelClose']); return { ok: true } },
   obagentPanelFocus: async () => { calls.push(['focus']); return { ok: true } },
   obagentMirror: async (payload) => { calls.push(['mirror', payload]); return { ok: true } },
+  obagentSessionsList: async () => ({ ok: true, sessions: storedSessionList() }),
+  obagentSessionsGet: async (id) => (sessionStore[id] ? { ok: true, session: sessionStore[id] } : { ok: false, error: '没了' }),
+  obagentSessionsSave: async (s) => { savedSessions.push(s); return { ok: true, id: s.id } },
+  obagentSessionsDelete: async (id) => { const had = !!sessionStore[id]; delete sessionStore[id]; return { ok: true, removed: had ? 1 : 0 } },
+  obagentSessionsClear: async () => ({ ok: true, removed: Object.keys(sessionStore).length }),
   openExternal: async () => ({ ok: true })
 }
 globalThis.window = {
@@ -212,5 +222,130 @@ await M.askObAgent('查一下磁盘')
 ok(obAgent.items.length === before, '发起失败 → 不留下用户气泡')
 eq(obAgent.draft, '查一下磁盘', '发起失败 → 问题放回输入框')
 eq(obAgent.error, '没有配置大模型', '发起失败 → 显示原因')
+
+// ---------------------------------------------------------------- 历史会话
+obAgent.items = []
+obAgent.cmds = {}
+obAgent.serverId = 's1'
+obAgent.serverName = 'obs1'
+obAgent.host = 'root@10.0.0.1'
+obAgent.busy = false
+obAgent.error = ''
+M.hydrateObAgent({
+  seq: 0, runId: '', sessionId: 'obs_test1', createdAt: 1700000000000,
+  serverId: 's1', serverName: 'obs1', host: 'root@10.0.0.1', mode: 'auto', context: null,
+  items: [], busy: false, error: '', reasoningChars: 0, cmdTotal: 0, draft: ''
+})
+onEvent({ seq: 1001, id: 'r9', type: 'start' })
+onEvent({ seq: 1002, id: 'r9', type: 'delta', text: '先看负载' })
+onEvent({ seq: 1003, id: 'r9', type: 'cmd', cmdId: 'k1', command: 'uptime', why: '看负载', risk: 'safe', rule: 'uptime', reason: '', status: 'done' })
+onEvent({ seq: 1004, id: 'r9', type: 'cmd', cmdId: 'k2', command: 'rm -rf /log', why: '清日志', risk: 'deny', rule: 'rm', reason: '写操作', status: 'blocked' })
+onEvent({ seq: 1005, id: 'r9', type: 'cmd', cmdId: 'k3', command: 'df -h', why: '看磁盘', risk: 'confirm', rule: 'df', reason: '', status: 'skipped' })
+onEvent({ seq: 1006, id: 'r9', type: 'done', text: '负载正常', commands: 3 })
+
+savedSessions.length = 0
+M.persistObAgentSession(true)
+const payload = savedSessions[savedSessions.length - 1]
+ok(!!payload, '存档调用发生了')
+eq(payload.id, obAgent.sessionId, '存档用的是当前会话 id')
+eq(payload.sessionId, undefined, '不额外塞一个冗余字段')
+eq(payload.items.length, 4, '整场条目都提上去了（1 条正文 + 3 张命令卡）')
+ok(payload.items.some((x) => x.kind === 'cmd' && x.cmd.command === 'rm -rf /log'), '被拦命令也存档')
+ok(typeof payload.createdAt === 'number' && payload.createdAt > 0, '带创建时间')
+
+// 空对话不产生无效存档
+const emptyBefore = savedSessions.length
+obAgent.items = []
+obAgent.cmds = {}
+M.persistObAgentSession(true)
+eq(savedSessions.length, emptyBefore, '没有内容时不落盘')
+
+// 复制命令清单：只收录真正跑过的（done/failed）
+obAgent.items = [
+  { kind: 'text', key: 't1', role: 'user', text: '为什么刷屏' },
+  {
+    kind: 'cmd', key: 'c1', cmdId: 'k1',
+    cmd: { cmdId: 'k1', command: 'uptime', why: '看负载', risk: 'safe', rule: '', reason: '', status: 'done', ms: 12, open: false }
+  },
+  {
+    kind: 'cmd', key: 'c2', cmdId: 'k2',
+    cmd: { cmdId: 'k2', command: 'rm -rf /log', why: '清日志', risk: 'deny', rule: '', reason: '写操作', status: 'blocked', open: false }
+  },
+  {
+    kind: 'cmd', key: 'c3', cmdId: 'k3',
+    cmd: { cmdId: 'k3', command: 'df -h', why: '看磁盘', risk: 'confirm', rule: '', reason: '', status: 'skipped', open: false }
+  },
+  {
+    kind: 'cmd', key: 'c4', cmdId: 'k4',
+    cmd: { cmdId: 'k4', command: 'tail -n 20 observer.log', why: '', risk: 'safe', rule: '', reason: '', status: 'failed', ms: 30, open: true, output: 'boom' }
+  }
+]
+obAgent.cmds = { k1: obAgent.items[1].cmd, k2: obAgent.items[2].cmd, k3: obAgent.items[3].cmd, k4: obAgent.items[4].cmd }
+const script = M.commandsScript()
+ok(script.startsWith('# SQLPilot 排障命令'), '清单带表头')
+ok(script.includes('uptime') && script.includes('tail -n 20 observer.log'), '收录执行过/失败的命令')
+ok(!script.includes('rm -rf /log') && !script.includes('df -h'), '被拦/被跳过的不进清单')
+ok(script.includes('# 看负载'), '命令后带意图注释')
+ok(script.split('\n').length === 3, '一行表头 + 两条命令')
+
+const md = M.transcriptMd()
+ok(md.startsWith('## 故障排查'), '记录是 Markdown，能直接贴工单')
+ok(md.includes('**我**：为什么刷屏') && md.includes('```sh'), '带提问与命令代码块')
+ok(md.includes('拦截原因：写操作'), '被拦命令带原因')
+ok(md.includes('boom'), '输出一起进记录')
+
+// 事件驱动自动存档：start/done 后 600ms 内必须有一次保存
+savedSessions.length = 0
+onEvent({ seq: 2001, id: 'r1', type: 'start' })
+await new Promise((r) => setTimeout(r, 800))
+ok(savedSessions.length >= 1, '排查开始就会自动存档（跑到一半崩了也有现场）')
+eq(savedSessions[savedSessions.length - 1].status, 'running', '进行中的状态如实记录')
+
+// 打开一条历史：整体接管，且历史里的「待确认」不再可执行
+sessionStore.hist1 = {
+  id: 'hist1',
+  title: '磁盘快满了',
+  serverId: 's2',
+  serverName: 'obs2',
+  host: 'root@10.0.0.2',
+  createdAt: 1700000000000,
+  updatedAt: 1700000009999,
+  mode: 'confirm',
+  status: 'done',
+  context: null,
+  items: [
+    { kind: 'text', key: 'h1', role: 'user', text: '磁盘快满了' },
+    {
+      kind: 'cmd', key: 'h2', cmdId: 'hc1',
+      cmd: { cmdId: 'hc1', command: 'df -h', why: '看盘', risk: 'confirm', rule: '', reason: '', status: 'waiting', open: false }
+    }
+  ]
+}
+calls.length = 0
+const loaded = await M.loadObSession('hist1')
+ok(loaded, '历史加载成功')
+eq(obAgent.sessionId, 'hist1', '会话 id 切到历史那条')
+eq(obAgent.serverName, 'obs2', '服务器跟着切')
+eq(obAgent.items.length, 2, '内容恢复')
+eq(obAgent.items[1].cmd.status, 'skipped', '历史里的待确认不再给执行入口')
+ok(obAgent.items[1].cmd === obAgent.cmds.hc1, '恢复后命令引用重建')
+ok(calls.some((c) => c[0] === 'mirror' && c[1]?.kind === 'session'), '另一侧窗口同步切到这条历史')
+eq(M.obHistory.open, false, '加载后历史浮层自动收起')
+
+// 打不开的历史：给出提示，不动当前对话
+const beforeItems = obAgent.items.length
+const bad = await M.loadObSession('没有这条')
+ok(bad === false, '不存在的历史返回失败')
+eq(obAgent.items.length, beforeItems, '失败不影响当前对话')
+eq(M.obHistory.error, '没了', '失败把原因显示出来')
+
+// 列表 / 删除 / 清空
+await M.toggleObHistory(true)
+eq(M.obHistory.open, true, '历史浮层打开')
+ok(Array.isArray(M.obHistory.list), '列表拿到了')
+await M.deleteObSession('hist1')
+eq(sessionStore.hist1, undefined, '删除落到主进程')
+await M.clearObHistory()
+eq(Object.keys(sessionStore).length, 0, '清空落到主进程')
 
 console.log(`unit-obagent-panel: ${n} 项通过`)

@@ -161,8 +161,8 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
-    // 它是浮窗不是应用窗口：不占任务栏，主窗口最小化后仍可操作
-    skipTaskbar: true,
+    // 进任务栏：主窗口最小化/被盖住时，从任务栏就能把排查窗口叫回来
+    skipTaskbar: false,
     alwaysOnTop: st.pin,
     title: 'SQLPilot · 故障排查',
     autoHideMenuBar: true,
@@ -177,6 +177,17 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
   panel = win
   win.setMenu(null)
   win.setAlwaysOnTop(st.pin, 'floating')
+  // 任务栏里当成「另一个应用」而不是主窗口的一部分：不同 AppUserModelID
+  // 才会单独成一格（Windows 默认按 AUMID 分组）。没有自定义图标就沿用 exe 的。
+  if (process.platform === 'win32') {
+    try {
+      win.setAppDetails({
+        appId: 'com.sqlpilot.troubleshoot',
+        relaunchCommand: process.execPath,
+        relaunchDisplayName: 'SQLPilot 故障排查'
+      })
+    } catch { /* 老系统 / 无权限时保持默认分组 */ }
+  }
 
   const devTools = !app.isPackaged || !!process.env.SQLPILOT_DEV
   win.webContents.on('before-input-event', (_e, input) => {

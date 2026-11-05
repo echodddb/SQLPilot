@@ -163,6 +163,12 @@ const api = {
   obagentPanelClose: () => ipcRenderer.invoke('obagent:panel:close'),
   /** 两侧同步的界面动作（切换模式 / 清空对话） */
   obagentMirror: (payload: any) => ipcRenderer.invoke('obagent:mirror', plain(payload)),
+  // 历史会话（落盘在主进程，跨窗口/跨重启都在）
+  obagentSessionsList: () => ipcRenderer.invoke('obagent:sessions:list'),
+  obagentSessionsGet: (id: string) => ipcRenderer.invoke('obagent:sessions:get', { id }),
+  obagentSessionsSave: (session: any) => ipcRenderer.invoke('obagent:sessions:save', plain(session)),
+  obagentSessionsDelete: (id: string) => ipcRenderer.invoke('obagent:sessions:delete', { id }),
+  obagentSessionsClear: () => ipcRenderer.invoke('obagent:sessions:clear'),
   onObAgentUi: (cb: (msg: any) => void) => {
     const l = (_e: any, msg: any) => cb(msg)
     ipcRenderer.on('obagent:ui', l)

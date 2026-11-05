@@ -20,6 +20,8 @@ declare type ObLogResultView = import('../main/oblog').ObLogResult
 declare type ObAgentContextView = import('../main/obagent').ObAgentContext
 declare type ObAgentEventView = import('../main/obagent').ObAgentEvent
 declare type ObAgentAskInputView = import('../main/obagent').ObAgentAskInput
+declare type ObSessionMetaView = import('../main/obagent/sessions').ObSessionMeta
+declare type ObSessionView = import('../main/obagent/sessions').ObSession
 declare type SftpProgress = {
   jobId: string
   /** 上传还是下载（渲染层队列被清空后也能正确归类） */
@@ -368,6 +370,11 @@ declare type CmdbWriteResult = { ok: boolean; error?: string; doc?: CmdbDocView;
       obagentPanelMove(dx: number, dy: number): Promise<{ ok: boolean }>
       obagentPanelClose(): Promise<{ ok: boolean }>
       obagentMirror(payload: any): Promise<{ ok: boolean }>
+      obagentSessionsList(): Promise<{ ok: boolean; sessions: ObSessionMetaView[] }>
+      obagentSessionsGet(id: string): Promise<{ ok: boolean; session?: ObSessionView; error?: string }>
+      obagentSessionsSave(session: any): Promise<{ ok: boolean; id?: string; error?: string }>
+      obagentSessionsDelete(id: string): Promise<{ ok: boolean; removed: number }>
+      obagentSessionsClear(): Promise<{ ok: boolean; removed: number }>
       onObAgentUi(cb: (msg: any) => void): () => void
       onSftpProgress(cb: (p: SftpProgress) => void): () => void
       localRoots(): Promise<{ ok: boolean; roots: { name: string; path: string }[]; home: string; quick: { name: string; path: string }[] }>
