@@ -610,11 +610,15 @@ onMounted(async () => {
   }
   // 独立窗口：状态由主窗口交过来（主进程保存了快照，加载完直接取）
   if (detached.value) {
+    // 这个窗口本身就是「已脱离」的形态。closeObAgent 靠这个标志决定
+    // 是「关掉独立窗口」还是「只把主窗口里的浮窗收起来」—— 不置上就点 ✕ 关不掉。
+    obAgent.detached = true
     try {
       const r = await window.sqlpilot.obagentPanelHello()
       if (typeof r?.pin === 'boolean') obAgent.pinned = r.pin
       if (r?.snapshot) hydrateObAgent(r.snapshot)
     } catch { /* 主进程已经退出，浮窗自己空着 */ }
+
   }
   toBottom(true)
   nextTick(() => {
@@ -663,6 +667,9 @@ onBeforeUnmount(() => {
   left: auto; right: auto; top: auto; bottom: auto;
   width: 100%; height: 100%; max-width: none;
   animation: none;
+  /* 独立窗口不画外阴影：透明窗口上自绘阴影会在面板外面糊出一圈灰，
+     看起来就像一个「奇怪的背影」。靠 1px 边框和圆角区分边界就够了。 */
+  box-shadow: none;
 }
 
 /* ---------------------------------------------------------------- 顶栏 */

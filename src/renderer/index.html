@@ -6,6 +6,13 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" />
   <title>SQLPilot</title>
   <style>
+    /* 画布默认背景必须显式声明成透明。
+       Chromium 在页面自己的背景样式生效前，会把画布填成不透明白底——
+       独立浮窗是透明窗口，那几帧就是一块白（用户说的「白色背影」，只出现在第一次，
+       之后随便切一下页面重新合成就没了）。主窗口看不出差别：它后面是 BrowserWindow
+       的 backgroundColor，本来就与主题同色。 */
+    html, body { background: transparent; }
+
     /* 首屏骨架：Vue 挂载前先铺住窗口，避免深色底上干等（Vue 一起就被启动画面组件接管）。
        默认跟随系统明暗，data-theme 一旦落下就以它为准——手动选过主题的用户也不会闪。 */
     #boot-veil {

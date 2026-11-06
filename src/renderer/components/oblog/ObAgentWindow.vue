@@ -30,7 +30,8 @@ watch(
 /* 只作用于独立浮窗这个窗口（主窗口没有 data-shell 属性）：
    窗口本身必须透明，否则圆角外面是一块直角实色。 */
 html[data-shell='panel'],
-html[data-shell='panel'] body {
+html[data-shell='panel'] body,
+html[data-shell='panel'] #app {
   background: transparent !important;
   margin: 0 !important;
   padding: 0 !important;
@@ -38,7 +39,15 @@ html[data-shell='panel'] body {
   overflow: hidden;
   cursor: default;
 }
-html[data-shell='panel'] #app { height: 100%; }
+/* 主界面背景是「细网格 + 两支氛围光」，画在 body 的伪元素上（fixed + inset:0）。
+   只清 body 的 background 洗不掉它们，透明留白里会浮出一层灰蓝色底 —— 这就是
+   独立窗口周围那圈「奇怪的背影」。浮窗里必须整层摘掉。 */
+html[data-shell='panel'] body::before,
+html[data-shell='panel'] body::after {
+  display: none !important;
+}
+
+
 html[data-shell='panel'] ::-webkit-scrollbar-corner { background: transparent; }
 </style>
 
@@ -47,8 +56,8 @@ html[data-shell='panel'] ::-webkit-scrollbar-corner { background: transparent; }
   width: 100vw;
   height: 100vh;
   box-sizing: border-box;
-  /* 留白给阴影：透明窗口没有系统阴影，全靠这圈空间把浮层托起来 */
-  padding: 9px;
+  /* 只留一点点，避免圆角边缘被窗口边界切硬；不再需要给阴影留白 */
+  padding: 3px;
   display: flex;
 }
 </style>

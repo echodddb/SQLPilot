@@ -228,7 +228,8 @@ import {
 import { askEditorAi, bindEditorAiEmitter, deleteEditorAiSession, getEditorAiSession, listEditorAiSessions, stopEditorAi } from './editor-ai'
 import { askObAgent, bindObAgentEmitter, resolveObAgentApproval, stopObAgent } from './obagent'
 import {
-  clearPanelGone, closePanelWindow, hasPanelWindow, isPanelPinned, movePanelBy, nudgePanelSize, onPanelGone, openPanelWindow, panelWindow, setPanelPinned
+  clearPanelGone, closePanelWindow, hasPanelWindow, isPanelPinned, movePanelBy, nudgePanelSize, onPanelGone,
+  openPanelWindow, panelWindow, setPanelPinned
 } from './obagent/panel'
 import {
   clearSessions as clearObSessions, deleteSession as deleteObSession, getSession as getObSession,
@@ -1247,14 +1248,16 @@ export function registerIpc(): void {
       const existed = hasPanelWindow()
       // 已经开着就只把它拎到前面：不能拿主窗口的快照盖掉浮窗里的最新状态
       if (!existed) obPanelSnapshot = snapshot || null
-      await openPanelWindow({ theme, anchor: bounds })
+      // 先挂「窗口没了」的回调再开窗：开窗过程中（页面加载那 200ms）如果真的挂了，
+      // 主窗口也得知道，否则会留下一个「以为还开着」的开关。
       onPanelGone(() => {
         obPanelSnapshot = null
-        // 用户直接关掉浮窗：主窗口那边同步收起来，不留一个「以为还开着」的开关
+        // 用户直接关掉浮窗：主窗口那边同步收起来
         if (win && !win.isDestroyed()) {
           try { win.webContents.send('obagent:ui', { kind: 'panel-closed' }) } catch { /* 窗口关闭中 */ }
         }
       })
+      await openPanelWindow({ theme, anchor: bounds })
       return { ok: true, pin: isPanelPinned() }
     } catch (err: any) {
       return { ok: false, error: String(err?.message || err) }

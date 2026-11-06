@@ -28,8 +28,11 @@ const DEF_W = 520
 const DEF_H = 660
 const MIN_W = 400
 const MIN_H = 380
-/** 允许窗口滑出屏幕多少像素：全滑出去就再也拖不回来了 */
-const KEEP_ON_SCREEN = 140
+/** 允许窗口滑出屏幕多少：全滑出去就再也拖不回来了（按宽度比例算，窄窗口也能抓回来） */
+const KEEP_RATIO = 0.6
+const KEEP_MIN = 320
+/** 纵向至少露出这么高（标题栏能点到） */
+const KEEP_Y = 160
 
 let panel: BrowserWindow | null = null
 let goneCb: (() => void) | null = null
@@ -87,10 +90,11 @@ function persistState(): void {
  */
 function clampBox(x: number, y: number, w: number, h: number): { x: number; y: number } {
   const area = screen.getDisplayMatching({ x, y, width: w, height: h }).workArea
-  const minX = area.x - w + KEEP_ON_SCREEN
-  const maxX = area.x + area.width - KEEP_ON_SCREEN
-  const minY = area.y - h + KEEP_ON_SCREEN
-  const maxY = area.y + area.height - KEEP_ON_SCREEN
+  const keepX = Math.min(KEEP_MIN, Math.round(w * KEEP_RATIO))
+  const minX = area.x - w + keepX
+  const maxX = area.x + area.width - keepX
+  const minY = area.y - h + KEEP_Y
+  const maxY = area.y + area.height - KEEP_Y
   return {
     x: Math.min(maxX, Math.max(minX, Math.round(x))),
     y: Math.min(maxY, Math.max(minY, Math.round(y)))
@@ -138,9 +142,14 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
   const w = Math.max(MIN_W, st.w)
   const h = Math.max(MIN_H, st.h)
   const a = opts.anchor
-  const fallbackX = a ? a.x + a.width - Math.min(200, a.width) : screen.getPrimaryDisplay().workArea.x + 80
-  const fallbackY = a ? a.y + 80 : screen.getPrimaryDisplay().workArea.y + 80
-  const pos = clampBox(Number.isFinite(st.x) ? st.x : fallbackX, Number.isFinite(st.y) ? st.y : fallbackY, w, h)
+  const area = screen.getDisplayMatching(a || screen.getPrimaryDisplay().workArea).workArea
+  // 第一次打开（没有存过位置）：贴着主窗口右侧、但**整窗必须落在工作区里**，
+  // 不能像以前那样只保证「露 140px」—— 那会让一半窗口跑到屏幕外面去。
+  const freshX = (a ? a.x + a.width - Math.min(200, a.width) : area.x + area.width - w - 60)
+  const freshY = (a ? Math.max(a.y, area.y + 40) : area.y + 80)
+  const fullyX = Math.max(area.x + 12, Math.min(area.x + area.width - w - 12, freshX))
+  const fullyY = Math.max(area.y + 12, Math.min(area.y + area.height - h - 12, freshY))
+  const pos = clampBox(Number.isFinite(st.x) ? st.x : fullyX, Number.isFinite(st.y) ? st.y : fullyY, w, h)
 
   // 打包后本文件被 esbuild 并进 dist/main/index.js，__dirname 与 index.ts 相同
   const indexHtml = path.join(__dirname, '../renderer/index.html')
@@ -175,6 +184,11 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
     }
   })
   panel = win
+  // 先在屏幕外建、屏外显示：透明窗口在 Windows 上的「第一帧」有时是白的，
+  // 让它在用户看不见的地方画完，再挪进视野，就不会有「白色背影」。
+  const offX = Math.min(...screen.getAllDisplays().map((d) => d.bounds.x)) - w - 200
+  let revealed = false
+  win.setPosition(offX, pos.y)
   win.setMenu(null)
   win.setAlwaysOnTop(st.pin, 'floating')
   // 任务栏里当成「另一个应用」而不是主窗口的一部分：不同 AppUserModelID
@@ -196,8 +210,8 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
   })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
-  win.on('moved', saveStateSoon)
-  win.on('resized', saveStateSoon)
+  win.on('moved', () => { if (revealed) saveStateSoon() })
+  win.on('resized', () => { if (revealed) saveStateSoon() })
   win.on('closed', () => {
     if (panel === win) panel = null
     const cb = goneCb
@@ -205,13 +219,37 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
     cb?.()
   })
 
+  // 关键：不在这里 show。
+  // ready-to-show 只是「首帧画完了」，而首帧是 index.html 里的启动遮罩
+  // （#boot-veil，浅色主题下是整屏 #f8f8f8）—— 透明窗口若现在露面，
+  // 用户第一眼看到的就是一块白底「背影」。等渲染层挂载完、遮罩已摘掉、
+  // 再来 hello 时才 show（见 ipc 的 obagent:panel:hello）。
   let resolveReady: () => void = () => {}
   const ready = new Promise<void>((resolve) => { resolveReady = resolve })
-  win.once('ready-to-show', () => {
-    win.show()
-    win.focus()
+  win.webContents.once('did-finish-load', () => {
+    // 屏外先显示，让它把内容画出来（此时用户看不到任何东西）
+    win.showInactive()
     resolveReady()
+    setTimeout(() => {
+      const cur = panelWindow()
+      if (!cur) return
+      revealed = true
+      cur.setPosition(pos.x, pos.y)
+      cur.focus()
+    }, 220)
   })
+  // 兜底：页面 3s 还没加载完也必须有个能看见的窗口
+  const showFallback = setTimeout(() => {
+    const cur = panelWindow()
+    if (!cur) return
+    if (!cur.isVisible()) cur.showInactive()
+    if (!revealed) {
+      revealed = true
+      cur.setPosition(pos.x, pos.y)
+      cur.focus()
+    }
+  }, 3000)
+  win.once('closed', () => clearTimeout(showFallback))
 
   void win
     .loadFile(indexHtml, { query: { panel: 'obagent', theme: opts.theme, nosplash: '1' } })
@@ -222,6 +260,13 @@ export function openPanelWindow(opts: OpenPanelOpts): Promise<BrowserWindow> {
     })
 
   return ready.then(() => win)
+}
+
+/** 兜底露面（正常路径在 did-finish-load 里已经显示过了） */
+function showPanelWindow(): void {
+  const w = panelWindow()
+  if (!w) return
+  if (!w.isVisible()) { w.show(); w.focus() }
 }
 
 export function closePanelWindow(): void {

@@ -109,22 +109,7 @@ export interface ObAgentSnapshot {
 
 const MODE_KEY = 'sqlpilot.obagent.mode'
 const LAYOUT_KEY = 'sqlpilot.obagent.layout'
-/** 上次是「独立窗口」还是「窗口内浮窗」：记住用户的用法，下次打开直接照做 */
-const DETACH_KEY = 'sqlpilot.obagent.detachedMode'
 
-function readDetachedPref(): boolean {
-  try {
-    return localStorage.getItem(DETACH_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-function saveDetachedPref(v: boolean): void {
-  try {
-    localStorage.setItem(DETACH_KEY, v ? '1' : '0')
-  } catch { /* 记不住只是下次要点一下 */ }
-}
 
 function readMode(): 'auto' | 'confirm' {
   try {
@@ -660,7 +645,7 @@ export async function detachObAgent(): Promise<void> {
     } else if (typeof (r as any).pin === 'boolean') {
       obAgent.pinned = (r as any).pin
     }
-    if (r?.ok) saveDetachedPref(true)
+
   } catch (e: any) {
     obAgent.detached = false
     obAgent.error = String(e?.message || e)
@@ -672,7 +657,6 @@ export async function dockObAgent(): Promise<void> {
   const snap = snapshotObAgent()
   try {
     await window.sqlpilot.obagentDock(snap)
-    saveDetachedPref(false)
   } catch { /* 窗口已经不在了 */ }
 }
 
@@ -708,8 +692,9 @@ export function openObAgent(o: OpenObAgentOptions): void {
   if (obAgent.detached) {
     // 已经脱离出去了：把人送到那个窗口去，别在主窗口里干等
     void window.sqlpilot.obagentPanelFocus()
-  } else if (readDetachedPref()) {
-    // 上次用的是独立窗口：这次直接开在任务栏那一格里
+  } else {
+    // 点「AI 排查」直接就应该是独立窗口：不再让用户先看到窗口内浮窗再点一次脱离。
+    // （点「停靠」仍然能临时收进主窗口，但下次打开还是独立窗口）
     void detachObAgent()
   }
 }
