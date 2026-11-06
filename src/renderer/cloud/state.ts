@@ -9,6 +9,17 @@ import { appMode } from '../app-mode'
 import { pushNotice } from '../store'
 import { METRIC_SETS, type MonitorScope } from './metrics'
 import type { EngineId } from './engines'
+import {
+  fanOut,
+  friendlyProbeError,
+  isOffline,
+  probeOf,
+  resetProbe,
+  shouldProbe,
+  skipProbe,
+  pruneProbes,
+  type ProbeBook
+} from './probe'
 
 export type CloudView =
   | 'overview'
@@ -71,6 +82,11 @@ export const cloud = reactive({
   access: 'ocp' as 'ocp' | 'direct',
   /** 直连模式下 clusterId → 所属平台 id（详情接口要按平台取） */
   directOf: {} as Record<number, string>,
+  /**
+   * 直连模式下**每套集群**的探测状态（平台 id → 记录）。
+   * 谁先回来谁先上屏；探不通的集群在这里留痕，其它模块不再跟它纠缠。
+   */
+  probes: {} as ProbeBook,
   /** 是否停在「选择数据库云平台」整页（进来了但还没选类型） */
   picking: true,
   /** 选完类型后的架构装配动画；null = 已经进到控制台 */
@@ -344,6 +360,7 @@ function resetOcpData(): void {
   cloud.platform.bundle = null
   cloud.error = ''
   cloud.directOf = {}
+  cloud.probes = {}
 }
 
 export async function loadPlatforms(): Promise<void> {
@@ -405,11 +422,20 @@ export async function setAccess(access: 'ocp' | 'direct'): Promise<void> {
   const list = platformsOf('ocp')
   cloud.activeId = list[0]?.id || ''
   if (!cloud.activeId) return
+  if (access === 'direct') {
+    // 切到直连是用户明确动作：全部重探一遍（probes 已在 resetOcpData 里清空）
+    await load({ manual: true })
+    return
+  }
   await checkStatus()
   if ((cloud.status as { ok?: boolean } | null)?.ok) await load()
 }
 
-/** 进入模块时的初始化：拉平台清单 → 探活 → 载入当前视图 */export async function initCloud(): Promise<void> {
+/**
+ * 进入模块时的初始化：拉平台清单 → 探活 → 载入当前视图。
+ * `manual` 用于错误页的「重试」：直连模式下把已判定不可用的集群也重新探一遍。
+ */
+export async function initCloud(opts: { manual?: boolean } = {}): Promise<void> {
   try {
     await loadPlatforms()
   } catch (e: any) {
@@ -449,6 +475,12 @@ export async function setAccess(access: 'ocp' | 'direct'): Promise<void> {
     return
   }
   if (cloud.vendor === 'oracle') return
+  // 直连：不做整体探活（那会把入口卡在一次 8s 的 ping 上，它恰好挂了还会整页报错），
+  // 直接进采集——每套集群各自探，谁先回来谁先上屏
+  if (cloud.access === 'direct') {
+    await load({ manual: !!opts.manual })
+    return
+  }
   await checkStatus()
   if (cloud.status?.ok) await load()
 }
@@ -456,6 +488,12 @@ export async function setAccess(access: 'ocp' | 'direct'): Promise<void> {
 export async function checkStatus(): Promise<void> {
   if (!cloud.activeId) return
   if (cloud.vendor === 'oracle') return
+  // 直连：整体状态由各集群的探测结果汇总（见 syncDirectStatus），
+  // 不再用第一条平台 ping 一次来代表全部——那一步本身就要等 8s 超时
+  if (cloud.access === 'direct') {
+    syncDirectStatus()
+    return
+  }
   cloud.status = { ok: false }
   const r = await window.sqlpilot.cloudStatus(cloud.activeId)
   cloud.status = { ok: r.ok, info: r.info, error: r.error, oracle: r.oracle }
@@ -466,6 +504,10 @@ export async function selectPlatform(id: string): Promise<void> {
   if (id === cloud.activeId) return
   cloud.activeId = id
   resetOcpData()
+  if (cloud.vendor === 'ocp' && cloud.access === 'direct') {
+    await load({ manual: true })
+    return
+  }
   await checkStatus()
   if (cloud.status?.ok) await load()
 }
@@ -640,7 +682,7 @@ export function accessNameOf(clusterId: number): string {
   return cloud.platforms.find((p) => p.id === pid)?.name || ''
 }
 
-function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOverview }[], multi: boolean): CloudOverview {
+function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOverview }[], multi: boolean, total = items.length): CloudOverview {
   const sum = items.reduce(
     (a, it) => ({
       clusters: a.clusters + it.data.kpis.clusters,
@@ -660,7 +702,10 @@ function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOvervie
   return {
     info: {
       version: items[0]?.data.info.version ?? '',
-      edition: multi ? `OceanBase 直连 · 已合并 ${items.length} 套集群` : (items[0]?.data.info.edition ?? ''),
+      // 有集群没探到时写「已合并 1/2 套」：只有一条数据时别让人以为是全部
+      edition: multi
+        ? `OceanBase 直连 · 已合并 ${items.length}${total > items.length ? `/${total}` : ''} 套集群`
+        : (items[0]?.data.info.edition ?? ''),
       buildTime: ''
     },
     kpis: sum,
@@ -672,13 +717,83 @@ function mergeOverviews(items: { platform: CloudPlatformView; data: CloudOvervie
   }
 }
 
+// ---------------------------------------------------------------- 直连：每套集群一条通道
+
+interface Plan {
+  /** 本轮要探的集群 */
+  probe: CloudPlatformView[]
+  /** 已判定不可用、本轮先搁置的集群 */
+  off: CloudPlatformView[]
+}
+
 /**
- * 直连模式的数据加载：把配置里所有直连平台各拉一遍再合并。
- * 单个平台连不上只跳过它并记一条告警文本，不影响其它集群的展示。
+ * 采集计划：按探测状态把集群分成两组。
+ *
+ * 不可用的（超时 / 连不上 / 用户确认跳过）不参与**任何模块**的采集——
+ * 否则每进一个页面都要再等它一次，健康集群的数据也跟着出不来。
  */
-async function loadDirect(my: number): Promise<void> {
+function planPlatforms(manual: boolean): Plan {
+  const probe: CloudPlatformView[] = []
+  const off: CloudPlatformView[] = []
+  for (const p of currentPlatforms()) {
+    if (shouldProbe(probeOf(cloud.probes, p.id), manual)) probe.push(p)
+    else off.push(p)
+  }
+  return { probe, off }
+}
+
+interface Fetched<T> {
+  ok: boolean
+  data?: T
+  error?: string
+}
+
+/**
+ * 每套集群一条独立通道：谁先回来谁先上屏，慢的不耽误快的。
+ * 具体语义（超时收尾、迟到补数据）见 probe.ts 的 fanOut；
+ * 这里只是把状态记录指到 cloud.probes，并顺手刷新整体状态。
+ */
+async function fanOutView<T>(
+  list: CloudPlatformView[],
+  run: (p: CloudPlatformView) => Promise<Fetched<T>>,
+  onData: (p: CloudPlatformView, data: T, late: boolean) => void
+): Promise<void> {
+  await fanOut(cloud.probes, list, run, onData, { onSettle: syncDirectStatus })
+}
+
+/**
+ * 直连多集群的整体状态：**任意一套连上就算在线**。
+ *
+ * 旧实现拿第一条平台做全局探活（ping + 能力探测），它一旦挂了整个控制台就成了
+ * 错误页——其它集群明明好好的也用不了，而且入口还要先白等一次超时。
+ */
+function syncDirectStatus(): void {
   const list = currentPlatforms()
   if (!list.length) {
+    cloud.status = null
+    return
+  }
+  const recs = list.map((p) => probeOf(cloud.probes, p.id))
+  if (recs.some((r) => r.state === 'ok')) {
+    cloud.status = { ok: true }
+    return
+  }
+  // 还有没探完的：先别下结论，否则每次刷新状态灯都要闪一下
+  if (recs.some((r) => r.state === 'idle' || r.probing)) {
+    cloud.status = null
+    return
+  }
+  const errs = list.map((p, i) => `${p.name}：${recs[i].error || '不可用'}`)
+  cloud.status = { ok: false, error: `所有直连集群都不可用 —— ${errs.join('；')}` }
+}
+
+/**
+ * 直连模式的数据加载：配置里的所有直连平台**各自**拉一遍，回来一份合并一份。
+ * 单个平台连不上只把它记进 probes，不影响其它集群的展示。
+ */
+async function loadDirect(my: number, manual: boolean): Promise<void> {
+  const all = currentPlatforms()
+  if (!all.length) {
     cloud.overview = null
     cloud.clusters = []
     cloud.tenants = []
@@ -686,12 +801,13 @@ async function loadDirect(my: number): Promise<void> {
     cloud.error = ''
     return
   }
-  const multi = list.length > 1
-  const failures: string[] = []
+  const multi = all.length > 1
+  // 接入被删掉后残留的探测记录顺手清掉
+  pruneProbes(cloud.probes, all.map((p) => p.id))
 
-  // 集群详情：按 clusterId 反查所属平台
+  // 集群详情：按 clusterId 反查所属平台（单条通道，无需合并）
   if (cloud.view === 'clusters' && cloud.clusterId !== null) {
-    const pid = cloud.directOf[cloud.clusterId] || list[0].id
+    const pid = cloud.directOf[cloud.clusterId] || all[0].id
     const r = await window.sqlpilot.cloudCluster(pid, cloud.clusterId)
     if (my !== seq) return
     if (!r.ok || !r.data) { cloud.error = r.error || '获取集群详情失败'; return }
@@ -699,94 +815,102 @@ async function loadDirect(my: number): Promise<void> {
     return
   }
 
-  if (cloud.view === 'overview') {
-    const parts = await Promise.all(
-      list.map((p) => window.sqlpilot.cloudOverview(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
-    )
+  const { probe, off } = planPlatforms(manual)
+  const offNote = off.length
+    ? `另有 ${off.length} 套集群未采集（${off.map((p) => p.name).join('、')}）：在「集群」页可重试`
+    : ''
+
+  /** 列表类视图收尾：写提示、更新时间与整体状态。`withNote=false` 用于本身就有异常清单的页面（集群页） */
+  const finish = (withNote = true): void => {
     if (my !== seq) return
-    const ok: { platform: CloudPlatformView; data: CloudOverview }[] = []
-    for (const x of parts) if (x.r.ok && x.r.data) ok.push({ platform: x.platform, data: x.r.data })
-    for (const bad of parts.filter((x) => !(x.r.ok && x.r.data))) failures.push(`${bad.platform.name}：${bad.r.error || '连接失败'}`)
-    if (!ok.length) { cloud.error = failures.join('；') || '获取直连集群概览失败'; return }
-    cloud.overview = mergeOverviews(ok, multi)
-    const map: Record<number, string> = {}
-    // 先写先赢：同一 clusterId 出现在多条平台时，以先加载的那条为准（与 platformsOf 去重顺序一致）
-    for (const it of ok) for (const c of it.data.clusters) if (!map[c.id]) map[c.id] = it.platform.id
-    cloud.directOf = map
-    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    cloud.error = withNote ? offNote : ''
+    cloud.updatedAt = Date.now()
+    syncDirectStatus()
+  }
+
+  if (cloud.view === 'overview') {
+    const got: { platform: CloudPlatformView; data: CloudOverview }[] = []
+    const sync = (): void => {
+      if (my !== seq) return
+      if (!got.length) { cloud.overview = null; return }
+      cloud.overview = mergeOverviews(got, multi, all.length)
+      const map: Record<number, string> = {}
+      // 先写先赢：同一 clusterId 出现在多条平台时，以先加载的那条为准（与 platformsOf 去重顺序一致）
+      for (const it of got) for (const c of it.data.clusters) if (!map[c.id]) map[c.id] = it.platform.id
+      cloud.directOf = map
+      cloud.updatedAt = Date.now()
+    }
+    await fanOutView(probe, (p) => window.sqlpilot.cloudOverview(p.id), (p, data) => {
+      const i = got.findIndex((x) => x.platform.id === p.id)
+      if (i >= 0) got[i] = { platform: p, data }
+      else got.push({ platform: p, data })
+      sync()
+    })
+    if (my !== seq) return
+    // 哪几套集群没取到，由总览顶部的提示条按集群列出（可单条重试 / 确认跳过）；
+    // 全局错误条只在「一条都没取到」时兜底，避免同一件事说两遍
+    cloud.error = got.length ? '' : '没有取到任何直连集群的数据'
+    cloud.updatedAt = Date.now()
+    syncDirectStatus()
     return
   }
 
   if (cloud.view === 'clusters') {
-    const parts = await Promise.all(
-      list.map((p) => window.sqlpilot.cloudClusters(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
-    )
-    if (my !== seq) return
     const map: Record<number, string> = {}
-    const all: CloudCluster[] = []
-    for (const it of parts) {
-      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
-      for (const c of it.r.data) {
-        map[c.id] = it.platform.id
-        all.push(c)
+    const seen = new Map<number, CloudCluster>()
+    await fanOutView(probe, (p) => window.sqlpilot.cloudClusters(p.id), (p, data) => {
+      for (const c of data) {
+        map[c.id] = p.id
+        seen.set(c.id, c)
       }
-    }
-    cloud.directOf = map
-    cloud.clusters = all
-    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+      if (my !== seq) return
+      cloud.directOf = { ...map }
+      cloud.clusters = [...seen.values()]
+    })
+    // 集群页自己就列着「哪套接入没取到 + 重试」，顶部再来一条是重复
+    finish(false)
     return
   }
 
   if (cloud.view === 'tenants') {
-    const parts = await Promise.all(
-      list.map((p) => window.sqlpilot.cloudTenants(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
-    )
-    if (my !== seq) return
-    const all: CloudTenant[] = []
     const map: Record<number, string> = { ...cloud.directOf }
-    for (const it of parts) {
-      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
-      for (const t of it.r.data) {
-        map[t.clusterId] = it.platform.id
-        all.push(t)
+    const list: CloudTenant[] = []
+    await fanOutView(probe, (p) => window.sqlpilot.cloudTenants(p.id), (p, data) => {
+      for (const t of data) {
+        map[t.clusterId] = p.id
+        list.push(t)
       }
-    }
-    cloud.directOf = map
-    cloud.tenants = all
-    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+      if (my !== seq) return
+      cloud.directOf = { ...map }
+      cloud.tenants = [...list]
+    })
+    finish()
     return
   }
 
   if (cloud.view === 'hosts') {
-    const parts = await Promise.all(
-      list.map((p) => window.sqlpilot.cloudHosts(p.id).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
-    )
-    if (my !== seq) return
-    const all: CloudHost[] = []
-    for (const it of parts) {
-      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
-      for (const h of it.r.data) {
-        all.push(multi ? { ...h, alias: `${it.platform.name} · ${h.alias}`, clusters: h.clusters.map((n: string) => `${it.platform.name} · ${n}`) } : h)
+    const list: CloudHost[] = []
+    await fanOutView(probe, (p) => window.sqlpilot.cloudHosts(p.id), (p, data) => {
+      for (const h of data) {
+        // 多套集群时同名主机（同 IP 不同集群）才需要前缀，单套保持原名
+        list.push(multi ? { ...h, alias: `${p.name} · ${h.alias}`, clusters: h.clusters.map((n: string) => `${p.name} · ${n}`) } : h)
       }
-    }
-    cloud.hosts = all
-    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+      if (my !== seq) return
+      cloud.hosts = [...list]
+    })
+    finish()
     return
   }
 
   if (cloud.view === 'alarms') {
-    const parts = await Promise.all(
-      list.map((p) => window.sqlpilot.cloudAlarms(p.id, { size: 200 }).then((r) => ({ platform: p, r })).catch((e) => ({ platform: p, r: { ok: false, error: String(e) } as any })))
-    )
-    if (my !== seq) return
-    const all: CloudAlarm[] = []
-    for (const it of parts) {
-      if (!it.r.ok || !it.r.data) { failures.push(`${it.platform.name}：${it.r.error || '连接失败'}`); continue }
-      all.push(...(it.r.data.items || []))
-    }
-    cloud.alarms = all
-    cloud.alarmTotal = all.length
-    cloud.error = failures.length ? `部分集群不可用：${failures.join('；')}` : ''
+    const list: CloudAlarm[] = []
+    await fanOutView(probe, (p) => window.sqlpilot.cloudAlarms(p.id, { size: 200 }), (p, data) => {
+      list.push(...(data.items || []))
+      if (my !== seq) return
+      cloud.alarms = [...list]
+      cloud.alarmTotal = list.length
+    })
+    finish()
     return
   }
 
@@ -794,7 +918,63 @@ async function loadDirect(my: number): Promise<void> {
   cloud.error = ''
 }
 
-export async function load(): Promise<void> {
+/**
+ * 当前不可用的直连集群（超时 / 连不上 / 用户确认跳过）。
+ * 总览据此出提示条，集群页据此列异常行并提供重试。
+ */
+export interface OfflineCluster {
+  platform: CloudPlatformView
+  /** 人话原因（直接上屏） */
+  error: string
+  /** 原始报错（放 title，方便拷给同事） */
+  raw: string
+  /** 用户已确认「暂不探测」 */
+  skipped: boolean
+}
+
+export function offlineClusters(): OfflineCluster[] {
+  return currentPlatforms()
+    .map((p) => ({ platform: p, rec: probeOf(cloud.probes, p.id) }))
+    .filter((x) => isOffline(x.rec))
+    .map((x) => {
+      const raw = x.rec.error || (x.rec.state === 'skipped' ? '已跳过探测' : '未探测到')
+      return {
+        platform: x.platform,
+        error: x.rec.state === 'skipped' && !x.rec.error ? '已跳过探测' : friendlyProbeError(raw),
+        raw,
+        skipped: x.rec.state === 'skipped'
+      }
+    })
+}
+
+/**
+ * 手动重试：清掉失败记录后整轮重探。
+ * 传 platformId 只重试那一套（提示条 / 集群页的「重试」），不传则全部重试。
+ */
+export async function retryClusters(platformId?: string): Promise<void> {
+  const ids = platformId ? [platformId] : offlineClusters().map((x) => x.platform.id)
+  for (const id of ids) resetProbe(cloud.probes, id)
+  await load({ manual: true })
+}
+
+/**
+ * 用户在提示条里点「知道了」：本次会话不再自动探这些集群。
+ * 只在内存里记，重启应用会重探一次——避免一次误点把一套修好的集群永久藏起来。
+ */
+export function skipOfflineClusters(): void {
+  const at = Date.now()
+  for (const x of offlineClusters()) skipProbe(cloud.probes, x.platform.id, at)
+  syncDirectStatus()
+}
+
+
+/**
+ * 加载当前视图。
+ *
+ * `manual` 只影响直连模式：手动（点刷新 / 重试）会把已判定不可用的集群重新探一遍，
+ * 自动（切页面 / 60s 静默刷新）不碰它们——否则每一轮都要再等它们超时。
+ */
+export async function load(opts: { manual?: boolean } = {}): Promise<void> {
   if (!cloud.activeId) return
   // Oracle 直连平台不走 OCP 接口：它的数据由 OracleConsole 按环境/分区分批查库
   if (cloud.vendor === 'oracle' || activePlatform()?.type === 'oracle') return
@@ -802,9 +982,9 @@ export async function load(): Promise<void> {
   cloud.loading = true
   cloud.error = ''
   try {
-    // OceanBase 的直连分支：多平台合并
+    // OceanBase 的直连分支：多平台合并，每套集群一条独立通道
     if (cloud.vendor === 'ocp' && cloud.access === 'direct') {
-      await loadDirect(my)
+      await loadDirect(my, !!opts.manual)
       return
     }
     if (cloud.view === 'overview') {

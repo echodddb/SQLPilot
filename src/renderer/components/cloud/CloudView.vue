@@ -106,7 +106,7 @@
           </div>
           <div class="ph-actions">
             <span v-if="cloud.updatedAt" class="updated">{{ updatedText }}</span>
-            <button class="tb" :disabled="cloud.loading || !platform" :title="isDirect ? '重新读取直连集群数据' : '重新读取 OCP 数据'" @click="load">
+            <button class="tb" :disabled="cloud.loading || !platform" :title="refreshTitle" @click="refresh">
               <span class="spin-ico" :class="{ spin: cloud.loading }">⟳</span> 刷新
             </button>
             <!-- 直连模式没有 OCP 控制台可跳，别留一个点了没反应的按钮 -->
@@ -147,7 +147,7 @@
           <div v-if="cloud.error" class="errbar">
             <span class="errbar-ico">!</span>
             <span>{{ cloud.error }}</span>
-            <button class="link" @click="load">重试</button>
+            <button class="link" @click="refresh">重试</button>
           </div>
           <OverviewPane v-if="cloud.view === 'overview'" />
           <ClustersPane v-else-if="cloud.view === 'clusters'" />
@@ -226,7 +226,7 @@ import CloudAi from './CloudAi.vue'
 import AiPickOverlay from './AiPickOverlay.vue'
 import OraAi from './OraAi.vue'
 import OracleConsole from './oracle/OracleConsole.vue'
-import { CLOUD_VIEWS, cloud, activePlatform, initCloud, load, platformsOf, selectPlatform, setVendor, setView, setAccess } from '../../cloud/state'
+import { CLOUD_VIEWS, cloud, activePlatform, initCloud, load, platformsOf, selectPlatform, setVendor, setView, setAccess, offlineClusters } from '../../cloud/state'
 import { ora, loadEnvs } from '../../cloud/oracle'
 import type { CloudView as CloudViewKey } from '../../cloud/state'
 import { ai, cancelPick, clearDraft, finishPick, openSession, toggleAi, toggleDraft } from '../../cloud/ai'
@@ -377,6 +377,8 @@ const inspectionHigh = computed(() => cloud.inspection.bundle?.tasks[0]?.high ||
 const clusterName = computed(() => (cloud.view === 'clusters' && cloud.cluster ? `· ${cloud.cluster.cluster.name}` : ''))
 const clusterCount = computed(() => cloud.overview?.kpis.clusters ?? cloud.clusters.length)
 const alarmCount = computed(() => cloud.overview?.kpis.alarms ?? cloud.alarms.length)
+/** 当前不可用的直连集群（超时 / 连不上 / 已跳过探测） */
+const directOffline = computed(() => offlineClusters())
 const criticalCount = computed(() => (cloud.overview?.kpis.alarmsCritical || 0) > 0)
 const statusTone = computed(() => {
   if (isOracle.value) {
@@ -384,6 +386,14 @@ const statusTone = computed(() => {
     const bad = ora.envs.filter((e) => e.error).length
     if (!ora.envs.length) return 'wait'
     return bad === ora.envs.length ? 'bad' : 'ok'
+  }
+  // 直连：按「几套集群可用」着色，一套挂了不该把整条状态染红
+  if (isDirect.value) {
+    const total = ocpPlatforms.value.length
+    if (!total) return 'idle'
+    const off = directOffline.value.length
+    if (!off) return !cloud.status ? 'wait' : cloud.status.ok ? 'ok' : 'bad'
+    return off >= total ? 'bad' : 'wait'
   }
   return !cloud.platforms.length ? 'idle' : !cloud.status ? 'wait' : cloud.status.ok ? 'ok' : 'bad'
 })
@@ -408,8 +418,11 @@ const statusText = computed(() => {
   // 之前统一写成「OCP 5.7.25-OceanBase-v4.3.5.2」，既挂了 OCP 的名字，串里还带着 MySQL 兼容前缀
   if (isDirect.value) {
     const vs = obVersions.value
-    if (!vs.length) return '直连 · 已连接'
-    return vs.length === 1 ? `OB v${vs[0]}` : `OB ${vs.length} 个版本`
+    const base = vs.length === 0 ? '直连 · 已连接' : vs.length === 1 ? `OB v${vs[0]}` : `OB ${vs.length} 个版本`
+    // 有集群没连上时把可用比例带上，别让人以为这就是全部
+    const total = ocpPlatforms.value.length
+    const off = directOffline.value.length
+    return off && total ? `${base} · ${total - off}/${total} 集群` : base
   }
   return `OCP ${cloud.status.info?.version || ''}`.trim()
 })
@@ -426,12 +439,20 @@ const statusTitle = computed(() => {
   return v ? `OCP 平台版本：${v}（来自 OCP 的 /api/v2/... 系统信息接口）` : 'OCP 平台连接状态'
 })
 const updatedText = computed(() => (cloud.updatedAt ? `更新于 ${relTime(new Date(cloud.updatedAt).toISOString())}` : ''))
+/** 手动刷新：直连模式下会连带重试已判定不可用的集群（自动刷新不碰它们） */
+const refreshTitle = computed(() =>
+  isDirect.value ? '重新读取直连集群数据（含重试未响应的集群）' : '重新读取 OCP 数据'
+)
+function refresh(): void {
+  void load({ manual: true })
+}
 
 function onPlatformChange(e: Event): void {
   void selectPlatform((e.target as HTMLSelectElement).value)
 }
 function retry(): void {
-  void initCloud()
+  // 错误页的重试是用户明确动作：直连模式下连不可用的集群一起重探
+  void initCloud({ manual: true })
 }
 async function openNative(): Promise<void> {
   if (platform.value) await window.sqlpilot.openExternal(platform.value.baseUrl)
@@ -456,7 +477,8 @@ onMounted(async () => {
   if (disposed) return
   timer = setInterval(() => {
     if (document.visibilityState !== 'visible') return
-    if (cloud.view === 'overview' && cloud.status?.ok && !cloud.loading) void load()
+    // 直连模式的状态由各集群探测结果汇总，可能是 null（还在探），不能拿它当开关
+    if (cloud.view === 'overview' && !cloud.loading && (isDirect.value || cloud.status?.ok)) void load()
   }, 60000)
 })
 onBeforeUnmount(() => {

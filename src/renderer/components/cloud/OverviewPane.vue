@@ -1,12 +1,41 @@
 <template>
-  <div class="ov" v-if="ov">
-    <div v-if="ov.warnings.length" class="ov-warn">
-      <span class="ov-warn-ico">!</span>
-      <div>
-        <b>部分数据未能取回</b>
-        <div v-for="w in ov.warnings" :key="w">{{ w }}</div>
+  <div class="ov">
+    <!-- 直连：没探到的集群单独列出来，别让它们拖住其它集群；确认后不再自动探测 -->
+    <div v-if="offline.length" class="ov-off">
+      <span class="ov-off-ico">!</span>
+      <div class="ov-off-body">
+        <b>
+          {{ offline.length }} 套集群没有取到数据
+          <span class="muted">（其余集群正常展示，这些集群也不再参与其它模块的采集）</span>
+        </b>
+        <div v-for="o in offline" :key="o.platform.id" class="ov-off-row">
+          <span class="dot bad"></span>
+          <span class="name">{{ o.platform.name }}</span>
+          <span class="addr mono">{{ o.platform.host }}:{{ o.platform.port }}</span>
+          <span class="err" :title="o.raw">{{ o.error }}</span>
+          <button class="link" :disabled="cloud.loading" @click="retryOne(o.platform.id)">重试</button>
+        </div>
+        <div class="ov-off-act">
+          <span class="tip">确认后本轮不再自动探测，需要时可在「集群」页手动重试。</span>
+          <button class="mini" @click="skipAll">知道了，暂不探测</button>
+        </div>
       </div>
     </div>
+    <!-- 已确认跳过的收敛成一行：不占地方，但信息不能丢 -->
+    <div v-else-if="skipped.length" class="ov-skip">
+      <span class="dot idle"></span>
+      已跳过 {{ skipped.length }} 套集群的探测（{{ skipped.map((x) => x.platform.name).join('、') }}）
+      <button class="link" @click="goClusters">去集群页处理 →</button>
+    </div>
+
+    <template v-if="ov">
+      <div v-if="ov.warnings.length" class="ov-warn">
+        <span class="ov-warn-ico">!</span>
+        <div>
+          <b>部分数据未能取回</b>
+          <div v-for="w in ov.warnings" :key="w">{{ w }}</div>
+        </div>
+      </div>
 
     <!-- KPI 磁贴（悬浮看采集来源） -->
     <div class="ov-kpis">
@@ -35,8 +64,8 @@
         <div class="kpi-value">{{ ov.kpis.cpuUsed }}<span class="kpi-unit">/{{ ov.kpis.cpuTotal }} 核</span></div>
         <div class="kpi-sub">占可分配总量 {{ ov.kpis.cpuTotal ? Math.round((ov.kpis.cpuUsed / ov.kpis.cpuTotal) * 100) : 0 }}%</div>
       </div>
-      <div class="kpi" data-src="info" data-ai="overview.kpi:ocp" data-ai-name="OCP 版本">
-        <div class="kpi-label">OCP 版本</div>
+      <div class="kpi" data-src="info" data-ai="overview.kpi:ocp" data-ai-name="OB 版本">
+        <div class="kpi-label">{{ isDirect ? 'OB 版本' : 'OCP 版本' }}</div>
         <div class="kpi-value sm">{{ ov.info.version || '—' }}</div>
         <div class="kpi-sub">{{ editionLabel }}</div>
       </div>
@@ -141,15 +170,19 @@
         </template>
       </div>
     </div>
+    </template>
+    <div v-else class="ov-loading">
+      <span class="spinner"></span>
+      {{ offline.length ? '其余集群的数据正在读取…' : '正在读取集群数据…' }}
+    </div>
   </div>
-  <div v-else class="ov-loading"><span class="spinner"></span>正在读取 OCP 概览…</div>
 </template>
 
 <script setup lang="ts">
 /** 云管平台 · 总览：把 OCP 的集群/主机/告警/任务收敛成一屏可判断的看板；悬浮卡片展示每块数据的采集链路 */
 import { computed, onMounted, ref, watch } from 'vue'
 import CapacityBar from './CapacityBar.vue'
-import { activePlatform, cloud, openCluster, setView } from '../../cloud/state'
+import { activePlatform, cloud, offlineClusters, openCluster, retryClusters, setView, skipOfflineClusters } from '../../cloud/state'
 import { directTasks } from '../../cloud/directTenant'
 import * as F from '../../cloud/parts'
 
@@ -158,6 +191,22 @@ const editionLabel = computed(() => (ov.value?.info.edition === 'ENTERPRISE' ? '
 
 /** 直连模式：任务面板改读本地操作日志 */
 const isDirect = computed(() => cloud.access === 'direct' || activePlatform()?.type === 'obdirect')
+
+// ---- 直连：某几套集群没探到 ----
+/** 还没确认跳过的：出提示条，可单条重试或整轮确认 */
+const offline = computed(() => offlineClusters().filter((x) => !x.skipped))
+/** 已确认跳过的：收成一行，不反复打扰，但别让人忘了它们还在 */
+const skipped = computed(() => offlineClusters().filter((x) => x.skipped))
+
+function retryOne(platformId: string): void {
+  void retryClusters(platformId)
+}
+function skipAll(): void {
+  skipOfflineClusters()
+}
+function goClusters(): void {
+  void setView('clusters')
+}
 const localOps = ref<{ id: string; at: number; action: string; target: string; message: string; ok: boolean; clusterName: string }[]>([])
 
 async function loadLocalOps(): Promise<void> {
@@ -214,6 +263,41 @@ function goTasks(): void { void setView(isDirect.value ? 'dtasks' : 'tasks') }
   display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; flex-shrink: 0; margin-top: 1px;
 }
 .ov-warn b { display: block; margin-bottom: 2px; }
+
+/* 直连：没探到的集群（黄条，可单条重试 / 整轮确认跳过） */
+.ov-off {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 9px;
+  background: var(--yellow-dim); border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent);
+  font-size: 12px; line-height: 1.6;
+}
+.ov-off-ico {
+  width: 16px; height: 16px; border-radius: 50%; background: var(--yellow); color: #1a1206;
+  display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; flex-shrink: 0; margin-top: 2px;
+}
+.ov-off-body { flex: 1; min-width: 0; }
+.ov-off-body b { font-weight: 600; }
+.ov-off-body .muted { color: var(--text-dim); font-weight: 400; }
+.ov-off-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; min-width: 0; }
+.ov-off-row .name { font-weight: 600; flex-shrink: 0; }
+.ov-off-row .addr { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+.ov-off-row .err { color: var(--text-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ov-off-row .link { flex-shrink: 0; }
+.ov-off-act { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.ov-off-act .tip { font-size: 11px; color: var(--text-dim); flex: 1; }
+.mini {
+  border: 1px solid var(--border-strong); background: var(--bg-input); color: var(--text);
+  border-radius: 7px; font-size: 11.5px; padding: 3px 10px; cursor: pointer; font-family: inherit; flex-shrink: 0;
+}
+.mini:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.mini:disabled { opacity: 0.5; cursor: not-allowed; }
+.link:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 已确认跳过：一行灰字，别占版面 */
+.ov-skip {
+  display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-dim);
+  padding: 7px 12px; border: 1px dashed var(--border); border-radius: 9px; background: var(--bg-card);
+}
+.ov-skip .link { margin-left: auto; }
 
 .ov-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .kpi {

@@ -55,6 +55,25 @@
           </tbody>
         </table>
       </div>
+
+      <!-- 直连：没探到的接入也要在这里露头，否则用户不知道少看了一套集群 -->
+      <div v-if="offline.length" class="off-box">
+        <div class="off-head">
+          <span class="off-ico">!</span>
+          <b>{{ offline.length }} 套接入没有取到集群数据</b>
+          <span class="hint">超时 / 连不上的接入已停止自动采集，修好后在这里重试</span>
+          <span style="flex: 1"></span>
+          <button class="mini" :disabled="cloud.loading" @click="retryAll">全部重试</button>
+        </div>
+        <div v-for="o in offline" :key="o.platform.id" class="off-row">
+          <span class="dot" :class="o.skipped ? 'idle' : 'bad'"></span>
+          <span class="off-name">{{ o.platform.name }}</span>
+          <span class="mono dim">{{ o.platform.host }}:{{ o.platform.port }}</span>
+          <span class="pill" :class="o.skipped ? 'gray' : 'bad'">{{ o.skipped ? '已跳过探测' : '不可用' }}</span>
+          <span class="off-err" :title="o.raw">{{ o.error }}</span>
+          <button class="mini" :disabled="cloud.loading" @click="retryOne(o.platform.id)">重试</button>
+        </div>
+      </div>
     </template>
 
     <!-- 详情 -->
@@ -189,7 +208,7 @@ import ClusterOps from './ClusterOps.vue'
 import ClusterCreate from './ClusterCreate.vue'
 import ClusterParams from './ClusterParams.vue'
 import TenantCreate from './TenantCreate.vue'
-import { cloud, openCluster, closeCluster, openTenant, accessNameOf } from '../../cloud/state'
+import { cloud, currentPlatforms, offlineClusters, openCluster, closeCluster, openTenant, accessNameOf, retryClusters } from '../../cloud/state'
 import {
   capacityTone, clusterMode, clusterStatus, fmtBytes, fmtTime, maybeTime, originLabel, tenantStatus
 } from '../../cloud/parts'
@@ -199,7 +218,16 @@ const tenantCreate = ref(false)
 const createOpen = ref(false)
 
 /** 多套直连接入才有「接入名称」这一列；单套时集群名已经能唯一标识 */
-const showAccess = computed(() => new Set(Object.values(cloud.directOf)).size > 1)
+const showAccess = computed(() => currentPlatforms().length > 1)
+
+/** 直连：没探到的接入（超时 / 连不上 / 已跳过），列在表格下方给重试入口 */
+const offline = computed(() => offlineClusters())
+function retryOne(platformId: string): void {
+  void retryClusters(platformId)
+}
+function retryAll(): void {
+  void retryClusters()
+}
 
 function worstTone(c: CloudCluster): string {
   const levels = c.alarms.levels.filter((x) => x.count > 0).map((x) => x.level)
@@ -242,6 +270,18 @@ function worstTone(c: CloudCluster): string {
 .ellipsis { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
 .empty { text-align: center; color: var(--text-faint); padding: 18px !important; }
 .empty-box { padding: 16px; color: var(--text-faint); font-size: 12px; border: 1px dashed var(--border); border-radius: 10px; }
+
+/* 直连：没探到的接入（不参与采集，但要在集群页留痕 + 给重试） */
+.off-box { border: 1px solid color-mix(in srgb, var(--yellow) 38%, transparent); background: var(--yellow-dim); border-radius: 11px; padding: 9px 12px; }
+.off-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.off-head .hint { color: var(--text-dim); font-size: 11px; }
+.off-ico {
+  width: 15px; height: 15px; border-radius: 50%; background: var(--yellow); color: #1a1206;
+  display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 10.5px; flex-shrink: 0;
+}
+.off-row { display: flex; align-items: center; gap: 9px; padding: 6px 0 2px; font-size: 11.5px; min-width: 0; }
+.off-name { font-weight: 600; flex-shrink: 0; }
+.off-err { flex: 1; min-width: 0; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pct { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); margin-left: 6px; }
 .pct.warn { color: var(--yellow); }
 .pct.bad { color: var(--red); }
